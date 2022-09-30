@@ -1,0 +1,20 @@
+image: golang:latest
+
+stages:
+  - validate
+  - build
+
+fmt:
+  stage: validate
+  script:
+    - make check-fmt
+
+vet:
+  stage: validate
+  script:
+    - make vet
+
+test:
+  stage: validate
+  script:
+    - make test
