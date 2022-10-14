@@ -21,6 +21,8 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
+	"strings"
 
 	"github.com/sassoftware/go-rpmutils/fileutil"
 )
@@ -39,7 +41,9 @@ const (
 	S_ISSOCK = 0140000 // Socket
 )
 
+// Extract the contents of a cpio stream from r to the destination directory dest
 func Extract(rs io.Reader, dest string) error {
+	dest = filepath.Clean(filepath.FromSlash(dest))
 	linkMap := make(map[int][]string)
 
 	stream := NewCpioStream(rs)
@@ -54,40 +58,40 @@ func Extract(rs io.Reader, dest string) error {
 			break
 		}
 
-		target := path.Join(dest, path.Clean(entry.Header.filename))
-		parent := path.Dir(target)
-
-		// Create the parent directory if it doesn't exist.
-		if _, err := os.Stat(parent); os.IsNotExist(err) {
-			if err := os.MkdirAll(parent, 0755); err != nil {
-				return err
-			}
+		// sanitize path
+		target := path.Clean(entry.Header.filename)
+		for strings.HasPrefix(target, "../") {
+			target = target[3:]
 		}
-
+		target = filepath.Join(dest, filepath.FromSlash(target))
+		if !strings.HasPrefix(target, dest+string(filepath.Separator)) && dest != target {
+			// this shouldn't happen due to the sanitization above but always check
+			return fmt.Errorf("invalid cpio path %q", entry.Header.filename)
+		}
+		// Create the parent directory if it doesn't exist.
+		parent := filepath.Dir(target)
+		if err := os.MkdirAll(parent, 0755); err != nil {
+			return err
+		}
 		// FIXME: Need a makedev implementation in go.
 
 		switch entry.Header.Mode() &^ 07777 {
 		case S_ISCHR:
-			logger.Debug("unpacking char device")
 			// FIXME: skipping due to lack of makedev.
 			continue
 		case S_ISBLK:
-			logger.Debug("unpacking block device")
 			// FIXME: skipping due to lack of makedev.
 			continue
 		case S_ISDIR:
-			logger.Debug("unpacking dir")
 			m := os.FileMode(entry.Header.Mode()).Perm()
 			if err := os.Mkdir(target, m); err != nil && !os.IsExist(err) {
 				return err
 			}
 		case S_ISFIFO:
-			logger.Debug("unpacking named pipe")
 			if err := fileutil.Mkfifo(target, uint32(entry.Header.Mode())); err != nil {
 				return err
 			}
 		case S_ISLNK:
-			logger.Debug("unpacking symlink")
 			buf := make([]byte, entry.Header.c_filesize)
 			if _, err := entry.payload.Read(buf); err != nil {
 				return err
@@ -96,10 +100,8 @@ func Extract(rs io.Reader, dest string) error {
 				return err
 			}
 		case S_ISREG:
-			logger.Debug("unpacking regular file")
 			// save hardlinks until after the taget is written
 			if entry.Header.c_nlink > 1 && entry.Header.c_filesize == 0 {
-				logger.Debug("regular file is a hard link")
 				l, ok := linkMap[entry.Header.c_ino]
 				if !ok {
 					l = make([]string, 0)
@@ -119,7 +121,6 @@ func Extract(rs io.Reader, dest string) error {
 				return err
 			}
 			if written != int64(entry.Header.c_filesize) {
-				logger.Debugf("written: %d, filesize: %d", written, entry.Header.c_filesize)
 				return fmt.Errorf("short write")
 			}
 			if err := f.Close(); err != nil {
