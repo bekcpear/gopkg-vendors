@@ -1,0 +1,4 @@
+.DS_Store
+main.wasm
+node_modules
+yarn.lock

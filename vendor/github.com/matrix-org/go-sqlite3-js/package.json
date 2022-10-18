@@ -1,0 +1,10 @@
+{
+  "name": "go-sqlite-js",
+  "version": "0.1.0",
+  "description": "go SQL driver for sql.js from go-wasm",
+  "main": "js/index.js",
+  "license": "Apache 2.0",
+  "dependencies": {
+    "sql.js": "^1.6.2"
+  }
+}
