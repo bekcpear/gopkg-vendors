@@ -14,6 +14,7 @@ import (
 	"nhooyr.io/websocket"
 	"tailscale.com/control/controlbase"
 	"tailscale.com/net/netutil"
+	"tailscale.com/net/wsconn"
 	"tailscale.com/types/key"
 )
 
@@ -82,6 +83,12 @@ func acceptWebsocket(ctx context.Context, w http.ResponseWriter, r *http.Request
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		Subprotocols:   []string{upgradeHeaderValue},
 		OriginPatterns: []string{"*"},
+		// Disable compression because we transmit Noise messages that are not
+		// compressible.
+		// Additionally, Safari has a broken implementation of compression
+		// (see https://github.com/nhooyr/websocket/issues/218) that makes
+		// enabling it actively harmful.
+		CompressionMode: websocket.CompressionDisabled,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("Could not accept WebSocket connection %v", err)
@@ -105,7 +112,7 @@ func acceptWebsocket(ctx context.Context, w http.ResponseWriter, r *http.Request
 		return nil, fmt.Errorf("decoding base64 handshake parameter: %v", err)
 	}
 
-	conn := websocket.NetConn(ctx, c, websocket.MessageBinary)
+	conn := wsconn.NetConn(ctx, c, websocket.MessageBinary)
 	nc, err := controlbase.Server(ctx, conn, private, init)
 	if err != nil {
 		conn.Close()

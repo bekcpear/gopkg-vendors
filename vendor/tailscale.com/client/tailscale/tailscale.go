@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 )
 
@@ -116,7 +115,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	return c.httpClient().Do(req)
 }
 
-// sendRequest add the authenication key to the request and sends it. It
+// sendRequest add the authentication key to the request and sends it. It
 // receives the response and reads up to 10MB of it.
 func (c *Client) sendRequest(req *http.Request) ([]byte, *http.Response, error) {
 	if !I_Acknowledge_This_API_Is_Unstable {
@@ -131,7 +130,7 @@ func (c *Client) sendRequest(req *http.Request) ([]byte, *http.Response, error) 
 
 	// Read response. Limit the response to 10MB.
 	body := io.LimitReader(resp.Body, maxReadSize+1)
-	b, err := ioutil.ReadAll(body)
+	b, err := io.ReadAll(body)
 	if len(b) > maxReadSize {
 		err = errors.New("API response too large")
 	}

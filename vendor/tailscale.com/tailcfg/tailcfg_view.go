@@ -21,7 +21,7 @@ import (
 	"tailscale.com/types/views"
 )
 
-//go:generate go run tailscale.com/cmd/cloner  -clonefunc=true -type=User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,DERPRegion,DERPMap,DERPNode,SSHRule,SSHPrincipal
+//go:generate go run tailscale.com/cmd/cloner  -clonefunc=true -type=User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,DERPRegion,DERPMap,DERPNode,SSHRule,SSHPrincipal,ControlDialPlan
 
 // View returns a readonly view of User.
 func (p *User) View() UserView {
@@ -173,6 +173,7 @@ func (v NodeView) MachineAuthorized() bool           { return v.ж.MachineAuthor
 func (v NodeView) Capabilities() views.Slice[string] { return views.SliceOf(v.ж.Capabilities) }
 func (v NodeView) ComputedName() string              { return v.ж.ComputedName }
 func (v NodeView) ComputedNameWithHost() string      { return v.ж.ComputedNameWithHost }
+func (v NodeView) DataPlaneAuditLogID() string       { return v.ж.DataPlaneAuditLogID }
 func (v NodeView) Equal(v2 NodeView) bool            { return v.ж.Equal(v2.ж) }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
@@ -203,6 +204,7 @@ var _NodeViewNeedsRegeneration = Node(struct {
 	ComputedName            string
 	computedHostIfDifferent string
 	ComputedNameWithHost    string
+	DataPlaneAuditLogID     string
 }{})
 
 // View returns a readonly view of Hostinfo.
@@ -250,19 +252,25 @@ func (v *HostinfoView) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-func (v HostinfoView) IPNVersion() string    { return v.ж.IPNVersion }
-func (v HostinfoView) FrontendLogID() string { return v.ж.FrontendLogID }
-func (v HostinfoView) BackendLogID() string  { return v.ж.BackendLogID }
-func (v HostinfoView) OS() string            { return v.ж.OS }
-func (v HostinfoView) OSVersion() string     { return v.ж.OSVersion }
-func (v HostinfoView) Desktop() opt.Bool     { return v.ж.Desktop }
-func (v HostinfoView) Package() string       { return v.ж.Package }
-func (v HostinfoView) DeviceModel() string   { return v.ж.DeviceModel }
-func (v HostinfoView) Hostname() string      { return v.ж.Hostname }
-func (v HostinfoView) ShieldsUp() bool       { return v.ж.ShieldsUp }
-func (v HostinfoView) ShareeNode() bool      { return v.ж.ShareeNode }
-func (v HostinfoView) GoArch() string        { return v.ж.GoArch }
-func (v HostinfoView) GoVersion() string     { return v.ж.GoVersion }
+func (v HostinfoView) IPNVersion() string     { return v.ж.IPNVersion }
+func (v HostinfoView) FrontendLogID() string  { return v.ж.FrontendLogID }
+func (v HostinfoView) BackendLogID() string   { return v.ж.BackendLogID }
+func (v HostinfoView) OS() string             { return v.ж.OS }
+func (v HostinfoView) OSVersion() string      { return v.ж.OSVersion }
+func (v HostinfoView) Container() opt.Bool    { return v.ж.Container }
+func (v HostinfoView) Env() string            { return v.ж.Env }
+func (v HostinfoView) Distro() string         { return v.ж.Distro }
+func (v HostinfoView) DistroVersion() string  { return v.ж.DistroVersion }
+func (v HostinfoView) DistroCodeName() string { return v.ж.DistroCodeName }
+func (v HostinfoView) Desktop() opt.Bool      { return v.ж.Desktop }
+func (v HostinfoView) Package() string        { return v.ж.Package }
+func (v HostinfoView) DeviceModel() string    { return v.ж.DeviceModel }
+func (v HostinfoView) Hostname() string       { return v.ж.Hostname }
+func (v HostinfoView) ShieldsUp() bool        { return v.ж.ShieldsUp }
+func (v HostinfoView) ShareeNode() bool       { return v.ж.ShareeNode }
+func (v HostinfoView) NoLogsNoSupport() bool  { return v.ж.NoLogsNoSupport }
+func (v HostinfoView) GoArch() string         { return v.ж.GoArch }
+func (v HostinfoView) GoVersion() string      { return v.ж.GoVersion }
 func (v HostinfoView) RoutableIPs() views.IPPrefixSlice {
 	return views.IPPrefixSliceOf(v.ж.RoutableIPs)
 }
@@ -282,12 +290,18 @@ var _HostinfoViewNeedsRegeneration = Hostinfo(struct {
 	BackendLogID    string
 	OS              string
 	OSVersion       string
+	Container       opt.Bool
+	Env             string
+	Distro          string
+	DistroVersion   string
+	DistroCodeName  string
 	Desktop         opt.Bool
 	Package         string
 	DeviceModel     string
 	Hostname        string
 	ShieldsUp       bool
 	ShareeNode      bool
+	NoLogsNoSupport bool
 	GoArch          string
 	GoVersion       string
 	RoutableIPs     []netip.Prefix
@@ -908,4 +922,58 @@ var _SSHPrincipalViewNeedsRegeneration = SSHPrincipal(struct {
 	UserLogin string
 	Any       bool
 	PubKeys   []string
+}{})
+
+// View returns a readonly view of ControlDialPlan.
+func (p *ControlDialPlan) View() ControlDialPlanView {
+	return ControlDialPlanView{ж: p}
+}
+
+// ControlDialPlanView provides a read-only view over ControlDialPlan.
+//
+// Its methods should only be called if `Valid()` returns true.
+type ControlDialPlanView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *ControlDialPlan
+}
+
+// Valid reports whether underlying value is non-nil.
+func (v ControlDialPlanView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v ControlDialPlanView) AsStruct() *ControlDialPlan {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+func (v ControlDialPlanView) MarshalJSON() ([]byte, error) { return json.Marshal(v.ж) }
+
+func (v *ControlDialPlanView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x ControlDialPlan
+	if err := json.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v ControlDialPlanView) Candidates() views.Slice[ControlIPCandidate] {
+	return views.SliceOf(v.ж.Candidates)
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ControlDialPlanViewNeedsRegeneration = ControlDialPlan(struct {
+	Candidates []ControlIPCandidate
 }{})

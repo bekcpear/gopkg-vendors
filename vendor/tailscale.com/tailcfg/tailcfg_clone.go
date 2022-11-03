@@ -95,6 +95,7 @@ var _NodeCloneNeedsRegeneration = Node(struct {
 	ComputedName            string
 	computedHostIfDifferent string
 	ComputedNameWithHost    string
+	DataPlaneAuditLogID     string
 }{})
 
 // Clone makes a deep copy of Hostinfo.
@@ -120,12 +121,18 @@ var _HostinfoCloneNeedsRegeneration = Hostinfo(struct {
 	BackendLogID    string
 	OS              string
 	OSVersion       string
+	Container       opt.Bool
+	Env             string
+	Distro          string
+	DistroVersion   string
+	DistroCodeName  string
 	Desktop         opt.Bool
 	Package         string
 	DeviceModel     string
 	Hostname        string
 	ShieldsUp       bool
 	ShareeNode      bool
+	NoLogsNoSupport bool
 	GoArch          string
 	GoVersion       string
 	RoutableIPs     []netip.Prefix
@@ -391,9 +398,26 @@ var _SSHPrincipalCloneNeedsRegeneration = SSHPrincipal(struct {
 	PubKeys   []string
 }{})
 
+// Clone makes a deep copy of ControlDialPlan.
+// The result aliases no memory with the original.
+func (src *ControlDialPlan) Clone() *ControlDialPlan {
+	if src == nil {
+		return nil
+	}
+	dst := new(ControlDialPlan)
+	*dst = *src
+	dst.Candidates = append(src.Candidates[:0:0], src.Candidates...)
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ControlDialPlanCloneNeedsRegeneration = ControlDialPlan(struct {
+	Candidates []ControlIPCandidate
+}{})
+
 // Clone duplicates src into dst and reports whether it succeeded.
 // To succeed, <src, dst> must be of types <*T, *T> or <*T, **T>,
-// where T is one of User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,DERPRegion,DERPMap,DERPNode,SSHRule,SSHPrincipal.
+// where T is one of User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,DERPRegion,DERPMap,DERPNode,SSHRule,SSHPrincipal,ControlDialPlan.
 func Clone(dst, src any) bool {
 	switch src := src.(type) {
 	case *User:
@@ -501,6 +525,15 @@ func Clone(dst, src any) bool {
 			*dst = *src.Clone()
 			return true
 		case **SSHPrincipal:
+			*dst = src.Clone()
+			return true
+		}
+	case *ControlDialPlan:
+		switch dst := dst.(type) {
+		case *ControlDialPlan:
+			*dst = *src.Clone()
+			return true
+		case **ControlDialPlan:
 			*dst = src.Clone()
 			return true
 		}
