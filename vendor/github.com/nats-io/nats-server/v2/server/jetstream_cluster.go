@@ -888,6 +888,9 @@ func (js *jetStream) monitorCluster() {
 	s.Debugf("Starting metadata monitor")
 	defer s.Debugf("Exiting metadata monitor")
 
+	// Make sure to stop the raft group on exit to prevent accidental memory bloat.
+	defer n.Stop()
+
 	const compactInterval = 2 * time.Minute
 	t := time.NewTicker(compactInterval)
 	defer t.Stop()
@@ -1713,6 +1716,9 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 
 	s.Debugf("Starting stream monitor for '%s > %s' [%s]", sa.Client.serviceAccount(), sa.Config.Name, n.Group())
 	defer s.Debugf("Exiting stream monitor for '%s > %s' [%s]", sa.Client.serviceAccount(), sa.Config.Name, n.Group())
+
+	// Make sure to stop the raft group on exit to prevent accidental memory bloat.
+	defer n.Stop()
 
 	// Make sure we do not leave the apply channel to fill up and block the raft layer.
 	defer func() {
@@ -3486,8 +3492,8 @@ func (js *jetStream) processClusterCreateConsumer(ca *consumerAssignment, state 
 			}
 			// If we look like we are scaling up, let's send our current state to the group.
 			sendState = len(ca.Group.Peers) > len(oca.Group.Peers) && leader
-			// Check if this is an update.
-			isConfigUpdate = reflect.DeepEqual(oca.Config, ca.Config)
+			// Signal that this is an update
+			isConfigUpdate = true
 		}
 		n := rg.node
 		js.mu.Unlock()
@@ -3575,7 +3581,7 @@ func (js *jetStream) processClusterCreateConsumer(ca *consumerAssignment, state 
 			// Single replica consumer, process manually here.
 			js.mu.Lock()
 			// Force response in case we think this is an update.
-			if isConfigUpdate {
+			if !js.metaRecovering && isConfigUpdate {
 				ca.responded = false
 			}
 			js.mu.Unlock()
@@ -3781,13 +3787,17 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 	defer s.grWG.Done()
 
 	if n == nil {
-		s.Warnf("No RAFT group for consumer")
+		s.Warnf("No RAFT group for '%s > %s > %s'", o.acc.Name, ca.Stream, ca.Name, n.Group())
 		return
 	}
+
 	qch, lch, aq, uch, ourPeerId := n.QuitC(), n.LeadChangeC(), n.ApplyQ(), o.updateC(), cc.meta.ID()
 
 	s.Debugf("Starting consumer monitor for '%s > %s > %s' [%s]", o.acc.Name, ca.Stream, ca.Name, n.Group())
 	defer s.Debugf("Exiting consumer monitor for '%s > %s > %s' [%s]", o.acc.Name, ca.Stream, ca.Name, n.Group())
+
+	// Make sure to stop the raft group on exit to prevent accidental memory bloat.
+	defer n.Stop()
 
 	const (
 		compactInterval = 2 * time.Minute
@@ -6111,7 +6121,8 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 		// We need to set the ephemeral here before replicating.
 		if !isDurableConsumer(cfg) {
 			// We chose to have ephemerals be R=1 unless stream is interest or workqueue.
-			if sa.Config.Retention == LimitsPolicy {
+			// Consumer can override.
+			if sa.Config.Retention == LimitsPolicy && cfg.Replicas <= 1 {
 				rg.Peers = []string{rg.Preferred}
 				rg.Name = groupNameForConsumer(rg.Peers, rg.Storage)
 			}
@@ -6620,6 +6631,14 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 	if err != nil && mset.clseq > 0 {
 		mset.clseq--
 	}
+
+	// Check to see if we are being overrun.
+	// TODO(dlc) - Make this a limit where we drop messages to protect ourselves, but allow to be configured.
+	const warnThreshold = 10_000
+	if mset.clseq-lseq > warnThreshold {
+		lerr := fmt.Errorf("JetStream stream '%s > %s' has high message lag", jsa.acc().Name, mset.cfg.Name)
+		s.RateLimitWarnf(lerr.Error())
+	}
 	mset.clMu.Unlock()
 
 	if err != nil {
@@ -6782,9 +6801,10 @@ func (mset *stream) processSnapshot(snap *streamSnapshot) (e error) {
 	qname := fmt.Sprintf("[ACC:%s] stream '%s' snapshot", mset.acc.Name, mset.cfg.Name)
 	mset.mu.Unlock()
 
-	// Make sure our state's first sequence is <= the leader's snapshot.
+	// See if our state's first sequence is >= the leader's snapshot.
+	// This signifies messages have been expired, purged, deleted and the leader no longer has them.
 	if snap.FirstSeq < state.FirstSeq {
-		return errFirstSequenceMismatch
+		sreq.FirstSeq = state.FirstSeq + 1
 	}
 
 	// Bug that would cause this to be empty on stream update.
@@ -6920,6 +6940,11 @@ RETRY:
 		mset.mu.Unlock()
 		if sreq == nil {
 			return nil
+		}
+		// See if our state's first sequence is >= the leader's snapshot.
+		// This signifies messages have been expired, purged, deleted and the leader no longer has them.
+		if snap.FirstSeq < state.FirstSeq {
+			sreq.FirstSeq = state.FirstSeq + 1
 		}
 		// Reset notion of lastRequested
 		lastRequested = sreq.LastSeq

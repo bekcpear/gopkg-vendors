@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/url"
-	"os"
 	"time"
 
 	iwe "github.com/Arceliar/ironwood/encrypted"
@@ -16,7 +15,6 @@ import (
 	"github.com/gologme/log"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/version"
-	//"github.com/yggdrasil-network/yggdrasil-go/src/crypto"
 )
 
 // The Core object represents the Yggdrasil node. You should create a Core
@@ -33,34 +31,40 @@ type Core struct {
 	public       ed25519.PublicKey
 	links        links
 	proto        protoHandler
-	log          *log.Logger
+	log          Logger
 	addPeerTimer *time.Timer
 	config       struct {
-		_peers             map[Peer]struct{}          // configurable after startup
+		_peers             map[Peer]*linkInfo         // configurable after startup
 		_listeners         map[ListenAddress]struct{} // configurable after startup
 		nodeinfo           NodeInfo                   // immutable after startup
 		nodeinfoPrivacy    NodeInfoPrivacy            // immutable after startup
-		ifname             IfName                     // immutable after startup
-		ifmtu              IfMTU                      // immutable after startup
 		_allowedPublicKeys map[[32]byte]struct{}      // configurable after startup
 	}
 }
 
-func New(secret ed25519.PrivateKey, opts ...SetupOption) (*Core, error) {
+func New(secret ed25519.PrivateKey, logger Logger, opts ...SetupOption) (*Core, error) {
+	c := &Core{
+		log: logger,
+	}
+	if name := version.BuildName(); name != "unknown" {
+		c.log.Infoln("Build name:", name)
+	}
+	if version := version.BuildVersion(); version != "unknown" {
+		c.log.Infoln("Build version:", version)
+	}
+	c.ctx, c.cancel = context.WithCancel(context.Background())
+	// Take a copy of the private key so that it is in our own memory space.
 	if len(secret) != ed25519.PrivateKeySize {
 		return nil, fmt.Errorf("private key is incorrect length")
 	}
-	c := &Core{
-		secret: secret,
-		public: secret.Public().(ed25519.PublicKey),
-		log:    log.New(os.Stdout, "", 0), // TODO: not this
-	}
-	c.ctx, c.cancel = context.WithCancel(context.Background())
+	c.secret = make(ed25519.PrivateKey, ed25519.PrivateKeySize)
+	copy(c.secret, secret)
+	c.public = secret.Public().(ed25519.PublicKey)
 	var err error
 	if c.PacketConn, err = iwe.NewPacketConn(c.secret); err != nil {
 		return nil, fmt.Errorf("error creating encryption: %w", err)
 	}
-	c.config._peers = map[Peer]struct{}{}
+	c.config._peers = map[Peer]*linkInfo{}
 	c.config._listeners = map[ListenAddress]struct{}{}
 	c.config._allowedPublicKeys = map[[32]byte]struct{}{}
 	for _, opt := range opts {
@@ -76,47 +80,29 @@ func New(secret ed25519.PrivateKey, opts ...SetupOption) (*Core, error) {
 	if err := c.proto.nodeinfo.setNodeInfo(c.config.nodeinfo, bool(c.config.nodeinfoPrivacy)); err != nil {
 		return nil, fmt.Errorf("error setting node info: %w", err)
 	}
-	c.addPeerTimer = time.AfterFunc(time.Minute, func() {
-		c.Act(nil, c._addPeerLoop)
-	})
-	if name := version.BuildName(); name != "unknown" {
-		c.log.Infoln("Build name:", name)
+	for listenaddr := range c.config._listeners {
+		u, err := url.Parse(string(listenaddr))
+		if err != nil {
+			c.log.Errorf("Invalid listener URI %q specified, ignoring\n", listenaddr)
+			continue
+		}
+		if _, err = c.links.listen(u, ""); err != nil {
+			c.log.Errorf("Failed to start listener %q: %s\n", listenaddr, err)
+		}
 	}
-	if version := version.BuildVersion(); version != "unknown" {
-		c.log.Infoln("Build version:", version)
-	}
+	c.Act(nil, c._addPeerLoop)
 	return c, nil
-}
-
-func (c *Core) _applyOption(opt SetupOption) {
-	switch v := opt.(type) {
-	case Peer:
-		c.config._peers[v] = struct{}{}
-	case ListenAddress:
-		c.config._listeners[v] = struct{}{}
-	case NodeInfo:
-		c.config.nodeinfo = v
-	case NodeInfoPrivacy:
-		c.config.nodeinfoPrivacy = v
-	case IfName:
-		c.config.ifname = v
-	case IfMTU:
-		c.config.ifmtu = v
-	case AllowedPublicKey:
-		pk := [32]byte{}
-		copy(pk[:], v)
-		c.config._allowedPublicKeys[pk] = struct{}{}
-	}
 }
 
 // If any static peers were provided in the configuration above then we should
 // configure them. The loop ensures that disconnected peers will eventually
 // be reconnected with.
 func (c *Core) _addPeerLoop() {
-	if c.addPeerTimer == nil {
+	select {
+	case <-c.ctx.Done():
 		return
+	default:
 	}
-
 	// Add peers from the Peers section
 	for peer := range c.config._peers {
 		go func(peer string, intf string) {
@@ -139,7 +125,7 @@ func (c *Core) _addPeerLoop() {
 func (c *Core) Stop() {
 	phony.Block(c, func() {
 		c.log.Infoln("Stopping...")
-		c._close()
+		_ = c._close()
 		c.log.Infoln("Stopped")
 	})
 }
@@ -147,12 +133,12 @@ func (c *Core) Stop() {
 // This function is unsafe and should only be ran by the core actor.
 func (c *Core) _close() error {
 	c.cancel()
+	c.links.shutdown()
 	err := c.PacketConn.Close()
 	if c.addPeerTimer != nil {
 		c.addPeerTimer.Stop()
 		c.addPeerTimer = nil
 	}
-	_ = c.links.stop()
 	return err
 }
 
@@ -204,4 +190,17 @@ func (c *Core) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		n -= 1
 	}
 	return
+}
+
+type Logger interface {
+	Printf(string, ...interface{})
+	Println(...interface{})
+	Infof(string, ...interface{})
+	Infoln(...interface{})
+	Warnf(string, ...interface{})
+	Warnln(...interface{})
+	Errorf(string, ...interface{})
+	Errorln(...interface{})
+	Debugf(string, ...interface{})
+	Debugln(...interface{})
 }

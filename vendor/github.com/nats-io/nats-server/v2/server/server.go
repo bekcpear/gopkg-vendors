@@ -1886,12 +1886,12 @@ func (s *Server) Shutdown() {
 	if s == nil {
 		return
 	}
+	// This is for JetStream R1 Pull Consumers to allow signaling
+	// that pending pull requests are invalid.
+	s.signalPullConsumers()
+
 	// Transfer off any raft nodes that we are a leader by stepping them down.
 	s.stepdownRaftNodes()
-
-	// This is for clustered JetStream and ephemeral consumers.
-	// No-op if not clustered or not running JetStream.
-	s.migrateEphemerals()
 
 	// Shutdown the eventing system as needed.
 	// This is done first to send out any messages for

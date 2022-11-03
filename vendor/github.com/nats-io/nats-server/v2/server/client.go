@@ -3927,7 +3927,8 @@ func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byt
 	// Now check to see if this account has mappings that could affect the service import.
 	// Can't use non-locked trick like in processInboundClientMsg, so just call into selectMappedSubject
 	// so we only lock once.
-	if nsubj, changed := si.acc.selectMappedSubject(to); changed {
+	nsubj, changed := si.acc.selectMappedSubject(to)
+	if changed {
 		c.pa.mapped = []byte(to)
 		to = nsubj
 	}
@@ -3982,6 +3983,10 @@ func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byt
 		c.pa.subject = []byte(to)
 	}
 	c.pa.reply = nrr
+
+	if changed && c.isMqtt() && c.pa.hdr > 0 {
+		c.srv.mqttStoreQoS1MsgForAccountOnNewSubject(c.pa.hdr, msg, si.acc.GetName(), to)
+	}
 
 	// FIXME(dlc) - Do L1 cache trick like normal client?
 	rr := si.acc.sl.Match(to)
@@ -4932,7 +4937,10 @@ func (c *client) reconnect() {
 		return
 	}
 	if c.route != nil {
-		retryImplicit = c.route.retry
+		// A route is marked as solicited if it was given an URL to connect to,
+		// which would be the case even with implicit (due to gossip), so mark this
+		// as a retry for a route that is solicited and not explicit.
+		retryImplicit = c.route.retry || (c.route.didSolicit && c.route.routeType == Implicit)
 	}
 	kind := c.kind
 	if kind == GATEWAY {

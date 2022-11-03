@@ -36,7 +36,6 @@ type stateResolverV2 struct {
 	authEventMap              map[string]*Event             // Map of all provided auth events
 	conflictedEventMap        map[string]*Event             // Map of all provided conflicted events
 	powerLevelContents        map[string]*PowerLevelContent // A cache of all power level contents
-	powerLevelMainline        []*Event                      // Power level events in mainline ordering
 	powerLevelMainlinePos     map[string]int                // Power level event positions in mainline
 	resolvedCreate            *Event                        // Resolved create event
 	resolvedPowerLevels       *Event                        // Resolved power level event
@@ -52,7 +51,7 @@ type stateResolverV2 struct {
 // function returns the resolved state, including unconflicted state events.
 func ResolveStateConflictsV2(
 	conflicted, unconflicted []*Event,
-	authEvents, authDifference []*Event,
+	authEvents []*Event,
 ) []*Event {
 	// Prepare the state resolver.
 	conflictedControlEvents := make([]*Event, 0, len(conflicted))
@@ -80,7 +79,7 @@ func ResolveStateConflictsV2(
 
 	// Get the full conflicted set, that is the conflicted events and the
 	// auth difference (events that don't appear in all auth chains).
-	fullConflictedSet := append(conflicted, authDifference...)
+	fullConflictedSet := append(conflicted, r.calculateAuthDifference()...)
 
 	// The full power set function returns the event and all of its auth
 	// events that also happen to appear in the conflicted set. This will
@@ -148,8 +147,7 @@ func ResolveStateConflictsV2(
 	// Then generate the mainline of power level events, order the remaining state
 	// events based on the mainline ordering and auth those too. The successfully
 	// authed events are also layered on top of the partial state.
-	r.powerLevelMainline = r.createPowerLevelMainline()
-	for pos, event := range r.powerLevelMainline {
+	for pos, event := range r.createPowerLevelMainline() {
 		r.powerLevelMainlinePos[event.EventID()] = pos
 	}
 	conflictedOthers = r.mainlineOrdering(conflictedOthers)
@@ -252,6 +250,66 @@ func isControlEvent(e *Event) bool {
 	// If we have reached this point then we have failed all checks and we don't
 	// count the event as a control event.
 	return false
+}
+
+func (r *stateResolverV2) calculateAuthDifference() []*Event {
+	authDifference := make([]*Event, 0, len(r.conflictedEventMap)*3)
+	authSets := make(map[string]map[string]*Event, len(r.conflictedEventMap))
+
+	// This function helps us to work out whether an event exists in one of the
+	// auth sets.
+	isInAuthList := func(k string, event *Event) bool {
+		events, ok := authSets[k]
+		if !ok {
+			return false
+		}
+		_, ok = events[event.EventID()]
+		return ok
+	}
+
+	// This function works out if an event exists in all of the auth sets.
+	isInAllAuthLists := func(event *Event) bool {
+		for k, event := range authSets[event.EventID()] {
+			if !isInAuthList(k, event) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// For each conflicted event, work out the auth chain iteratively.
+	var iter func(eventID string, event *Event)
+	iter = func(eventID string, event *Event) {
+		for _, authEventID := range event.AuthEventIDs() {
+			authEvent, ok := r.authEventMap[authEventID]
+			if !ok {
+				continue
+			}
+			if _, ok := authSets[eventID]; !ok {
+				authSets[eventID] = map[string]*Event{}
+			}
+			if _, ok := authSets[eventID][authEventID]; ok {
+				// Don't repeat work for events we've already iterated on.
+				continue
+			}
+			authSets[eventID][authEventID] = authEvent
+			iter(eventID, authEvent)
+		}
+	}
+	for conflictedEventID, conflictedEvent := range r.conflictedEventMap {
+		iter(conflictedEventID, conflictedEvent)
+	}
+
+	// Look through all of the auth events that we've been given and work out if
+	// there are any events which don't appear in all of the auth sets. If they
+	// don't then we add them to the auth difference.
+	for _, event := range r.authEventMap {
+		if !isInAllAuthLists(event) {
+			authDifference = append(authDifference, event)
+		}
+	}
+
+	return authDifference
 }
 
 // createPowerLevelMainline generates the mainline of power level events,
@@ -358,23 +416,27 @@ func (r *stateResolverV2) getFirstPowerLevelMainlineEvent(event *Event) (
 // accepted (authed) events and the second contains the rejected events.
 func (r *stateResolverV2) authAndApplyEvents(events []*Event) {
 	for _, event := range events {
-		// Collect together the auth events. We'll start by collecting the
-		// auth event IDs from the event itself. These are our fallback if
-		// no partial state events are known.
 		r.authProvider.Clear()
-		for _, authEventID := range event.AuthEventIDs() {
-			if authEvent := r.authEventMap[authEventID]; authEvent != nil {
-				_ = r.authProvider.AddEvent(authEvent)
-			}
-		}
 
 		// Now layer on the partial state events that we do know. This should
 		// mean that we make forward progress.
-		for _, event := range []*Event{
-			r.resolvedCreate, r.resolvedJoinRules, r.resolvedPowerLevels,
-			r.resolvedMembers[event.Sender()], r.resolvedThirdPartyInvites[event.Sender()],
-		} {
-			if event != nil {
+		needed := StateNeededForAuth([]*Event{event})
+		if event := r.resolvedCreate; needed.Create && event != nil {
+			_ = r.authProvider.AddEvent(event)
+		}
+		if event := r.resolvedJoinRules; needed.JoinRules && event != nil {
+			_ = r.authProvider.AddEvent(event)
+		}
+		if event := r.resolvedPowerLevels; needed.PowerLevels && event != nil {
+			_ = r.authProvider.AddEvent(event)
+		}
+		for _, needed := range needed.Member {
+			if event := r.resolvedMembers[needed]; event != nil {
+				_ = r.authProvider.AddEvent(event)
+			}
+		}
+		for _, needed := range needed.ThirdPartyInvite {
+			if event := r.resolvedThirdPartyInvites[needed]; event != nil {
 				_ = r.authProvider.AddEvent(event)
 			}
 		}
@@ -448,7 +510,7 @@ func (r *stateResolverV2) wrapPowerLevelEventsForSort(events []*Event) []*stateR
 	for i, event := range events {
 		block[i] = &stateResV2ConflictedPowerLevel{
 			powerLevel:     r.getPowerLevelFromAuthEvents(event),
-			originServerTS: int64(event.OriginServerTS()),
+			originServerTS: event.OriginServerTS(),
 			eventID:        event.EventID(),
 			event:          event,
 		}
@@ -462,10 +524,11 @@ func (r *stateResolverV2) wrapPowerLevelEventsForSort(events []*Event) []*stateR
 func (r *stateResolverV2) wrapOtherEventsForSort(events []*Event) []*stateResV2ConflictedOther {
 	block := make([]*stateResV2ConflictedOther, len(events))
 	for i, event := range events {
-		_, pos, _ := r.getFirstPowerLevelMainlineEvent(event)
+		_, pos, steps := r.getFirstPowerLevelMainlineEvent(event)
 		block[i] = &stateResV2ConflictedOther{
 			mainlinePosition: pos,
-			originServerTS:   int64(event.OriginServerTS()),
+			mainlineSteps:    steps,
+			originServerTS:   event.OriginServerTS(),
 			eventID:          event.EventID(),
 			event:            event,
 		}
