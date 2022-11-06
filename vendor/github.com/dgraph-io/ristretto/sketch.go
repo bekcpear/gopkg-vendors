@@ -53,8 +53,7 @@ func newCmSketch(numCounters int64) *cmSketch {
 	numCounters = next2Power(numCounters)
 	sketch := &cmSketch{mask: uint64(numCounters - 1)}
 	// Initialize rows of counters and seeds.
-	// Cryptographic precision not needed
-	source := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec
+	source := rand.New(rand.NewSource(time.Now().UnixNano()))
 	for i := 0; i < cmDepth; i++ {
 		sketch.seed[i] = source.Uint64()
 		sketch.rows[i] = newCmRow(numCounters)
