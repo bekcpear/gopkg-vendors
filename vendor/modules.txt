@@ -1,0 +1,111 @@
+# github.com/andybalholm/brotli v1.0.4
+## explicit; go 1.12
+github.com/andybalholm/brotli
+# github.com/cpuguy83/go-md2man/v2 v2.0.2
+## explicit; go 1.11
+github.com/cpuguy83/go-md2man/v2/md2man
+# github.com/go-sql-driver/mysql v1.6.0
+## explicit; go 1.10
+github.com/go-sql-driver/mysql
+# github.com/gofiber/fiber/v2 v2.36.0
+## explicit; go 1.16
+github.com/gofiber/fiber/v2
+github.com/gofiber/fiber/v2/internal/bytebufferpool
+github.com/gofiber/fiber/v2/internal/colorable
+github.com/gofiber/fiber/v2/internal/dictpool
+github.com/gofiber/fiber/v2/internal/fasttemplate
+github.com/gofiber/fiber/v2/internal/fwd
+github.com/gofiber/fiber/v2/internal/isatty
+github.com/gofiber/fiber/v2/internal/msgp
+github.com/gofiber/fiber/v2/internal/schema
+github.com/gofiber/fiber/v2/internal/uuid
+github.com/gofiber/fiber/v2/middleware/basicauth
+github.com/gofiber/fiber/v2/middleware/logger
+github.com/gofiber/fiber/v2/middleware/recover
+github.com/gofiber/fiber/v2/utils
+# github.com/golang-jwt/jwt/v4 v4.4.1
+## explicit; go 1.16
+github.com/golang-jwt/jwt/v4
+# github.com/google/uuid v1.2.0
+## explicit
+github.com/google/uuid
+# github.com/json-iterator/go v1.1.12
+## explicit; go 1.12
+github.com/json-iterator/go
+# github.com/klauspost/compress v1.15.0
+## explicit; go 1.15
+github.com/klauspost/compress/flate
+github.com/klauspost/compress/gzip
+github.com/klauspost/compress/zlib
+# github.com/lithammer/shortuuid/v3 v3.0.7
+## explicit; go 1.13
+github.com/lithammer/shortuuid/v3
+# github.com/modern-go/concurrent v0.0.0-20180228061459-e0a39a4cb421
+## explicit
+github.com/modern-go/concurrent
+# github.com/modern-go/reflect2 v1.0.2
+## explicit; go 1.12
+github.com/modern-go/reflect2
+# github.com/mritd/logger v0.0.6
+## explicit; go 1.17
+github.com/mritd/logger
+# github.com/russross/blackfriday/v2 v2.1.0
+## explicit
+github.com/russross/blackfriday/v2
+# github.com/sideshow/apns2 v0.23.0
+## explicit; go 1.15
+github.com/sideshow/apns2
+github.com/sideshow/apns2/payload
+github.com/sideshow/apns2/token
+# github.com/urfave/cli/v2 v2.11.1
+## explicit; go 1.18
+github.com/urfave/cli/v2
+# github.com/valyala/bytebufferpool v1.0.0
+## explicit
+github.com/valyala/bytebufferpool
+# github.com/valyala/fasthttp v1.38.0
+## explicit; go 1.15
+github.com/valyala/fasthttp
+github.com/valyala/fasthttp/fasthttputil
+github.com/valyala/fasthttp/reuseport
+github.com/valyala/fasthttp/stackless
+# github.com/valyala/tcplisten v1.0.0
+## explicit; go 1.12
+github.com/valyala/tcplisten
+# github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673
+## explicit
+github.com/xrash/smetrics
+# go.etcd.io/bbolt v1.3.5
+## explicit; go 1.12
+go.etcd.io/bbolt
+# go.uber.org/atomic v1.9.0
+## explicit; go 1.13
+go.uber.org/atomic
+# go.uber.org/multierr v1.7.0
+## explicit; go 1.14
+go.uber.org/multierr
+# go.uber.org/zap v1.20.0
+## explicit; go 1.13
+go.uber.org/zap
+go.uber.org/zap/buffer
+go.uber.org/zap/internal/bufferpool
+go.uber.org/zap/internal/color
+go.uber.org/zap/internal/exit
+go.uber.org/zap/zapcore
+# golang.org/x/net v0.0.0-20220403103023-749bd193bc2b
+## explicit; go 1.17
+golang.org/x/net/http/httpguts
+golang.org/x/net/http2
+golang.org/x/net/http2/hpack
+golang.org/x/net/idna
+# golang.org/x/sys v0.0.0-20220227234510-4e6760a101f9
+## explicit; go 1.17
+golang.org/x/sys/internal/unsafeheader
+golang.org/x/sys/unix
+golang.org/x/sys/windows
+# golang.org/x/text v0.3.7
+## explicit; go 1.17
+golang.org/x/text/secure/bidirule
+golang.org/x/text/transform
+golang.org/x/text/unicode/bidi
+golang.org/x/text/unicode/norm
