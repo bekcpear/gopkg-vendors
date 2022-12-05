@@ -210,8 +210,8 @@ func emitConv(f *Function, val Value, t_dst types.Type, source ast.Node) Value {
 	tset_src := typeutil.NewTypeSet(ut_src)
 
 	// Just a change of type, but not value or representation?
-	if tset_src.All(func(termSrc *typeparams.Term) bool {
-		return tset_dst.All(func(termDst *typeparams.Term) bool {
+	if tset_src.All(func(termSrc *types.Term) bool {
+		return tset_dst.All(func(termDst *types.Term) bool {
 			return isValuePreserving(termSrc.Type().Underlying(), termDst.Type().Underlying())
 		})
 	}) {
@@ -262,8 +262,8 @@ func emitConv(f *Function, val Value, t_dst types.Type, source ast.Node) Value {
 	}
 
 	// Conversion from slice to array pointer?
-	if tset_src.All(func(termSrc *typeparams.Term) bool {
-		return tset_dst.All(func(termDst *typeparams.Term) bool {
+	if tset_src.All(func(termSrc *types.Term) bool {
+		return tset_dst.All(func(termDst *types.Term) bool {
 			if slice, ok := termSrc.Type().Underlying().(*types.Slice); ok {
 				if ptr, ok := termDst.Type().Underlying().(*types.Pointer); ok {
 					if arr, ok := ptr.Elem().Underlying().(*types.Array); ok && types.Identical(slice.Elem(), arr.Elem()) {
@@ -282,8 +282,8 @@ func emitConv(f *Function, val Value, t_dst types.Type, source ast.Node) Value {
 	// A representation-changing conversion?
 	// At least one of {ut_src,ut_dst} must be *Basic.
 	// (The other may be []byte or []rune.)
-	ok1 := tset_src.Any(func(term *typeparams.Term) bool { _, ok := term.Type().Underlying().(*types.Basic); return ok })
-	ok2 := tset_dst.Any(func(term *typeparams.Term) bool { _, ok := term.Type().Underlying().(*types.Basic); return ok })
+	ok1 := tset_src.Any(func(term *types.Term) bool { _, ok := term.Type().Underlying().(*types.Basic); return ok })
+	ok2 := tset_dst.Any(func(term *types.Term) bool { _, ok := term.Type().Underlying().(*types.Basic); return ok })
 	if ok1 || ok2 {
 		c := &Convert{X: val}
 		c.setType(t_dst)
@@ -301,8 +301,6 @@ func emitStore(f *Function, addr, val Value, source ast.Node) *Store {
 		Addr: addr,
 		Val:  emitConv(f, val, deref(addr.Type()), source),
 	}
-	// make sure we call getMem after the call to emitConv, which may
-	// itself update the memory state
 	f.emit(s, source)
 	return s
 }
@@ -489,7 +487,60 @@ func zeroValue(f *Function, t types.Type, source ast.Node) Value {
 	return emitConst(f, zeroConst(t))
 }
 
+type constKey struct {
+	typ   types.Type
+	value constant.Value
+}
+
 func emitConst(f *Function, c Constant) Constant {
-	f.consts = append(f.consts, c)
-	return c
+	if f.consts == nil {
+		f.consts = map[constKey]constValue{}
+	}
+
+	typ := c.Type()
+	var val constant.Value
+	switch c := c.(type) {
+	case *Const:
+		val = c.Value
+	case *ArrayConst, *GenericConst:
+		// These can only represent zero values, so all we need is the type
+	case *AggregateConst:
+		candidates, _ := f.aggregateConsts.At(c.typ)
+		for _, candidate := range candidates {
+			if c.equal(candidate) {
+				return candidate
+			}
+		}
+
+		for i := range c.Values {
+			c.Values[i] = emitConst(f, c.Values[i].(Constant))
+		}
+
+		c.setBlock(f.Blocks[0])
+		rands := c.Operands(nil)
+		updateOperandsReferrers(c, rands)
+		candidates = append(candidates, c)
+		f.aggregateConsts.Set(c.typ, candidates)
+		return c
+
+	default:
+		panic(fmt.Sprintf("unexpected type %T", c))
+	}
+	k := constKey{
+		typ:   typ,
+		value: val,
+	}
+	dup, ok := f.consts[k]
+	if ok {
+		return dup.c
+	} else {
+		c.setBlock(f.Blocks[0])
+		f.consts[k] = constValue{
+			c:   c,
+			idx: len(f.consts),
+		}
+		rands := c.Operands(nil)
+		updateOperandsReferrers(c, rands)
+		return c
+	}
 }

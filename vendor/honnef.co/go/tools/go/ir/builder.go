@@ -669,17 +669,24 @@ func (b *builder) expr0(fn *Function, e ast.Expr, tv types.TypeAndValue) Value {
 		}
 
 	case *ast.SliceExpr:
-		var low, high, max Value
 		var x Value
-		switch typeutil.CoreType(fn.Pkg.typeOf(e.X)).Underlying().(type) {
-		case *types.Array:
-			// Potentially escaping.
-			x = b.addr(fn, e.X, true).address(fn)
-		case *types.Basic, *types.Slice, *types.Pointer: // *array
+		if core := typeutil.CoreType(fn.Pkg.typeOf(e.X)); core != nil {
+			switch core.Underlying().(type) {
+			case *types.Array:
+				// Potentially escaping.
+				x = b.addr(fn, e.X, true).address(fn)
+			case *types.Basic, *types.Slice, *types.Pointer: // *array
+				x = b.expr(fn, e.X)
+			default:
+				panic("unreachable")
+			}
+		} else {
+			// We're indexing a string | []byte. Note that other combinations such as []byte | [4]byte are currently not
+			// allowed by the language.
 			x = b.expr(fn, e.X)
-		default:
-			panic("unreachable")
 		}
+
+		var low, high, max Value
 		if e.High != nil {
 			high = b.expr(fn, e.High)
 		}
@@ -712,8 +719,7 @@ func (b *builder) expr0(fn *Function, e ast.Expr, tv types.TypeAndValue) Value {
 			if _, ok := obj.(*types.Var); ok {
 				return emitLoad(fn, v, e) // var (address)
 			}
-			instances := typeparams.GetInstances(fn.Pkg.info)
-			if instance, ok := instances[e]; ok {
+			if instance, ok := fn.Pkg.info.Instances[e]; ok {
 				// Instantiated generic function
 				return makeInstance(fn.Prog, v.(*Function), instance.Type.(*types.Signature), instance.TypeArgs)
 			}
@@ -830,7 +836,7 @@ func (b *builder) expr0(fn *Function, e ast.Expr, tv types.TypeAndValue) Value {
 			panic("unexpected container type in IndexExpr: " + t.String())
 		}
 
-	case *typeparams.IndexListExpr:
+	case *ast.IndexListExpr:
 		// Instantiating a generic function
 		return b.expr(fn, e.X)
 
@@ -1149,8 +1155,8 @@ func (b *builder) arrayLen(fn *Function, elts []ast.Expr) int64 {
 // variables being updated, as in the second line below,
 //	x := T{a: 1}
 //	x = T{a: x.a}
-// all the reads must occur before all the writes.  Thus all stores to
-// loc are emitted to the storebuf sb for later execution.
+// all the reads must occur before all the writes. This is implicitly handled by the write buffering effected by
+// compositeElement.
 //
 // A CompositeLit may have pointer type only in the recursive (nested)
 // case when the type name is implicit.  e.g. in []*T{{}}, the inner
@@ -1158,35 +1164,52 @@ func (b *builder) arrayLen(fn *Function, elts []ast.Expr) int64 {
 // In that case, addr must hold a T, not a *T.
 //
 func (b *builder) compLit(fn *Function, addr Value, e *ast.CompositeLit, isZero bool, sb *storebuf) {
+	// Even though we no longer need storebuf for nested composite literals (because compositeElements act as buffers
+	// themselves), we still need storebuf for things like multiple assignment, e.g. 't.F1, t.F2 = T2{1}, T2{t.F1.X}'
+
 	typ := deref(fn.Pkg.typeOf(e))
 	switch t := typeutil.CoreType(typ).(type) {
 	case *types.Struct:
-		if !isZero && len(e.Elts) != t.NumFields() {
-			// memclear
-			sb.store(&address{addr, nil}, zeroValue(fn, deref(addr.Type()), e), e)
-			isZero = true
-		}
-		for i, e := range e.Elts {
-			fieldIndex := i
-			if kv, ok := e.(*ast.KeyValueExpr); ok {
-				fname := kv.Key.(*ast.Ident).Name
-				for i, n := 0, t.NumFields(); i < n; i++ {
-					sf := t.Field(i)
-					if sf.Name() == fname {
-						fieldIndex = i
-						e = kv.Value
-						break
+		lvalue := &address{addr: addr, expr: e}
+		if len(e.Elts) == 0 {
+			if !isZero {
+				sb.store(lvalue, zeroValue(fn, deref(addr.Type()), e), e)
+			}
+		} else {
+			v := &CompositeValue{
+				Values: make([]Value, t.NumFields()),
+			}
+			for i := 0; i < t.NumFields(); i++ {
+				v.Values[i] = emitConst(fn, zeroConst(t.Field(i).Type()))
+			}
+			v.setType(typ)
+
+			for i, e := range e.Elts {
+				fieldIndex := i
+				if kv, ok := e.(*ast.KeyValueExpr); ok {
+					fname := kv.Key.(*ast.Ident).Name
+					for i, n := 0, t.NumFields(); i < n; i++ {
+						sf := t.Field(i)
+						if sf.Name() == fname {
+							fieldIndex = i
+							e = kv.Value
+							break
+						}
 					}
 				}
+
+				ce := &compositeElement{
+					cv:   v,
+					idx:  fieldIndex,
+					t:    t.Field(fieldIndex).Type(),
+					expr: e,
+				}
+				b.assign(fn, ce, e, isZero, sb, e)
+				v.Bitmap.SetBit(&v.Bitmap, fieldIndex, 1)
+				v.NumSet++
 			}
-			sf := t.Field(fieldIndex)
-			faddr := &FieldAddr{
-				X:     addr,
-				Field: fieldIndex,
-			}
-			faddr.setType(types.NewPointer(sf.Type()))
-			fn.emit(faddr, e)
-			b.assign(fn, &address{addr: faddr, expr: e}, e, isZero, sb, e)
+			fn.emit(v, e)
+			sb.store(lvalue, v, e)
 		}
 
 	case *types.Array, *types.Slice:
@@ -1200,43 +1223,60 @@ func (b *builder) compLit(fn *Function, addr Value, e *ast.CompositeLit, isZero 
 		case *types.Array:
 			at = t
 			array = addr
-
-			if !isZero && int64(len(e.Elts)) != at.Len() {
-				// memclear
-				sb.store(&address{array, nil}, zeroValue(fn, deref(array.Type()), e), e)
-			}
 		}
 
-		var idx *Const
-		for _, e := range e.Elts {
-			if kv, ok := e.(*ast.KeyValueExpr); ok {
-				idx = b.expr(fn, kv.Key).(*Const)
-				e = kv.Value
-			} else {
-				var idxval int64
-				if idx != nil {
-					idxval = idx.Int64() + 1
+		var final Value
+		if len(e.Elts) == 0 {
+			if !isZero {
+				zc := emitConst(fn, zeroConst(at))
+				final = zc
+			}
+		} else {
+			v := &CompositeValue{
+				Values: make([]Value, at.Len()),
+			}
+			zc := emitConst(fn, zeroConst(at.Elem()))
+			for i := range v.Values {
+				v.Values[i] = zc
+			}
+			v.setType(at)
+
+			var idx *Const
+			for _, e := range e.Elts {
+				if kv, ok := e.(*ast.KeyValueExpr); ok {
+					idx = b.expr(fn, kv.Key).(*Const)
+					e = kv.Value
+				} else {
+					var idxval int64
+					if idx != nil {
+						idxval = idx.Int64() + 1
+					}
+					idx = emitConst(fn, intConst(idxval)).(*Const)
 				}
-				idx = emitConst(fn, intConst(idxval)).(*Const)
-			}
-			iaddr := &IndexAddr{
-				X:     array,
-				Index: idx,
-			}
-			iaddr.setType(types.NewPointer(at.Elem()))
-			fn.emit(iaddr, e)
-			if t != at { // slice
-				// backing array is unaliased => storebuf not needed.
-				b.assign(fn, &address{addr: iaddr, expr: e}, e, true, nil, e)
-			} else {
-				b.assign(fn, &address{addr: iaddr, expr: e}, e, true, sb, e)
-			}
-		}
 
+				iaddr := &compositeElement{
+					cv:   v,
+					idx:  int(idx.Int64()),
+					t:    at.Elem(),
+					expr: e,
+				}
+
+				b.assign(fn, iaddr, e, true, sb, e)
+				v.Bitmap.SetBit(&v.Bitmap, int(idx.Int64()), 1)
+				v.NumSet++
+			}
+			final = v
+			fn.emit(v, e)
+		}
 		if t != at { // slice
+			if final != nil {
+				sb.store(&address{addr: array}, final, e)
+			}
 			s := &Slice{X: array}
 			s.setType(typ)
 			sb.store(&address{addr: addr, expr: e}, fn.emit(s, e), e)
+		} else if final != nil {
+			sb.store(&address{addr: array, expr: e}, final, e)
 		}
 
 	case *types.Map:
@@ -2324,7 +2364,7 @@ start:
 			block = fn.labelledBlock(s.Label)._goto
 		}
 		j := emitJump(fn, block, s)
-		j.Comment = s.Tok.String()
+		j.comment = s.Tok.String()
 		fn.currentBlock = fn.newBasicBlock("unreachable")
 
 	case *ast.BlockStmt:

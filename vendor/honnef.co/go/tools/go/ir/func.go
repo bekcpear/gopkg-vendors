@@ -10,13 +10,15 @@ import (
 	"bytes"
 	"fmt"
 	"go/ast"
-	"go/constant"
 	"go/format"
 	"go/token"
 	"go/types"
 	"io"
 	"os"
+	"sort"
 	"strings"
+
+	"honnef.co/go/tools/go/types/typeutil"
 )
 
 // addEdge adds a control-flow graph edge from from to to.
@@ -366,141 +368,85 @@ func numberNodes(f *Function) {
 	}
 }
 
-// buildReferrers populates the def/use information in all non-nil
-// Value.Referrers slice.
-// Precondition: all such slices are initially empty.
-func buildReferrers(f *Function) {
-	var rands []*Value
-	for _, b := range f.Blocks {
-		for _, instr := range b.Instrs {
-			rands = instr.Operands(rands[:0]) // recycle storage
-			for _, rand := range rands {
-				if r := *rand; r != nil {
-					if ref := r.Referrers(); ref != nil {
-						if len(*ref) == 0 {
-							// per median, each value has two referrers, so we can avoid one call into growslice
-							//
-							// Note: we experimented with allocating
-							// sequential scratch space, but we
-							// couldn't find a value that gave better
-							// performance than making many individual
-							// allocations
-							*ref = make([]Instruction, 1, 2)
-							(*ref)[0] = instr
-						} else {
-							*ref = append(*ref, instr)
-						}
-					}
+func updateOperandsReferrers(instr Instruction, ops []*Value) {
+	for _, op := range ops {
+		if r := *op; r != nil {
+			if refs := (*op).Referrers(); refs != nil {
+				if len(*refs) == 0 {
+					// per median, each value has two referrers, so we can avoid one call into growslice
+					//
+					// Note: we experimented with allocating
+					// sequential scratch space, but we
+					// couldn't find a value that gave better
+					// performance than making many individual
+					// allocations
+					*refs = make([]Instruction, 1, 2)
+					(*refs)[0] = instr
+				} else {
+					*refs = append(*refs, instr)
 				}
 			}
 		}
 	}
 }
 
+// buildReferrers populates the def/use information in all non-nil
+// Value.Referrers slice.
+// Precondition: all such slices are initially empty.
+func buildReferrers(f *Function) {
+	var rands []*Value
+
+	for _, b := range f.Blocks {
+		for _, instr := range b.Instrs {
+			rands = instr.Operands(rands[:0]) // recycle storage
+			updateOperandsReferrers(instr, rands)
+		}
+	}
+
+	for _, c := range f.consts {
+		rands = c.c.Operands(rands[:0])
+		updateOperandsReferrers(c.c, rands)
+	}
+}
+
 func (f *Function) emitConsts() {
-	if len(f.Blocks) == 0 {
+	defer func() {
 		f.consts = nil
+		f.aggregateConsts = typeutil.Map[[]*AggregateConst]{}
+	}()
+
+	if len(f.Blocks) == 0 {
 		return
 	}
 
 	// TODO(dh): our deduplication only works on booleans and
 	// integers. other constants are represented as pointers to
 	// things.
-	if len(f.consts) == 0 {
-		return
-	} else if len(f.consts) <= 32 {
-		f.emitConstsFew()
-	} else {
-		f.emitConstsMany()
-	}
-}
-
-func (f *Function) emitConstsFew() {
-	dedup := make([]Constant, 0, 32)
+	head := make([]constValue, 0, len(f.consts))
 	for _, c := range f.consts {
-		if len(*c.Referrers()) == 0 {
-			continue
-		}
-		found := false
-		for _, d := range dedup {
-			if c.equal(d) {
-				replaceAll(c, d)
-				found = true
-				break
-			}
-		}
-		if !found {
-			dedup = append(dedup, c)
-		}
-	}
-
-	instrs := make([]Instruction, len(f.Blocks[0].Instrs)+len(dedup))
-	for i, c := range dedup {
-		instrs[i] = c
-		c.setBlock(f.Blocks[0])
-	}
-	copy(instrs[len(dedup):], f.Blocks[0].Instrs)
-	f.Blocks[0].Instrs = instrs
-	f.consts = nil
-}
-
-func (f *Function) emitConstsMany() {
-	type constKey struct {
-		typ   types.Type
-		value constant.Value
-	}
-
-	m := make(map[constKey]Value, len(f.consts))
-	areNil := 0
-	for i, c := range f.consts {
-		if len(*c.Referrers()) == 0 {
-			f.consts[i] = nil
-			areNil++
-			continue
-		}
-
-		var typ types.Type
-		var val constant.Value
-		switch c := c.(type) {
-		case *Const:
-			typ = c.typ
-			val = c.Value
-		case *ArrayConst:
-			// ArrayConst can only encode zero constants, so all we need is the type
-			typ = c.typ
-		case *AggregateConst:
-			// ArrayConst can only encode zero constants, so all we need is the type
-			typ = c.typ
-		case *GenericConst:
-			typ = c.typ
-		default:
-			panic(fmt.Sprintf("unexpected type %T", c))
-		}
-		k := constKey{
-			typ:   typ,
-			value: val,
-		}
-		if dup, ok := m[k]; !ok {
-			m[k] = c
+		if len(*c.c.Referrers()) == 0 {
+			// TODO(dh): killing a const may make other consts dead, too
+			killInstruction(c.c)
 		} else {
-			f.consts[i] = nil
-			areNil++
-			replaceAll(c, dup)
+			head = append(head, c)
 		}
 	}
+	sort.Slice(head, func(i, j int) bool {
+		return head[i].idx < head[j].idx
+	})
+	entry := f.Blocks[0]
+	instrs := make([]Instruction, 0, len(entry.Instrs)+len(head))
+	for _, c := range head {
+		instrs = append(instrs, c.c)
+	}
+	f.aggregateConsts.Iterate(func(key types.Type, value []*AggregateConst) {
+		for _, c := range value {
+			instrs = append(instrs, c)
+		}
+	})
 
-	instrs := make([]Instruction, len(f.Blocks[0].Instrs)+len(f.consts)-areNil)
-	i := 0
-	for _, c := range f.consts {
-		if c != nil {
-			instrs[i] = c
-			c.setBlock(f.Blocks[0])
-			i++
-		}
-	}
-	copy(instrs[i:], f.Blocks[0].Instrs)
-	f.Blocks[0].Instrs = instrs
-	f.consts = nil
+	instrs = append(instrs, entry.Instrs...)
+	entry.Instrs = instrs
 }
 
 // buildFakeExits ensures that every block in the function is
@@ -593,7 +539,12 @@ func (f *Function) finishBody() {
 	buildPostDomTree(f)
 
 	if f.Prog.mode&NaiveForm == 0 {
-		lift(f)
+		for lift(f) {
+		}
+		if doSimplifyConstantCompositeValues {
+			for simplifyConstantCompositeValues(f) {
+			}
+		}
 	}
 
 	// emit constants after lifting, because lifting may produce new constants, but before other variable splitting,
@@ -920,6 +871,10 @@ func WriteFunction(buf *bytes.Buffer, f *Function) {
 			default:
 				buf.WriteString(instr.String())
 			}
+			if instr != nil && instr.Comment() != "" {
+				buf.WriteString(" # ")
+				buf.WriteString(instr.Comment())
+			}
 			buf.WriteString("\n")
 
 			if f.Prog.mode&PrintSource != 0 {
@@ -1002,5 +957,14 @@ func (f *Function) initHTML(name string) {
 	}
 	if rel := f.RelString(nil); rel == name {
 		f.wr = NewHTMLWriter("ir.html", rel, "")
+	}
+}
+
+func killInstruction(instr Instruction) {
+	ops := instr.Operands(nil)
+	for _, op := range ops {
+		if refs := (*op).Referrers(); refs != nil {
+			*refs = removeInstr(*refs, instr)
+		}
 	}
 }

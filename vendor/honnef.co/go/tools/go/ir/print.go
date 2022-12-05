@@ -288,8 +288,8 @@ func (s *Jump) String() string {
 		block = s.block.Succs[0].Index
 	}
 	str := fmt.Sprintf("Jump → b%d", block)
-	if s.Comment != "" {
-		str = fmt.Sprintf("%s # %s", str, s.Comment)
+	if s.Comment() != "" {
+		str = fmt.Sprintf("%s # %s", str, s.Comment())
 	}
 	return str
 }
@@ -322,6 +322,31 @@ func (s *ConstantSwitch) String() string {
 	fmt.Fprint(&b, " →")
 	for _, succ := range s.block.Succs {
 		fmt.Fprintf(&b, " b%d", succ.Index)
+	}
+	return b.String()
+}
+
+func (v *CompositeValue) String() string {
+	var b bytes.Buffer
+	from := v.Parent().pkg()
+	fmt.Fprintf(&b, "CompositeValue <%s>", relType(v.Type(), from))
+	if v.NumSet >= len(v.Values) {
+		// All values provided
+		fmt.Fprint(&b, " [all]")
+	} else if v.Bitmap.BitLen() == 0 {
+		// No values provided
+		fmt.Fprint(&b, " [none]")
+	} else {
+		// Some values provided
+		bits := []byte(fmt.Sprintf("%0*b", len(v.Values), &v.Bitmap))
+		for i := 0; i < len(bits)/2; i++ {
+			o := len(bits) - 1 - i
+			bits[i], bits[o] = bits[o], bits[i]
+		}
+		fmt.Fprintf(&b, " [%s]", bits)
+	}
+	for _, vv := range v.Values {
+		fmt.Fprintf(&b, " %s", relName(vv, v))
 	}
 	return b.String()
 }

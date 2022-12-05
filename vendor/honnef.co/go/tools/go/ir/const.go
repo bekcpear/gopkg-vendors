@@ -58,7 +58,7 @@ func zeroConst(t types.Type) Constant {
 
 	switch typ := tset.CoreType().(type) {
 	case *types.Struct:
-		values := make([]Constant, typ.NumFields())
+		values := make([]Value, typ.NumFields())
 		for i := 0; i < typ.NumFields(); i++ {
 			values[i] = zeroConst(typ.Field(i).Type())
 		}
@@ -67,7 +67,7 @@ func zeroConst(t types.Type) Constant {
 			Values:   values,
 		}
 	case *types.Tuple:
-		values := make([]Constant, typ.Len())
+		values := make([]Value, typ.Len())
 		for i := 0; i < typ.Len(); i++ {
 			values[i] = zeroConst(typ.At(i).Type())
 		}
@@ -77,7 +77,7 @@ func zeroConst(t types.Type) Constant {
 		}
 	}
 
-	isNillable := func(term *typeparams.Term) bool {
+	isNillable := func(term *types.Term) bool {
 		switch typ := term.Type().Underlying().(type) {
 		case *types.Pointer, *types.Slice, *types.Interface, *types.Chan, *types.Map, *types.Signature, *typeutil.Iterator:
 			return true
@@ -93,8 +93,8 @@ func zeroConst(t types.Type) Constant {
 		}
 	}
 
-	isInfo := func(info types.BasicInfo) func(*typeparams.Term) bool {
-		return func(term *typeparams.Term) bool {
+	isInfo := func(info types.BasicInfo) func(*types.Term) bool {
+		return func(term *types.Term) bool {
 			basic, ok := term.Type().Underlying().(*types.Basic)
 			if !ok {
 				return false
@@ -103,7 +103,7 @@ func zeroConst(t types.Type) Constant {
 		}
 	}
 
-	isArray := func(term *typeparams.Term) bool {
+	isArray := func(term *types.Term) bool {
 		_, ok := term.Type().Underlying().(*types.Array)
 		return ok
 	}
@@ -147,6 +147,11 @@ func (c *Const) RelString(from *types.Package) string {
 }
 
 func (c *Const) String() string {
+	if c.block == nil {
+		// Constants don't have a block till late in the compilation process. But we want to print consts during
+		// debugging.
+		return c.RelString(nil)
+	}
 	return c.RelString(c.Parent().pkg())
 }
 
@@ -162,7 +167,7 @@ func (v *AggregateConst) RelString(pkg *types.Package) string {
 	values := make([]string, len(v.Values))
 	for i, v := range v.Values {
 		if v != nil {
-			values[i] = v.RelString(pkg)
+			values[i] = v.Name()
 		} else {
 			values[i] = "nil"
 		}
@@ -170,15 +175,18 @@ func (v *AggregateConst) RelString(pkg *types.Package) string {
 	return fmt.Sprintf("AggregateConst <%s> (%s)", relType(v.Type(), pkg), strings.Join(values, ", "))
 }
 
+func (v *AggregateConst) String() string {
+	if v.block == nil {
+		return v.RelString(nil)
+	}
+	return v.RelString(v.Parent().pkg())
+}
+
 func (v *GenericConst) RelString(pkg *types.Package) string {
 	return fmt.Sprintf("GenericConst <%s>", relType(v.Type(), pkg))
 }
 
 func (v *GenericConst) String() string {
-	return v.RelString(v.Parent().pkg())
-}
-
-func (v *AggregateConst) String() string {
 	return v.RelString(v.Parent().pkg())
 }
 
@@ -253,7 +261,15 @@ func (c *AggregateConst) equal(o Constant) bool {
 		return false
 	}
 	// TODO(dh): don't use == for types, this will miss identical pointer types, among others
-	return c.typ == oc.typ
+	if c.typ != oc.typ {
+		return false
+	}
+	for i, v := range c.Values {
+		if !v.(Constant).equal(oc.Values[i].(Constant)) {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *ArrayConst) equal(o Constant) bool {

@@ -22,8 +22,6 @@ package ir
 import (
 	"fmt"
 	"go/types"
-
-	"golang.org/x/exp/typeparams"
 )
 
 // -- wrappers -----------------------------------------------------------
@@ -90,7 +88,7 @@ func makeWrapper(prog *Program, sel *types.Selection) *Function {
 			var c Call
 			c.Call.Value = &Builtin{
 				name: "ir:wrapnilchk",
-				sig: types.NewSignature(nil,
+				sig: types.NewSignatureType(nil, nil, nil,
 					types.NewTuple(anonVar(sel.Recv()), anonVar(tString), anonVar(tString)),
 					types.NewTuple(anonVar(sel.Recv())), false),
 			}
@@ -259,7 +257,7 @@ func makeThunk(prog *Program, sel *types.Selection) *Function {
 	defer prog.methodsMu.Unlock()
 
 	// Canonicalize key.recv to avoid constructing duplicate thunks.
-	canonRecv, ok := prog.canon.At(key.recv).(types.Type)
+	canonRecv, ok := prog.canon.At(key.recv)
 	if !ok {
 		canonRecv = key.recv
 		prog.canon.Set(key.recv, canonRecv)
@@ -278,7 +276,7 @@ func makeThunk(prog *Program, sel *types.Selection) *Function {
 }
 
 func changeRecv(s *types.Signature, recv *types.Var) *types.Signature {
-	return types.NewSignature(recv, s.Params(), s.Results(), s.Variadic())
+	return types.NewSignatureType(recv, nil, nil, s.Params(), s.Results(), s.Variadic())
 }
 
 // selectionKey is like types.Selection but a usable map key.
@@ -293,11 +291,11 @@ type selectionKey struct {
 // makeInstance creates a wrapper function with signature sig that calls the generic function fn.
 // If targs is not nil, fn is a function and targs describes the concrete type arguments.
 // If targs is nil, fn is a method and the type arguments are derived from the receiver.
-func makeInstance(prog *Program, fn *Function, sig *types.Signature, targs *typeparams.TypeList) *Function {
+func makeInstance(prog *Program, fn *Function, sig *types.Signature, targs *types.TypeList) *Function {
 	if sig.Recv() != nil {
 		assert(targs == nil)
 		// Methods don't have their own type parameters, but the receiver does
-		targs = typeparams.NamedTypeArgs(deref(sig.Recv().Type()).(*types.Named))
+		targs = deref(sig.Recv().Type()).(*types.Named).TypeArgs()
 	} else {
 		assert(targs != nil)
 	}

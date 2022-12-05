@@ -13,10 +13,16 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"math/big"
 	"sync"
 
-	"golang.org/x/exp/typeparams"
 	"honnef.co/go/tools/go/types/typeutil"
+)
+
+const (
+	// Replace CompositeValue with only constant values with AggregateConst. Currently disabled because it breaks field
+	// tracking in U1000.
+	doSimplifyConstantCompositeValues = false
 )
 
 type ID int
@@ -31,9 +37,9 @@ type Program struct {
 	MethodSets typeutil.MethodSetCache     // cache of type-checker's method-sets
 
 	methodsMu    sync.Mutex                 // guards the following maps:
-	methodSets   typeutil.Map               // maps type to its concrete methodSet
-	runtimeTypes typeutil.Map               // types for which rtypes are needed
-	canon        typeutil.Map               // type canonicalization map
+	methodSets   typeutil.Map[*methodSet]   // maps type to its concrete methodSet
+	runtimeTypes typeutil.Map[bool]         // types for which rtypes are needed
+	canon        typeutil.Map[types.Type]   // type canonicalization map
 	bounds       map[*types.Func]*Function  // bounds for curried x.Method closures
 	thunks       map[selectionKey]*Function // thunks for T.Method expressions
 }
@@ -184,6 +190,8 @@ type Value interface {
 type Instruction interface {
 	setSource(ast.Node)
 	setID(ID)
+
+	Comment() string
 
 	// String returns the disassembled form of this value.
 	//
@@ -373,13 +381,13 @@ type Function struct {
 type instanceWrapperMap struct {
 	h       typeutil.Hasher
 	entries map[uint32][]struct {
-		key *typeparams.TypeList
+		key *types.TypeList
 		val *Function
 	}
 	len int
 }
 
-func typeListIdentical(l1, l2 *typeparams.TypeList) bool {
+func typeListIdentical(l1, l2 *types.TypeList) bool {
 	if l1.Len() != l2.Len() {
 		return false
 	}
@@ -393,10 +401,10 @@ func typeListIdentical(l1, l2 *typeparams.TypeList) bool {
 	return true
 }
 
-func (m *instanceWrapperMap) At(key *typeparams.TypeList) *Function {
+func (m *instanceWrapperMap) At(key *types.TypeList) *Function {
 	if m.entries == nil {
 		m.entries = make(map[uint32][]struct {
-			key *typeparams.TypeList
+			key *types.TypeList
 			val *Function
 		})
 		m.h = typeutil.MakeHasher()
@@ -416,10 +424,10 @@ func (m *instanceWrapperMap) At(key *typeparams.TypeList) *Function {
 	return nil
 }
 
-func (m *instanceWrapperMap) Set(key *typeparams.TypeList, val *Function) {
+func (m *instanceWrapperMap) Set(key *types.TypeList, val *Function) {
 	if m.entries == nil {
 		m.entries = make(map[uint32][]struct {
-			key *typeparams.TypeList
+			key *types.TypeList
 			val *Function
 		})
 		m.h = typeutil.MakeHasher()
@@ -437,7 +445,7 @@ func (m *instanceWrapperMap) Set(key *typeparams.TypeList, val *Function) {
 		}
 	}
 	m.entries[hash] = append(m.entries[hash], struct {
-		key *typeparams.TypeList
+		key *types.TypeList
 		val *Function
 	}{key, val})
 	m.len++
@@ -456,6 +464,11 @@ const (
 	NeverReturns
 )
 
+type constValue struct {
+	c   Constant
+	idx int
+}
+
 type functionBody struct {
 	// The following fields are set transiently during building,
 	// then cleared.
@@ -465,11 +478,14 @@ type functionBody struct {
 	implicitResults []*Alloc                 // tuple of results
 	targets         *targets                 // linked stack of branch targets
 	lblocks         map[types.Object]*lblock // labelled blocks
-	consts          []Constant
-	wr              *HTMLWriter
-	fakeExits       BlockSet
-	blocksets       [5]BlockSet
-	hasDefer        bool
+
+	consts          map[constKey]constValue
+	aggregateConsts typeutil.Map[[]*AggregateConst]
+
+	wr        *HTMLWriter
+	fakeExits BlockSet
+	blocksets [5]BlockSet
+	hasDefer  bool
 
 	// a contiguous block of instructions that will be used by blocks,
 	// to avoid making multiple allocations.
@@ -586,7 +602,18 @@ type Const struct {
 type AggregateConst struct {
 	register
 
-	Values []Constant
+	Values []Value
+}
+
+type CompositeValue struct {
+	register
+
+	// Bitmap records which elements were explicitly provided. For example, [4]byte{2: x} would have a bitmap of 0010.
+	Bitmap big.Int
+	// The number of bits set in Bitmap
+	NumSet int
+	// Dense list of values in the composite literal. Omitted elements are filled in with zero values.
+	Values []Value
 }
 
 // TODO add the element's zero constant to ArrayConst
@@ -1299,7 +1326,6 @@ type Extract struct {
 //
 type Jump struct {
 	anInstruction
-	Comment string
 }
 
 // The Unreachable pseudo-instruction signals that execution cannot
@@ -1599,7 +1625,12 @@ func (n *node) Pos() token.Pos {
 // It provides the implementations of the Block and setBlock methods.
 type anInstruction struct {
 	node
-	block *BasicBlock // the basic block of this instruction
+	block   *BasicBlock // the basic block of this instruction
+	comment string
+}
+
+func (instr anInstruction) Comment() string {
+	return instr.comment
 }
 
 // CallCommon is contained by Go, Defer and Call to hold the
@@ -2042,13 +2073,26 @@ func (v *Load) Operands(rands []*Value) []*Value {
 	return append(rands, &v.X)
 }
 
+func (v *AggregateConst) Operands(rands []*Value) []*Value {
+	for i := range v.Values {
+		rands = append(rands, &v.Values[i])
+	}
+	return rands
+}
+
+func (v *CompositeValue) Operands(rands []*Value) []*Value {
+	for i := range v.Values {
+		rands = append(rands, &v.Values[i])
+	}
+	return rands
+}
+
 // Non-Instruction Values:
-func (v *Builtin) Operands(rands []*Value) []*Value        { return rands }
-func (v *FreeVar) Operands(rands []*Value) []*Value        { return rands }
-func (v *Const) Operands(rands []*Value) []*Value          { return rands }
-func (v *ArrayConst) Operands(rands []*Value) []*Value     { return rands }
-func (v *AggregateConst) Operands(rands []*Value) []*Value { return rands }
-func (v *GenericConst) Operands(rands []*Value) []*Value   { return rands }
-func (v *Function) Operands(rands []*Value) []*Value       { return rands }
-func (v *Global) Operands(rands []*Value) []*Value         { return rands }
-func (v *Parameter) Operands(rands []*Value) []*Value      { return rands }
+func (v *Builtin) Operands(rands []*Value) []*Value      { return rands }
+func (v *FreeVar) Operands(rands []*Value) []*Value      { return rands }
+func (v *Const) Operands(rands []*Value) []*Value        { return rands }
+func (v *ArrayConst) Operands(rands []*Value) []*Value   { return rands }
+func (v *GenericConst) Operands(rands []*Value) []*Value { return rands }
+func (v *Function) Operands(rands []*Value) []*Value     { return rands }
+func (v *Global) Operands(rands []*Value) []*Value       { return rands }
+func (v *Parameter) Operands(rands []*Value) []*Value    { return rands }

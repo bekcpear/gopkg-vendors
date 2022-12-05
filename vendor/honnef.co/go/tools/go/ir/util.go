@@ -16,8 +16,6 @@ import (
 
 	"honnef.co/go/tools/go/ast/astutil"
 	"honnef.co/go/tools/go/types/typeutil"
-
-	"golang.org/x/exp/typeparams"
 )
 
 //// AST utilities
@@ -51,7 +49,7 @@ func isInterface(T types.Type) bool { return types.IsInterface(T) }
 func deref(typ types.Type) types.Type {
 	orig := typ
 
-	if t, ok := typ.(*typeparams.TypeParam); ok {
+	if t, ok := typ.(*types.TypeParam); ok {
 		if ctyp := typeutil.CoreType(t); ctyp != nil {
 			typ = ctyp
 		}
@@ -99,7 +97,7 @@ func makeLen(T types.Type) *Builtin {
 	lenParams := types.NewTuple(anonVar(T))
 	return &Builtin{
 		name: "len",
-		sig:  types.NewSignature(nil, lenParams, lenResults, false),
+		sig:  types.NewSignatureType(nil, nil, nil, lenParams, lenResults, false),
 	}
 }
 
@@ -147,3 +145,6 @@ func assert(x bool) {
 		panic("failed assertion")
 	}
 }
+
+// BlockMap is a mapping from basic blocks (identified by their indices) to values.
+type BlockMap[T any] []T
