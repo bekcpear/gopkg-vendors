@@ -12,10 +12,10 @@ Benchmark results may be found [here](BENCHMARKS.md).
 
 ## Counter
 
-A `Counter` is a striped `int64` counter inspired by the j.u.c.a.LongAdder class from Java standard library.
+A `Counter` is a striped `int64` counter inspired by the `j.u.c.a.LongAdder` class from Java standard library.
 
 ```go
-var c xsync.Counter
+c := xsync.NewCounter()
 // increment and decrement the counter
 c.Inc()
 c.Dec()
@@ -23,11 +23,11 @@ c.Dec()
 v := c.Value()
 ```
 
-Works better in comparison with a single atomically updated int64 counter in high contention scenarios.
+Works better in comparison with a single atomically updated `int64` counter in high contention scenarios.
 
 ## Map
 
-A `Map` is like a concurrent hash table based map. It follows the interface of `sync.Map` with a few extensions, like `LoadOrCompute` or `Size` methods.
+A `Map` is like a concurrent hash table based map. It follows the interface of `sync.Map` with a number of valuable extensions like `Compute` or `Size`.
 
 ```go
 m := xsync.NewMap()
@@ -38,11 +38,11 @@ s := m.Size()
 
 `Map` uses a modified version of Cache-Line Hash Table (CLHT) data structure: https://github.com/LPD-EPFL/CLHT
 
-CLHT is built around idea to organize the hash table in cache-line-sized buckets, so that on all modern CPUs update operations complete with minimal cache-line transfer. Also, `Get`, `Range` and other read-only operations are obstruction-free and involve no writes to shared memory, hence no mutexes or any other sort of locks. Due to this design, in all considered scenarios `Map` outperforms `sync.Map`.
+CLHT is built around idea to organize the hash table in cache-line-sized buckets, so that on all modern CPUs update operations complete with minimal cache-line transfer. Also, `Get` operations are obstruction-free and involve no writes to shared memory, hence no mutexes or any other sort of locks. Due to this design, in all considered scenarios `Map` outperforms `sync.Map`.
 
 One important difference with `sync.Map` is that only string keys are supported. That's because Golang standard library does not expose the built-in hash functions for `interface{}` values.
 
-`MapOf[V]` is an implementation with parametrized value type. It is available for Go 1.18 or later.
+`MapOf[K, V]` is an implementation with parametrized value type. It is available for Go 1.18 or later. While it's still a CLHT-inspired hash map, `MapOf`'s design is quite different from `Map`. As a result, less GC pressure and less atomic operations on reads.
 
 ```go
 m := xsync.NewMapOf[string]()
@@ -101,17 +101,17 @@ To get the optimal performance, you may want to set the queue size to be large e
 A `RBMutex` is a reader biased reader/writer mutual exclusion lock. The lock can be held by an many readers or a single writer.
 
 ```go
-var m xsync.RBMutex
+mu := xsync.NewRBMutex()
 // reader lock calls return a token
-t := m.RLock()
+t := mu.RLock()
 // the token must be later used to unlock the mutex
-m.RUnlock(t)
+mu.RUnlock(t)
 // writer locks are the same as in sync.RWMutex
-m.Lock()
-m.Unlock()
+mu.Lock()
+mu.Unlock()
 ```
 
-`RBMutex` is based on the BRAVO (Biased Locking for Reader-Writer Locks) algorithm: https://arxiv.org/pdf/1810.01553.pdf
+`RBMutex` is based on a modified version of BRAVO (Biased Locking for Reader-Writer Locks) algorithm: https://arxiv.org/pdf/1810.01553.pdf
 
 The idea of the algorithm is to build on top of an existing reader-writer mutex and introduce a fast path for readers. On the fast path, reader lock attempts are sharded over an internal array based on the reader identity (a token in case of Golang). This means that readers do not contend over a single atomic counter like it's done in, say, `sync.RWMutex` allowing for better scalability in terms of cores.
 
