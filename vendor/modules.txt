@@ -467,6 +467,10 @@ golang.org/x/crypto/nacl/box
 golang.org/x/crypto/nacl/secretbox
 golang.org/x/crypto/pbkdf2
 golang.org/x/crypto/salsa20/salsa
+# golang.org/x/exp v0.0.0-20220909182711-5c715a9e8561
+## explicit; go 1.18
+golang.org/x/exp/constraints
+golang.org/x/exp/slices
 # golang.org/x/mod v0.7.0
 ## explicit; go 1.17
 golang.org/x/mod/semver
@@ -726,7 +730,7 @@ nhooyr.io/websocket/internal/bpool
 nhooyr.io/websocket/internal/errd
 nhooyr.io/websocket/internal/wsjs
 nhooyr.io/websocket/internal/xsync
-# tailscale.com v1.32.3
+# tailscale.com v1.34.0
 ## explicit; go 1.19
 tailscale.com
 tailscale.com/atomicfile
@@ -770,17 +774,20 @@ tailscale.com/types/key
 tailscale.com/types/logger
 tailscale.com/types/netmap
 tailscale.com/types/opt
-tailscale.com/types/pad32
 tailscale.com/types/persist
 tailscale.com/types/preftype
+tailscale.com/types/ptr
 tailscale.com/types/structs
 tailscale.com/types/tkatype
 tailscale.com/types/views
+tailscale.com/util/clientmetric
 tailscale.com/util/cloudenv
 tailscale.com/util/cmpver
+tailscale.com/util/dirwalk
 tailscale.com/util/dnsname
 tailscale.com/util/endian
 tailscale.com/util/lineread
+tailscale.com/util/mak
 tailscale.com/util/multierr
 tailscale.com/util/singleflight
 tailscale.com/util/strs

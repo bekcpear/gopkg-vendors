@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package apitype contains types for the Tailscale local API and control plane API.
+// Package apitype contains types for the Tailscale LocalAPI and control plane API.
 package apitype
 
 import "tailscale.com/tailcfg"
@@ -24,7 +24,7 @@ type WhoIsResponse struct {
 type FileTarget struct {
 	Node *tailcfg.Node
 
-	// PeerAPI is the http://ip:port URL base of the node's peer API,
+	// PeerAPI is the http://ip:port URL base of the node's PeerAPI,
 	// without any path (not even a single slash).
 	PeerAPIURL string
 }
