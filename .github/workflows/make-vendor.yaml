@@ -1,0 +1,174 @@
+# Used to check whether there is an update for modules listed
+# in the 'modules-list' file, and generate the latest vendor
+# directories for these modules.
+#
+# Author: Ryan Qian <i@bitbili.net>
+#
+
+name: vendor dir
+on:
+  push:
+    branches:
+      - 'main'
+    paths:
+      - 'modules-list'
+      - 'geninfo.sh'
+  schedule:
+    - cron: 16 */1 * * *
+  workflow_dispatch:
+
+jobs:
+  get-list:
+    name: Get the modules list
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.set-matrix.outputs.list }}
+    steps:
+      - name: checkout the main branch of this repo
+        uses: actions/checkout@v3
+        with:
+          ref: 'main'
+          path: 'goven'
+      - name: setup matrix variable
+        id: set-matrix
+        run: ./goven/geninfo.sh --matrix-list
+
+  check-update:
+    needs: get-list
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(needs.get-list.outputs.list) }}
+    name: check update for ${{ matrix.module }}
+    env:
+      BRANCH_NAME: ${{ matrix.module }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPO: ${{ github.repository }}
+    steps:
+      - name: checkout the main branch of this repo
+        uses: actions/checkout@v3
+        with:
+          ref: 'main'
+          path: 'goven'
+      - name: check if the module ${{ matrix.module }} has a update
+        id: check-update
+        run: ./goven/geninfo.sh --has-an-update $BRANCH_NAME
+      - name: upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ hashFiles('./tag_name') }}
+          path: ./tag_name
+          if-no-files-found: ignore
+
+  handle_checking_results:
+    needs: check-update
+    runs-on: ubuntu-latest
+    name: handle checking results
+    outputs:
+      list: ${{ steps.handle-results.outputs.list }}
+    steps:
+      - name: download artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: tag_names_folder
+      - name: handle results
+        id: handle-results
+        shell: bash
+        run: |
+          if ! ls ./tag_names_folder/*/tag_name &>/dev/null; then
+            exit 0
+          fi
+          declare -i count=0
+          for f in ./tag_names_folder/*/tag_name; do
+            . $f
+          done
+          for m in "${!tag_name[@]}"; do
+            modules+="\"${m}\","
+            count=$(( $count + 1 ))
+          done
+          modules=${modules%,}
+          declare -p tag_name | tee ./tag_names
+          set -x
+          if [[ $count -gt 0 ]]; then
+            echo "list={\"module\": [${modules}]}" >>$GITHUB_OUTPUT
+          fi
+      - name: upload artifact
+        if: steps.handle-results.outputs.list
+        uses: actions/upload-artifact@v3
+        with:
+          name: tag_names
+          path: ./tag_names
+
+  gen-vendor:
+    needs: handle_checking_results
+    runs-on: ubuntu-latest
+    if: needs.handle_checking_results.outputs.list
+    strategy:
+      matrix: ${{ fromJSON(needs.handle_checking_results.outputs.list) }}
+    name: generate vendor for ${{ matrix.module }}
+    env:
+      BRANCH_NAME: ${{ matrix.module }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPO: ${{ github.repository }}
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: confirm that git and curl are installed
+        run: |
+          sudo apt-get update
+          sudo apt -y install git curl
+      - name: checkout the main branch of this repo
+        uses: actions/checkout@v3
+        with:
+          ref: 'main'
+          path: 'goven'
+      - name: check whether the branch ${{ matrix.module }} exists
+        id: existing-branch
+        run: ./goven/geninfo.sh --existing-branch $BRANCH_NAME
+      - name: checkout the ${{ matrix.module }} branch of this repo
+        if: ${{ steps.existing-branch.outputs.exists == 'true' }}
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ matrix.module }}
+          fetch-depth: 0
+          path: 'ven'
+      - name: pre-prepare the new branch, ${{ matrix.module }}
+        if: ${{ steps.existing-branch.outputs.exists == 'false' }}
+        shell: bash
+        run: cp -a goven ven
+      - name: download tag_names
+        uses: actions/download-artifact@v3
+        with:
+          path: tag_names_folder
+      - name: download the latest tarball of ${{ matrix.module }}
+        id: download
+        shell: bash
+        run: |
+          . tag_names_folder/tag_names/tag_names
+          tag=${tag_name[$BRANCH_NAME]}
+          mkdir -p tarball
+          ./goven/geninfo.sh --download-latest $BRANCH_NAME $tag tarball/$BRANCH_NAME
+          tag=${tag#v}
+          tag=${tag#V}
+          echo "tag=${tag}" >>$GITHUB_OUTPUT
+      - name: get the latest go
+        uses: actions/setup-go@v3
+        with:
+          go-version: 'stable'
+      - name: checkout bekcpear/vendor-for-go
+        uses: actions/checkout@v3
+        with:
+          repository: bekcpear/vendor-for-go
+          path: 'sh'
+      - name: generate vendor dir and push to remote branch
+        env:
+          TAG: ${{ steps.download.outputs.tag }}
+          REMOTE: https://bekcpear:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
+        shell: bash
+        run: |
+          subpath=$(./goven/geninfo.sh --get-subpath $BRANCH_NAME)
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          export _PKG_PATH=$(pwd)/tarball/$BRANCH_NAME
+          export _EXTRA_PUSH_ARGS="--atomic $REMOTE $BRANCH_NAME"
+          ./sh/.do/do.sh $(pwd)/ven ${BRANCH_NAME}${subpath:+/}${subpath} $TAG

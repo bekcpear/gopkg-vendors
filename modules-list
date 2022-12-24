@@ -1,0 +1,40 @@
+
+# Rules:
+# 1. each entity should be separated by a blank line
+# 2. a blank line must not appear inside an entity
+# 3. a space must be placed between the key and value
+# 4. the key must be suffixed with a colon
+LIST="
+    module: act
+    source: github
+      path: nektos/act
+
+    module: bark-server
+    source: github
+      path: Finb/bark-server
+
+    module: dendrite
+    source: github
+      path: matrix-org/dendrite
+
+    module: filebrowser
+    source: github
+      path: filebrowser/filebrowser
+
+    module: headscale
+    source: github
+      path: juanfont/headscale
+
+    module: keybase
+    source: github
+      path: keybase/client
+   subpath: go
+
+    module: tailscale
+    source: github
+      path: tailscale/tailscale
+
+    module: v2ray-core
+    source: github
+      path: v2fly/v2ray-core
+"
