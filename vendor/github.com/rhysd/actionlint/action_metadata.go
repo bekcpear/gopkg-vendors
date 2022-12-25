@@ -13,22 +13,80 @@ import (
 
 //go:generate go run ./scripts/generate-popular-actions -s remote -f go ./popular_actions.go
 
-// ActionMetadataInputRequired represents if the action input is required to be set or not.
+// ActionMetadataInput is input metadata in "inputs" section in action.yml metadata file.
 // https://docs.github.com/en/actions/creating-actions/metadata-syntax-for-github-actions#inputs
-type ActionMetadataInputRequired bool
+type ActionMetadataInput struct {
+	// Name is a name of this input.
+	Name string `json:"name"`
+	// Required is true when this input is mandatory to run the action.
+	Required bool `json:"required"`
+}
+
+// ActionMetadataInputs is a map from input ID to its metadata. Keys are in lower case since input
+// names are case-insensitive.
+// https://docs.github.com/en/actions/creating-actions/metadata-syntax-for-github-actions#inputs
+type ActionMetadataInputs map[string]*ActionMetadataInput
 
 // UnmarshalYAML implements yaml.Unmarshaler.
-func (required *ActionMetadataInputRequired) UnmarshalYAML(n *yaml.Node) error {
-	// Name this local type for better error message on unmarshaling
+func (inputs *ActionMetadataInputs) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.MappingNode {
+		return expectedMapping("inputs", n)
+	}
+
 	type actionInputMetadata struct {
 		Required bool    `yaml:"required"`
 		Default  *string `yaml:"default"`
 	}
-	var input actionInputMetadata
-	if err := n.Decode(&input); err != nil {
-		return err
+
+	md := make(ActionMetadataInputs, len(n.Content)/2)
+	for i := 0; i < len(n.Content); i += 2 {
+		k, v := n.Content[i].Value, n.Content[i+1]
+
+		var m actionInputMetadata
+		if err := v.Decode(&m); err != nil {
+			return err
+		}
+
+		id := strings.ToLower(k)
+		if _, ok := md[id]; ok {
+			return fmt.Errorf("input %q is duplicated", k)
+		}
+
+		md[id] = &ActionMetadataInput{k, m.Required && m.Default == nil}
 	}
-	*required = ActionMetadataInputRequired(input.Required && input.Default == nil)
+
+	*inputs = md
+	return nil
+}
+
+// ActionMetadataOutput is output metadata in "outputs" section in action.yml metadata file.
+// https://docs.github.com/en/actions/creating-actions/metadata-syntax-for-github-actions#outputs-for-composite-actions
+type ActionMetadataOutput struct {
+	Name string `json:"name"`
+}
+
+// ActionMetadataOutputs is a map from output ID to its metadata. Keys are in lower case since output
+// names are case-insensitive.
+// https://docs.github.com/en/actions/creating-actions/metadata-syntax-for-github-actions#outputs-for-composite-actions
+type ActionMetadataOutputs map[string]*ActionMetadataOutput
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (inputs *ActionMetadataOutputs) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.MappingNode {
+		return expectedMapping("outputs", n)
+	}
+
+	md := make(ActionMetadataOutputs, len(n.Content)/2)
+	for i := 0; i < len(n.Content); i += 2 {
+		k := n.Content[i].Value
+		id := strings.ToLower(k)
+		if _, ok := md[id]; ok {
+			return fmt.Errorf("output %q is duplicated", k)
+		}
+		md[id] = &ActionMetadataOutput{k}
+	}
+
+	*inputs = md
 	return nil
 }
 
@@ -38,10 +96,10 @@ type ActionMetadata struct {
 	// Name is "name" field of action.yaml
 	Name string `yaml:"name" json:"name"`
 	// Inputs is "inputs" field of action.yaml
-	Inputs map[string]ActionMetadataInputRequired `yaml:"inputs" json:"inputs"`
+	Inputs ActionMetadataInputs `yaml:"inputs" json:"inputs"`
 	// Outputs is "outputs" field of action.yaml. Key is name of output. Description is omitted
 	// since actionlint does not use it.
-	Outputs map[string]struct{} `yaml:"outputs" json:"outputs"`
+	Outputs ActionMetadataOutputs `yaml:"outputs" json:"outputs"`
 	// SkipInputs is flag to specify behavior of inputs check. When it is true, inputs for this
 	// action will not be checked.
 	SkipInputs bool `json:"skip_inputs"`
@@ -58,16 +116,14 @@ type LocalActionsCache struct {
 	mu    sync.RWMutex
 	proj  *Project // might be nil
 	cache map[string]*ActionMetadata
-	cwd   string
 	dbg   io.Writer
 }
 
 // NewLocalActionsCache creates new LocalActionsCache instance for the given project.
-func NewLocalActionsCache(proj *Project, cwd string, dbg io.Writer) *LocalActionsCache {
+func NewLocalActionsCache(proj *Project, dbg io.Writer) *LocalActionsCache {
 	return &LocalActionsCache{
 		proj:  proj,
 		cache: map[string]*ActionMetadata{},
-		cwd:   cwd,
 		dbg:   dbg,
 	}
 }
@@ -110,17 +166,22 @@ func (c *LocalActionsCache) FindMetadata(spec string) (*ActionMetadata, error) {
 	}
 
 	dir := filepath.Join(c.proj.RootDir(), filepath.FromSlash(spec))
-	b, err := c.readLocalActionMetadataFile(dir)
-	if err != nil {
-		c.writeCache(spec, nil) // Remember action was not found
-		return nil, err
+	b, ok := c.readLocalActionMetadataFile(dir)
+	if !ok {
+		c.debug("No action metadata found in %s", dir)
+		// Remember action was not found
+		c.writeCache(spec, nil)
+		// Do not complain about the action does not exist (#25, #40).
+		// It seems a common pattern that the local action does not exist in the repository
+		// (e.g. Git submodule) and it is cloned at running workflow (due to a private repository).
+		return nil, nil
 	}
 
 	var meta ActionMetadata
 	if err := yaml.Unmarshal(b, &meta); err != nil {
 		c.writeCache(spec, nil) // Remember action was invalid
 		msg := strings.ReplaceAll(err.Error(), "\n", " ")
-		return nil, fmt.Errorf("action.yml in %q is invalid: %s", dir, msg)
+		return nil, fmt.Errorf("could not parse action metadata in %q: %s", dir, msg)
 	}
 
 	c.debug("New metadata parsed from action %s: %v", dir, &meta)
@@ -129,22 +190,17 @@ func (c *LocalActionsCache) FindMetadata(spec string) (*ActionMetadata, error) {
 	return &meta, nil
 }
 
-func (c *LocalActionsCache) readLocalActionMetadataFile(dir string) ([]byte, error) {
+func (c *LocalActionsCache) readLocalActionMetadataFile(dir string) ([]byte, bool) {
 	for _, p := range []string{
 		filepath.Join(dir, "action.yaml"),
 		filepath.Join(dir, "action.yml"),
 	} {
 		if b, err := os.ReadFile(p); err == nil {
-			return b, nil
+			return b, true
 		}
 	}
 
-	if c.cwd != "" {
-		if p, err := filepath.Rel(c.cwd, dir); err == nil {
-			dir = p
-		}
-	}
-	return nil, fmt.Errorf("neither action.yaml nor action.yml is found in directory \"%s\"", dir)
+	return nil, false
 }
 
 // LocalActionsCacheFactory is a factory to create LocalActionsCache instances. LocalActionsCache
@@ -152,7 +208,6 @@ func (c *LocalActionsCache) readLocalActionMetadataFile(dir string) ([]byte, err
 // instance per repository (project).
 type LocalActionsCacheFactory struct {
 	caches map[string]*LocalActionsCache
-	cwd    string
 	dbg    io.Writer
 }
 
@@ -164,12 +219,12 @@ func (f *LocalActionsCacheFactory) GetCache(p *Project) *LocalActionsCache {
 	if c, ok := f.caches[r]; ok {
 		return c
 	}
-	c := NewLocalActionsCache(p, f.cwd, f.dbg)
+	c := NewLocalActionsCache(p, f.dbg)
 	f.caches[r] = c
 	return c
 }
 
 // NewLocalActionsCacheFactory creates a new LocalActionsCacheFactory instance.
-func NewLocalActionsCacheFactory(cwd string, dbg io.Writer) *LocalActionsCacheFactory {
-	return &LocalActionsCacheFactory{map[string]*LocalActionsCache{}, cwd, dbg}
+func NewLocalActionsCacheFactory(dbg io.Writer) *LocalActionsCacheFactory {
+	return &LocalActionsCacheFactory{map[string]*LocalActionsCache{}, dbg}
 }

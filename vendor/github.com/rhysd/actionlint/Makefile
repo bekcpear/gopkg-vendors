@@ -23,9 +23,9 @@ test: .testtimestamp
 
 lint: .staticchecktimestamp
 
-popular_actions.go all_webhooks.go: scripts/generate-popular-actions/main.go scripts/generate-webhook-events/main.go
+popular_actions.go all_webhooks.go availability.go: scripts/generate-popular-actions/main.go scripts/generate-webhook-events/main.go scripts/generate-availability/main.go
 ifdef SKIP_GO_GENERATE
-	touch popular_actions.go all_webhooks.go
+	touch popular_actions.go all_webhooks.go availability.go
 else
 	go generate
 endif
@@ -48,9 +48,6 @@ man: man/actionlint.1
 
 bench:
 	go test -bench Lint -benchmem
-
-actionlint-workflow-ast: scripts/actionlint-workflow-ast/main.go
-	go build ./scripts/actionlint-workflow-ast/
 
 .github/actionlint-matcher.json: scripts/generate-actionlint-matcher/object.js
 	node ./scripts/generate-actionlint-matcher/main.js .github/actionlint-matcher.json

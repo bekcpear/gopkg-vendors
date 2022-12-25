@@ -1,3 +1,322 @@
+<a name="v1.6.21"></a>
+# [v1.6.21](https://github.com/rhysd/actionlint/releases/tag/v1.6.21) - 09 Oct 2022
+
+- Check contexts availability. Some contexts limit where they can be used. For example, `jobs.<job_id>.env` workflow key does not allow accessing `env` context, but `jobs.<job_id>.steps.env` allows. See [the official document](https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability) for the complete list of contexts availability. ([#180](https://github.com/rhysd/actionlint/issues/180))
+  ```yaml
+  ...
+
+  env:
+    TOPLEVEL: ...
+
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      env:
+        # ERROR: 'env' context is not available here
+        JOB_LEVEL: ${{ env.TOPLEVEL }}
+      steps:
+        - env:
+            # OK: 'env' context is available here
+            STEP_LEVEL: ${{ env.TOPLEVEL }}
+          ...
+  ```
+  actionlint reports the context is not available and what contexts are available as follows:
+  ```
+  test.yaml:11:22: context "env" is not allowed here. available contexts are "github", "inputs", "matrix", "needs", "secrets", "strategy". see https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability for more details [expression]
+     |
+  11 |       JOB_LEVEL: ${{ env.TOPLEVEL }}
+     |                      ^~~~~~~~~~~~
+  ```
+- Check special functions availability. Some functions limit where they can be used. For example, status functions like `success()` or `failure()` are only available in conditions of `if:`. See [the official document](https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability) for the complete list of special functions availability. ([#214](https://github.com/rhysd/actionlint/issues/214))
+  ```yaml
+  ...
+
+  steps:
+    # ERROR: 'success()' function is not available here
+    - run: echo 'Success? ${{ success() }}'
+      # OK: 'success()' function is available here
+      if: success()
+  ```
+  actionlint reports `success()` is not available and where the function is available as follows:
+  ```
+  test.yaml:8:33: calling function "success" is not allowed here. "success" is only available in "jobs.<job_id>.if", "jobs.<job_id>.steps.if". see https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability for more details [expression]
+    |
+  8 |       - run: echo 'Success? ${{ success() }}'
+    |                                 ^~~~~~~~~
+  ```
+- Fix `inputs` context is not available in `run-name:` section. ([#223](https://github.com/rhysd/actionlint/issues/223))
+- Allow dynamic shell configuration like `shell: ${{ env.SHELL }}`.
+- Fix no error is reported when `on:` does not exist at toplevel. ([#232](https://github.com/rhysd/actionlint/issues/232))
+- Fix an error position is not correct when the error happens at root node of workflow AST.
+- Fix an incorrect empty event is parsed when `on:` section is empty.
+- Fix the error message when parsing an unexpected key on toplevel. ([#231](https://github.com/rhysd/actionlint/issues/231), thanks [@norwd](https://github.com/norwd))
+- Add `in_progress` type to `workflow_run` webhook event trigger.
+- Describe [the actionlint extension](https://extensions.panic.com/extensions/org.netwrk/org.netwrk.actionlint/) for [Nova.app](https://nova.app) in [the usage document](https://github.com/rhysd/actionlint/blob/main/docs/usage.md#nova). ([#222](https://github.com/rhysd/actionlint/issues/222), thanks [@jbergstroem](https://github.com/jbergstroem))
+- Note [Super-Linter](https://github.com/github/super-linter) uses a different place for configuration file. ([#227](https://github.com/rhysd/actionlint/issues/227), thanks [@per-oestergaard](https://github.com/per-oestergaard))
+- Add `actions/setup-dotnet@v3` to popular actions data set.
+- [`generate-availability` script](https://github.com/rhysd/actionlint/tree/main/scripts/generate-availability) was created to scrape the information about contexts and special functions availability from the official document. The information is available through `actionlint.WorkflowKeyAvailability()` Go API. This script is run once a week on CI to keep the information up-to-date.
+
+
+
+[Changes][v1.6.21]
+
+
+<a name="v1.6.20"></a>
+# [v1.6.20](https://github.com/rhysd/actionlint/releases/tag/v1.6.20) - 30 Sep 2022
+
+- Support `run-name` which [GitHub introduced recently](https://github.blog/changelog/2022-09-26-github-actions-dynamic-names-for-workflow-runs/). It is a name of workflow run dynamically configured. See [the official document](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#run-name) for more details. ([#220](https://github.com/rhysd/actionlint/issues/220))
+  ```yaml
+  on: push
+  run-name: Deploy by @${{ github.actor }}
+
+  jobs:
+    ...
+  ```
+- Add `end_column` property to JSON representation of error. The property indicates a column of the end position of `^~~~~~~` indicator in snippet. Note that `end_column` is equal to `column` when the indicator cannot be shown. ([#219](https://github.com/rhysd/actionlint/issues/219))
+  ```console
+  $ actionlint -format '{{json .}}' test.yaml | jq
+  [
+    {
+      "message": "property \"unknown_prop\" is not defined in object type {arch: string; debug: string; name: string; os: string; temp: string; tool_cache: string; workspace: string}",
+      "filepath": "test.yaml",
+      "line": 7,
+      "column": 23,
+      "kind": "expression",
+      "snippet": "      - run: echo ${{ runner.unknown_prop }}\n                      ^~~~~~~~~~~~~~~~~~~",
+      "end_column": 41
+    }
+  ]
+  ```
+- Overhaul the workflow parser to parse workflow keys in case-insensitive. This is a work derived from the fix of [#216](https://github.com/rhysd/actionlint/issues/216). Now the parser parses all workflow keys in case-insensitive way correctly. Note that permission names at `permissions:` are exceptionally case-sensitive.
+  - This fixes properties of `inputs` for `workflow_dispatch` were not case-insensitive.
+  - This fixes inputs and outputs of local actions were not handled in case-insensitive way.
+- Update popular actions data set. `actions/stale@v6` was newly added.
+
+[Changes][v1.6.20]
+
+
+<a name="v1.6.19"></a>
+# [v1.6.19](https://github.com/rhysd/actionlint/releases/tag/v1.6.19) - 22 Sep 2022
+
+- Fix inputs, outputs, and secrets of reusable workflow should be case-insensitive. ([#216](https://github.com/rhysd/actionlint/issues/216))
+  ```yaml
+  # .github/workflows/reusable.yaml
+  on:
+    workflow_call:
+      inputs:
+        INPUT_UPPER:
+          type: string
+        input_lower:
+          type: string
+      secrets:
+        SECRET_UPPER:
+        secret_lower:
+  ...
+
+  # .github/workflows/test.yaml
+  ...
+
+  jobs:
+    caller:
+      uses: ./.github/workflows/reusable.yaml
+      # Inputs and secrets are case-insensitive. So all the followings should be OK
+      with:
+        input_upper: ...
+        INPUT_LOWER: ...
+      secrets:
+        secret_upper: ...
+        SECRET_LOWER: ...
+  ```
+- Describe [how to install specific version of `actionlint` binary with the download script](https://github.com/rhysd/actionlint/blob/main/docs/install.md#download-script). ([#218](https://github.com/rhysd/actionlint/issues/218))
+
+[Changes][v1.6.19]
+
+
+<a name="v1.6.18"></a>
+# [v1.6.18](https://github.com/rhysd/actionlint/releases/tag/v1.6.18) - 17 Sep 2022
+
+- This release much enhances checks for local reusable workflow calls. Note that these checks are done for local reusable workflows (starting with `./`). ([#179](https://github.com/rhysd/actionlint/issues/179)).
+  - Detect missing required inputs/secrets and undefined inputs/secrets at `jobs.<job_id>.with` and `jobs.<job_id>.secrets`. See [the document](https://github.com/rhysd/actionlint/blob/main/docs/checks.md#check-inputs-and-secrets-in-workflow-call) for more details.
+    ```yaml
+    # .github/workflows/reusable.yml
+    on:
+      workflow_call:
+        inputs:
+          name:
+            type: string
+            required: true
+        secrets:
+          password:
+            required: true
+    ...
+
+    # .github/workflows/test.yml
+    ...
+
+    jobs:
+      missing-required:
+        uses: ./.github/workflows/reusable.yml
+        with:
+          # ERROR: Undefined input "user"
+          user: rhysd
+          # ERROR: Required input "name" is missing
+        secrets:
+          # ERROR: Undefined secret "credentials"
+          credentials: my-token
+          # ERROR: Required secret "password" is missing
+    ```
+  - Type check for reusable workflow inputs at `jobs.<job_id>.with`. Types are defined at `on.workflow_call.inputs.<name>.type` in reusable workflow. actionlint checks types of expressions in workflow calls. See [the document](https://github.com/rhysd/actionlint/blob/main/docs/checks.md#check-inputs-and-secrets-in-workflow-call) for more details.
+    ```yaml
+    # .github/workflows/reusable.yml
+    on:
+      workflow_call:
+        inputs:
+          id:
+            type: number
+          message:
+            type: string
+    ...
+
+    # .github/workflows/test.yml
+    ...
+
+    jobs:
+      type-checks:
+        uses: ./.github/workflows/reusable.yml
+        with:
+          # ERROR: Cannot assign string value to number input. format() returns string value
+          id: ${{ format('runner name is {0}', runner.name) }}
+          # ERROR: Cannot assign null to string input. If you want to pass string "null", use ${{ 'null' }}
+          message: null
+    ```
+  - Detect local reusable workflow which does not exist at `jobs.<job_id>.uses`. See [the document](https://github.com/rhysd/actionlint/blob/main/docs/checks.md#check-workflow-call-syntax) for more details.
+    ```yaml
+    jobs:
+      test:
+        # ERROR: This workflow file does not exist
+        with: ./.github/workflows/does-not-exist.yml
+    ```
+  - Check `needs.<job_id>.outputs.<output_id>` in downstream jobs of workflow call jobs. The outputs object is now typed strictly based on `on.workflow_call.outputs.<name>` in the called reusable workflow. See [the document](https://github.com/rhysd/actionlint/blob/main/docs/checks.md#check-outputs-of-workflow-call-in-downstream-jobs) for more details.
+    ```yaml
+    # .github/workflows/get-build-info.yml
+    on:
+      workflow_call:
+        outputs:
+          version:
+            value: ...
+            description: version of software
+    ...
+
+    # .github/workflows/test.yml
+    ...
+
+    jobs:
+      # This job's outputs object is typed as {version: string}
+      get_build_info:
+        uses: ./.github/workflows/get-build-info.yml
+      downstream:
+        needs: [get_build_info]
+        runs-on: ubuntu-latest
+        steps:
+          # OK. `version` is defined in the reusable workflow
+          - run: echo '${{ needs.get_build_info.outputs.version }}'
+          # ERROR: `tag` is not defined in the reusable workflow
+          - run: echo '${{ needs.get_build_info.outputs.tag }}'
+    ```
+- Add missing properties in contexts and improve types of some properties looking at [the official contexts document](https://docs.github.com/en/actions/learn-github-actions/contexts#github-context).
+  - `github.action_status`
+  - `runner.debug`
+  - `services.<service_id>.ports`
+- Fix `on.workflow_call.inputs.<name>.description` and `on.workflow_call.secrets.<name>.description` were incorrectly mandatory. They are actually optional.
+- Report parse errors when parsing `action.yml` in local actions. They were ignored in previous versions.
+- Sort the order of properties in an object type displayed in error message. In previous versions, actionlint sometimes displayed `{a: true, b: string}`, or it displayed `{b: string, a: true}` for the same object type. This randomness was caused by random iteration of map values in Go.
+- Update popular actions data set to the latest.
+
+[Changes][v1.6.18]
+
+
+<a name="v1.6.17"></a>
+# [v1.6.17](https://github.com/rhysd/actionlint/releases/tag/v1.6.17) - 28 Aug 2022
+
+- Allow workflow calls are available in matrix jobs. See [the official announcement](https://github.blog/changelog/2022-08-22-github-actions-improvements-to-reusable-workflows-2/) for more details. ([#197](https://github.com/rhysd/actionlint/issues/197))
+  ```yaml
+  jobs:
+    ReuseableMatrixJobForDeployment:
+      strategy:
+        matrix:
+          target: [dev, stage, prod]
+      uses: octocat/octo-repo/.github/workflows/deployment.yml@main
+      with:
+        target: ${{ matrix.target }}
+  ```
+- Allow nested workflow calls. See [the official announcement](https://github.blog/changelog/2022-08-22-github-actions-improvements-to-reusable-workflows-2/) for more details. ([#201](https://github.com/rhysd/actionlint/issues/201))
+  ```yaml
+  on: workflow_call
+
+  jobs:
+    call-another-reusable:
+      uses: path/to/another-reusable.yml@v1
+  ```
+- Fix job outputs should be passed to `needs.*.outputs` of only direct children. Until v1.6.16, they are passed to any downstream jobs. ([#151](https://github.com/rhysd/actionlint/issues/151))
+  ```yaml
+  jobs:
+    first:
+      runs-on: ubuntu-latest
+      outputs:
+        first: 'output from first job'
+      steps:
+        - run: echo 'first'
+
+    second:
+      needs: [first]
+      runs-on: ubuntu-latest
+      outputs:
+        second: 'output from second job'
+      steps:
+        - run: echo 'second'
+
+    third:
+      needs: [second]
+      runs-on: ubuntu-latest
+      steps:
+        - run: echo '${{ toJSON(needs.second.outputs) }}'
+        # ERROR: `needs.first` does not exist, but v1.6.16 reported no error
+        - run: echo '${{ toJSON(needs.first.outputs) }}'
+  ```
+  When you need both `needs.first` and `needs.second`, add the both to `needs:`.
+  ```yaml
+    third:
+      needs: [first, second]
+      runs-on: ubuntu-latest
+      steps:
+        # OK
+        -  echo '${{ toJSON(needs.first.outputs) }}'
+  ```
+- Fix `}}` in string literals are detected as end marker of placeholder `${{ }}`. ([#205](https://github.com/rhysd/actionlint/issues/205))
+  ```yaml
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      strategy:
+        # This caused an incorrect error until v1.6.16
+        matrix: ${{ fromJSON('{"foo":{}}') }}
+  ```
+- Fix `working-directory:` should not be available with `uses:` in steps. `working-directory:` is only available with `run:`. ([#207](https://github.com/rhysd/actionlint/issues/207))
+  ```yaml
+  steps:
+    - uses: actions/checkout@v3
+      # ERROR: `working-directory:` is not available here
+      working-directory: ./foo
+  ```
+- The working directory for running `actionlint` command can be set via [`WorkingDir` field of `LinterOptions` struct](https://pkg.go.dev/github.com/rhysd/actionlint#LinterOptions). When it is empty, the return value from `os.Getwd` will be used.
+- Update popular actions data set. `actions/configure-pages@v2` was added.
+- Use Go 1.19 on CI by default. It is used to build release binaries.
+- Update dependencies (go-yaml/yaml v3.0.1).
+- Update playground dependencies (except for CodeMirror v6).
+
+[Changes][v1.6.17]
+
+
 <a name="v1.6.16"></a>
 # [v1.6.16](https://github.com/rhysd/actionlint/releases/tag/v1.6.16) - 19 Aug 2022
 
@@ -70,6 +389,7 @@
   ```yaml
   if: ${{ x == "foo" }}
   ```
+- Add support for [`merge_group` workflow trigger](https://github.blog/changelog/2022-08-18-merge-group-webhook-event-and-github-actions-workflow-trigger/).
 - Add official actions to manage GitHub Pages to popular actions data set.
   - `actions/configure-pages@v1`
   - `actions/deploy-pages@v1`
@@ -963,6 +1283,11 @@ See documentation for more details:
 [Changes][v1.0.0]
 
 
+[v1.6.21]: https://github.com/rhysd/actionlint/compare/v1.6.20...v1.6.21
+[v1.6.20]: https://github.com/rhysd/actionlint/compare/v1.6.19...v1.6.20
+[v1.6.19]: https://github.com/rhysd/actionlint/compare/v1.6.18...v1.6.19
+[v1.6.18]: https://github.com/rhysd/actionlint/compare/v1.6.17...v1.6.18
+[v1.6.17]: https://github.com/rhysd/actionlint/compare/v1.6.16...v1.6.17
 [v1.6.16]: https://github.com/rhysd/actionlint/compare/v1.6.15...v1.6.16
 [v1.6.15]: https://github.com/rhysd/actionlint/compare/v1.6.14...v1.6.15
 [v1.6.14]: https://github.com/rhysd/actionlint/compare/v1.6.13...v1.6.14

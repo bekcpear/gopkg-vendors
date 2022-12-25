@@ -194,39 +194,39 @@ var BuiltinFuncSignatures = map[string][]*FuncSignature{
 var BuiltinGlobalVariableTypes = map[string]ExprType{
 	// https://docs.github.com/en/actions/learn-github-actions/contexts#github-context
 	"github": NewStrictObjectType(map[string]ExprType{
-		"action":           StringType{},
-		"action_path":      StringType{},
-		"actor":            StringType{},
-		"base_ref":         StringType{},
-		"event":            NewEmptyObjectType(), // Note: Stricter type check for this payload would be possible
-		"event_name":       StringType{},
-		"event_path":       StringType{},
-		"head_ref":         StringType{},
-		"job":              StringType{},
-		"ref":              StringType{},
-		"ref_name":         StringType{},
-		"ref_protected":    StringType{},
-		"ref_type":         StringType{},
-		"repository":       StringType{},
-		"repository_owner": StringType{},
-		"run_id":           StringType{},
-		"run_number":       StringType{},
-		"run_attempt":      StringType{},
-		"server_url":       StringType{},
-		"sha":              StringType{},
-		"token":            StringType{},
-		"triggering_actor": StringType{},
-		"workflow":         StringType{},
-		"workspace":        StringType{},
-		// Below props are not documented but actually exist
+		"action":            StringType{},
+		"action_path":       StringType{},
 		"action_ref":        StringType{},
 		"action_repository": StringType{},
+		"action_status":     StringType{},
+		"actor":             StringType{},
 		"api_url":           StringType{},
+		"base_ref":          StringType{},
 		"env":               StringType{},
+		"event":             NewEmptyObjectType(), // Note: Stricter type check for this payload would be possible
+		"event_name":        StringType{},
+		"event_path":        StringType{},
 		"graphql_url":       StringType{},
+		"head_ref":          StringType{},
+		"job":               StringType{},
+		"ref":               StringType{},
+		"ref_name":          StringType{},
+		"ref_protected":     StringType{},
+		"ref_type":          StringType{},
 		"path":              StringType{},
+		"repository":        StringType{},
+		"repository_owner":  StringType{},
 		"repositoryurl":     StringType{}, // repositoryUrl
 		"retention_days":    NumberType{},
+		"run_id":            StringType{},
+		"run_number":        StringType{},
+		"run_attempt":       StringType{},
+		"server_url":        StringType{},
+		"sha":               StringType{},
+		"token":             StringType{},
+		"triggering_actor":  StringType{},
+		"workflow":          StringType{},
+		"workspace":         StringType{},
 	}),
 	// https://docs.github.com/en/actions/learn-github-actions/contexts#env-context
 	"env": NewMapObjectType(StringType{}), // env.<env_name>
@@ -240,7 +240,7 @@ var BuiltinGlobalVariableTypes = map[string]ExprType{
 			NewStrictObjectType(map[string]ExprType{
 				"id":      StringType{}, // job.services.<service id>.id
 				"network": StringType{},
-				"ports":   NewEmptyObjectType(),
+				"ports":   NewMapObjectType(StringType{}),
 			}),
 		),
 		"status": StringType{},
@@ -254,8 +254,8 @@ var BuiltinGlobalVariableTypes = map[string]ExprType{
 		"arch":       StringType{},
 		"temp":       StringType{},
 		"tool_cache": StringType{},
-		// These are not documented but actually exist
-		"workspace": StringType{},
+		"debug":      StringType{},
+		"workspace":  StringType{},
 	}),
 	// https://docs.github.com/en/actions/learn-github-actions/contexts#secrets-context
 	"secrets": NewMapObjectType(StringType{}),
@@ -284,12 +284,14 @@ var BuiltinGlobalVariableTypes = map[string]ExprType{
 // - https://docs.github.com/en/actions/learn-github-actions/contexts
 // - https://docs.github.com/en/actions/learn-github-actions/expressions
 type ExprSemanticsChecker struct {
-	funcs           map[string][]*FuncSignature
-	vars            map[string]ExprType
-	errs            []*ExprError
-	varsCopied      bool
-	githubVarCopied bool
-	untrusted       *UntrustedInputChecker
+	funcs                 map[string][]*FuncSignature
+	vars                  map[string]ExprType
+	errs                  []*ExprError
+	varsCopied            bool
+	githubVarCopied       bool
+	untrusted             *UntrustedInputChecker
+	availableContexts     []string
+	availableSpecialFuncs []string
 }
 
 // NewExprSemanticsChecker creates new ExprSemanticsChecker instance. When checkUntrustedInput is
@@ -415,12 +417,80 @@ func (sema *ExprSemanticsChecker) UpdateJobs(ty *ObjectType) {
 	sema.vars["jobs"] = ty
 }
 
-// NoEnv deletes 'env' context from global scope. This method is useful when checking expressions
-// in a template where 'env' context is banned ('id:', 'uses:', and 'env' at toplevel or job level).
-// See #158 for more details.
-func (sema *ExprSemanticsChecker) NoEnv() {
-	sema.ensureVarsCopied()
-	delete(sema.vars, "env")
+// SetContextAvailability sets available context names while semantics checks. Some contexts limit
+// where they can be used.
+// https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability
+//
+// Elements of 'avail' parameter must be in lower case to check context names in case-insensitive.
+//
+// If this method is not called before checks, ExprSemanticsChecker considers any contexts are
+// available by default.
+// Available contexts for workflow keys can be obtained from actionlint.ContextAvailability.
+func (sema *ExprSemanticsChecker) SetContextAvailability(avail []string) {
+	sema.availableContexts = avail
+}
+
+func (sema *ExprSemanticsChecker) checkAvailableContext(n *VariableNode) {
+	if len(sema.availableContexts) == 0 {
+		return
+	}
+
+	ctx := strings.ToLower(n.Name)
+	for _, c := range sema.availableContexts {
+		if c == ctx {
+			return
+		}
+	}
+
+	s := "contexts are"
+	if len(sema.availableContexts) == 1 {
+		s = "context is"
+	}
+	sema.errorf(
+		n,
+		"context %q is not allowed here. available %s %s. see https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability for more details",
+		n.Name,
+		s,
+		quotes(sema.availableContexts),
+	)
+}
+
+// SetSpecialFunctionAvailability sets names of available special functions while semantics checks.
+// Some functions limit where they can be used.
+// https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability
+//
+// Elements of 'avail' parameter must be in lower case to check function names in case-insensitive.
+//
+// If this method is not called before checks, ExprSemanticsChecker considers no special function is
+// allowed by default. Allowed functions can be obtained from actionlint.SpecialFunctionNames global
+// constant.
+//
+// Available function names for workflow keys can be obtained from actionlint.ContextAvailability.
+func (sema *ExprSemanticsChecker) SetSpecialFunctionAvailability(avail []string) {
+	sema.availableSpecialFuncs = avail
+}
+
+func (sema *ExprSemanticsChecker) checkSpecialFunctionAvailability(n *FuncCallNode) {
+	f := strings.ToLower(n.Callee)
+
+	allowed, ok := SpecialFunctionNames[f]
+	if !ok {
+		return // This function is not special
+	}
+
+	for _, sp := range sema.availableSpecialFuncs {
+		if sp == f {
+			return
+		}
+	}
+
+	sema.errorf(
+		n,
+		"calling function %q is not allowed here. %q is only available in %s. see https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability for more details",
+		n.Callee,
+		n.Callee,
+		quotes(allowed),
+	)
 }
 
 func (sema *ExprSemanticsChecker) visitUntrustedCheckerOnLeaveNode(n ExprNode) {
@@ -440,6 +510,7 @@ func (sema *ExprSemanticsChecker) checkVariable(n *VariableNode) ExprType {
 		return AnyType{}
 	}
 
+	sema.checkAvailableContext(n)
 	return v
 }
 
@@ -537,7 +608,7 @@ func (sema *ExprSemanticsChecker) checkArrayDeref(n *ArrayDerefNode) ExprType {
 }
 
 func (sema *ExprSemanticsChecker) checkIndexAccess(n *IndexAccessNode) ExprType {
-	// Note: Index must be visted before Index to make UntrustedInputChecker work correctly even if
+	// Note: Index must be visited before Index to make UntrustedInputChecker work correctly even if
 	// the expression has some nest like foo[aaa.bbb].bar. Nest happens in top-down order and
 	// properties/indices access check is done in bottom-up order. So, as far as we visit nested
 	// index nodes before visiting operand, the index is recursively checked first.
@@ -639,6 +710,9 @@ func checkFuncSignature(n *FuncCallNode, sig *FuncSignature, args []ExprType) *E
 }
 
 func (sema *ExprSemanticsChecker) checkBuiltinFunctionCall(n *FuncCallNode, sig *FuncSignature) {
+	sema.checkSpecialFunctionAvailability(n)
+
+	// Special checks for specific built-in functions
 	switch n.Callee {
 	case "format":
 		lit, ok := n.Args[0].(*StringNode)
@@ -761,7 +835,7 @@ func (sema *ExprSemanticsChecker) check(expr ExprNode) ExprType {
 	}
 }
 
-// Check checks sematics of given expression syntax tree. It returns the type of the expression as
+// Check checks semantics of given expression syntax tree. It returns the type of the expression as
 // the first return value when the check was successfully done. And it returns all errors found
 // while checking the expression as the second return value.
 func (sema *ExprSemanticsChecker) Check(expr ExprNode) (ExprType, []*ExprError) {

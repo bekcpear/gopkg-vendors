@@ -51,6 +51,16 @@ type Bool struct {
 	Pos *Pos
 }
 
+func (b *Bool) String() string {
+	if b.Expression != nil {
+		return b.Expression.Value
+	}
+	if b.Value {
+		return "true"
+	}
+	return "false"
+}
+
 // Int represents generic integer value in YAML file with position.
 type Int struct {
 	// Value is a raw value of the integer string.
@@ -177,7 +187,7 @@ type DispatchInput struct {
 // WorkflowDispatchEvent is event on dispatching workflow manually.
 // https://docs.github.com/en/actions/learn-github-actions/events-that-trigger-workflows#workflow_dispatch
 type WorkflowDispatchEvent struct {
-	// Inputs is map from input names to input attributes.
+	// Inputs is map from input names to input attributes. Keys are in lower case since they are case insensitive.
 	Inputs map[string]*DispatchInput
 	// Pos is a position in source.
 	Pos *Pos
@@ -220,6 +230,8 @@ const (
 // WorkflowCallEventInput is an input configuration of workflow_call event.
 // https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#onworkflow_callinputs
 type WorkflowCallEventInput struct {
+	// Name is a name of the input.
+	Name *String
 	// Description is a description of the input.
 	Description *String
 	// Default is a default value of the input. Nil means no default value.
@@ -230,6 +242,8 @@ type WorkflowCallEventInput struct {
 	// Type of the input, which must be one of 'boolean', 'number' or 'string'. This property is required.
 	// https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#onworkflow_callinput_idtype
 	Type WorkflowCallEventInputType
+	// ID is an ID of the input. Input ID is in lower case because it is case-insensitive.
+	ID string
 }
 
 // IsRequired returns if the input is marked as required or not.
@@ -241,6 +255,8 @@ func (i *WorkflowCallEventInput) IsRequired() bool {
 // WorkflowCallEventSecret is a secret configuration of workflow_call event.
 // https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#onworkflow_callsecrets
 type WorkflowCallEventSecret struct {
+	// Name is a name of the secret.
+	Name *String
 	// Description is a description of the secret.
 	Description *String
 	// Required represents if the secret is required or optional. When this value is nil, it means optional.
@@ -251,6 +267,8 @@ type WorkflowCallEventSecret struct {
 // WorkflowCallEventOutput is an output configuration of workflow_call event.
 // https://docs.github.com/en/actions/using-workflows/reusing-workflows#using-outputs-from-a-reusable-workflow
 type WorkflowCallEventOutput struct {
+	// Name is a name of the output.
+	Name *String
 	// Description is a description of the output.
 	Description *String
 	// Value is an expression for the value of the output.
@@ -260,16 +278,17 @@ type WorkflowCallEventOutput struct {
 // WorkflowCallEvent is workflow_call event configuration.
 // https://docs.github.com/en/actions/learn-github-actions/events-that-trigger-workflows#workflow-reuse-events
 type WorkflowCallEvent struct {
-	// Inputs is a map from input name to input configuration.
+	// Inputs is an array of inputs of the workflow_call event. This value is not a map unlike other fields of this
+	// struct since its order is important when checking the default values of inputs.
 	// https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#onworkflow_callinputs
-	Inputs map[*String]*WorkflowCallEventInput
+	Inputs []*WorkflowCallEventInput
 	// Secrets is a map from name of secret to secret configuration. When 'secrets' is omitted, nil is set to this
-	// field.
+	// field. Keys are in lower case since they are case-insensitive.
 	// https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#onworkflow_callsecrets
-	Secrets map[*String]*WorkflowCallEventSecret
-	// Outputs is a map from name of output to output configuration.
+	Secrets map[string]*WorkflowCallEventSecret
+	// Outputs is a map from name of output to output configuration. Keys are in lower case since they are case-insensitive.
 	// https://docs.github.com/en/actions/using-workflows/reusing-workflows#using-outputs-from-a-reusable-workflow
-	Outputs map[*String]*WorkflowCallEventOutput
+	Outputs map[string]*WorkflowCallEventOutput
 	// Pos is a position in source.
 	Pos *Pos
 }
@@ -390,7 +409,7 @@ type Input struct {
 type ExecAction struct {
 	// https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#jobsjob_idstepsuses
 	Uses *String
-	// Inputs represents inputs to the action to execute in 'with' section
+	// Inputs represents inputs to the action to execute in 'with' section. Keys are in lower case since they are case-insensitive.
 	Inputs map[string]*Input
 	// Entrypoint represents optional 'entrypoint' field in 'with' section. Nil field means nothing specified
 	// https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#jobsjob_idstepswithentrypoint
@@ -432,7 +451,7 @@ type RawYAMLValue interface {
 
 // RawYAMLObject is raw YAML mapping value.
 type RawYAMLObject struct {
-	// Props is map from property names to their values.
+	// Props is map from property names to their values. Keys are in lower case since they are case-insensitive.
 	Props map[string]RawYAMLValue
 	pos   *Pos
 }
@@ -600,7 +619,7 @@ func (cs *MatrixCombinations) ContainsExpression() bool {
 // Matrix is matrix variations configuration of a job.
 // https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#jobsjob_idstrategymatrix
 type Matrix struct {
-	// Values stores mappings from name to values.
+	// Values stores mappings from name to values. Keys are in lower case since they are case-insensitive.
 	Rows map[string]*MatrixRow
 	// Include is list of combinations of matrix values and additional values on running matrix combinations.
 	// https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#example-including-additional-values-into-combinations
@@ -752,9 +771,11 @@ type WorkflowCallSecret struct {
 type WorkflowCall struct {
 	// Uses is a workflow specification to be called. This field is mandatory.
 	Uses *String
-	// Inputs is a map from input name to input value at 'with:'.
+	// Inputs is a map from input name to input value at 'with:'. Keys are in lower case since input names
+	// are case-insensitive.
 	Inputs map[string]*WorkflowCallInput
-	// Secrets is a map from secret name to secret value at 'secrets:'.
+	// Secrets is a map from secret name to secret value at 'secrets:'. Keys are in lower case since input
+	// names are case-insensitive.
 	Secrets map[string]*WorkflowCallSecret
 	// InheritSecrets is true when 'secrets: inherit' is specified. In this case, Secrets must be empty.
 	// https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#onworkflow_callsecretsinherit
@@ -807,7 +828,7 @@ type Job struct {
 	ContinueOnError *Bool
 	// Container is container configuration to run the job.
 	Container *Container
-	// Services is map from service names to service configurations.
+	// Services is map from service names to service configurations. Keys are in lower case since they are case-insensitive.
 	// https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#jobsjob_idservices
 	Services map[string]*Service
 	// WorkflowCall is a workflow call by 'uses:'.
@@ -823,6 +844,9 @@ type Workflow struct {
 	// Name is name of the workflow. This field can be nil when user didn't specify the name explicitly.
 	// https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#name
 	Name *String
+	// RunName is the name of workflow runs. This field can be set dynamically using ${{ }}.
+	// https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#run-name
+	RunName *String
 	// On is list of events which can trigger this workflow.
 	// https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#onpushpull_requestbranchestags
 	On []Event
@@ -836,7 +860,7 @@ type Workflow struct {
 	// Concurrency is concurrency configuration of entire workflow. Each jobs also can their own
 	// concurrency configurations.
 	Concurrency *Concurrency
-	// Jobs is mappings from job ID to the job object
+	// Jobs is mappings from job ID to the job object. Keys are in lower case since they are case-insensitive.
 	Jobs map[string]*Job
 }
 
