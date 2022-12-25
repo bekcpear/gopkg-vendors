@@ -17,6 +17,8 @@ on:
     - cron: 16 */1 * * *
   workflow_dispatch:
 
+concurrency: main
+
 jobs:
   get-list:
     name: Get the modules list
