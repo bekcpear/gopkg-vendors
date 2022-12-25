@@ -225,6 +225,8 @@ type stream struct {
 	// For processing consumers as a list without main stream lock.
 	clsMu sync.RWMutex
 	cList []*consumer
+	sch   chan struct{}
+	sigq  *ipQueue // of *cMsg
 
 	// TODO(dlc) - Hide everything below behind two pointers.
 	// Clustered mode.
@@ -438,7 +440,12 @@ func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileSt
 		msgs:      s.newIPQueue(qpfx + "messages"), // of *inMsg
 		qch:       make(chan struct{}),
 		uch:       make(chan struct{}, 4),
+		sch:       make(chan struct{}, 1),
 	}
+
+	// Start our signaling routine to process consumers.
+	mset.sigq = s.newIPQueue(qpfx + "obs") // of *cMsg
+	go mset.signalConsumersLoop()
 
 	// For no-ack consumers when we are interest retention.
 	if cfg.Retention != LimitsPolicy {
@@ -2224,7 +2231,14 @@ func (mset *stream) setupMirrorConsumer() error {
 	}
 
 	b, _ := json.Marshal(req)
-	subject := fmt.Sprintf(JSApiConsumerCreateT, mset.cfg.Mirror.Name)
+
+	var subject string
+	if req.Config.FilterSubject != _EMPTY_ {
+		req.Config.Name = fmt.Sprintf("mirror-%s", createConsumerName())
+		subject = fmt.Sprintf(JSApiConsumerCreateExT, mset.cfg.Mirror.Name, req.Config.Name, req.Config.FilterSubject)
+	} else {
+		subject = fmt.Sprintf(JSApiConsumerCreateT, mset.cfg.Mirror.Name)
+	}
 	if ext != nil {
 		subject = strings.Replace(subject, JSApiPrefix, ext.ApiPrefix, 1)
 		subject = strings.ReplaceAll(subject, "..", ".")
@@ -2479,7 +2493,13 @@ func (mset *stream) setSourceConsumer(iname string, seq uint64, startTime time.T
 			req.Config.OptStartSeq = ssi.OptStartSeq
 			req.Config.DeliverPolicy = DeliverByStartSequence
 		} else if ssi.OptStartTime != nil {
-			req.Config.OptStartTime = ssi.OptStartTime
+			// Check to see if our configured start is before what we remember.
+			// Applicable on restart similar to below.
+			if ssi.OptStartTime.Before(si.start) {
+				req.Config.OptStartTime = &si.start
+			} else {
+				req.Config.OptStartTime = ssi.OptStartTime
+			}
 			req.Config.DeliverPolicy = DeliverByStartTime
 		} else if !si.start.IsZero() {
 			// We are falling back to time based startup on a recover, but our messages are gone. e.g. purge, expired, retention policy.
@@ -4033,21 +4053,100 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 
 	// Signal consumers for new messages.
 	if numConsumers > 0 {
-		mset.clsMu.RLock()
-		for _, o := range mset.cList {
-			o.mu.Lock()
-			if o.isLeader() && o.isFilteredMatch(subject) {
-				if seq > o.npcm {
-					o.npc++
-				}
-				o.signalNewMessages()
+		if numConsumers > consumerSignalThreshold {
+			mset.sigq.push(newCMsg(subject, seq))
+			select {
+			case mset.sch <- struct{}{}:
+			default:
 			}
-			o.mu.Unlock()
+		} else {
+			mset.signalConsumers(subject, seq)
 		}
-		mset.clsMu.RUnlock()
 	}
 
 	return nil
+}
+
+// Number of consumers to consider offloading signal processing.
+const consumerSignalThreshold = 10
+
+// Used to signal inbound message to registered consumers.
+type cMsg struct {
+	seq  uint64
+	subj string
+}
+
+// Pool to recycle consumer bound msgs.
+var cMsgPool sync.Pool
+
+// Used to queue up consumer bound msgs for signaling.
+func newCMsg(subj string, seq uint64) *cMsg {
+	var m *cMsg
+	cm := cMsgPool.Get()
+	if cm != nil {
+		m = cm.(*cMsg)
+	} else {
+		m = new(cMsg)
+	}
+	m.subj, m.seq = subj, seq
+
+	return m
+}
+
+func (m *cMsg) returnToPool() {
+	if m == nil {
+		return
+	}
+	m.subj, m.seq = _EMPTY_, 0
+	cMsgPool.Put(m)
+}
+
+// Go routine to signal consumers.
+// Offloaded from stream msg processing.
+func (mset *stream) signalConsumersLoop() {
+	mset.mu.RLock()
+	s, qch, sch, msgs := mset.srv, mset.qch, mset.sch, mset.sigq
+	mset.mu.RUnlock()
+
+	for {
+		select {
+		case <-s.quitCh:
+			return
+		case <-qch:
+			return
+		case <-sch:
+			cms := msgs.pop()
+			for _, cm := range cms {
+				m := cm.(*cMsg)
+				seq, subj := m.seq, m.subj
+				m.returnToPool()
+				// Signal all appropriate consumers.
+				mset.signalConsumers(subj, seq)
+			}
+			msgs.recycle(&cms)
+		}
+	}
+}
+
+// This will update and signal all consumers that match.
+func (mset *stream) signalConsumers(subj string, seq uint64) {
+	mset.clsMu.RLock()
+	defer mset.clsMu.RUnlock()
+
+	for _, o := range mset.cList {
+		o.mu.Lock()
+		if o.isLeader() && o.isFilteredMatch(subj) {
+			if seq > o.npcm {
+				o.npc++
+			}
+			if o.mset != nil {
+				if o.isPushMode() && o.active || o.isPullMode() && !o.waiting.isEmpty() {
+					o.signalNewMessages()
+				}
+			}
+		}
+		o.mu.Unlock()
+	}
 }
 
 // Internal message for use by jetstream subsystem.
@@ -4393,6 +4492,7 @@ func (mset *stream) stop(deleteFlag, advisory bool) error {
 		mset.msgs.unregister()
 		mset.ackq.unregister()
 		mset.outq.unregister()
+		mset.sigq.unregister()
 	}
 
 	// Snapshot store.
@@ -4582,7 +4682,8 @@ func (mset *stream) partitionUnique(partition string) bool {
 		if o.cfg.FilterSubject == _EMPTY_ {
 			return false
 		}
-		if subjectIsSubsetMatch(partition, o.cfg.FilterSubject) {
+		if subjectIsSubsetMatch(partition, o.cfg.FilterSubject) ||
+			subjectIsSubsetMatch(o.cfg.FilterSubject, partition) {
 			return false
 		}
 	}
@@ -4852,4 +4953,38 @@ func (a *Account) RestoreStream(ncfg *StreamConfig, r io.Reader) (*stream, error
 		}
 	}
 	return mset, nil
+}
+
+// This is to check for dangling messages.
+// Issue https://github.com/nats-io/nats-server/issues/3612
+func (mset *stream) checkForOrphanMsgs() {
+	// We need to grab the low water mark for all consumers.
+	var ackFloor uint64
+	mset.mu.RLock()
+	for _, o := range mset.consumers {
+		o.mu.RLock()
+		if o.store != nil {
+			if state, err := o.store.BorrowState(); err == nil {
+				if ackFloor == 0 || state.AckFloor.Stream < ackFloor {
+					ackFloor = state.AckFloor.Stream
+				}
+			}
+		}
+		o.mu.RUnlock()
+	}
+	// Grabs stream state.
+	var state StreamState
+	mset.store.FastState(&state)
+	s, acc := mset.srv, mset.acc
+	mset.mu.RUnlock()
+
+	if ackFloor > state.FirstSeq {
+		req := &JSApiStreamPurgeRequest{Sequence: ackFloor + 1}
+		purged, err := mset.purge(req)
+		if err != nil {
+			s.Warnf("stream '%s > %s' could not auto purge orphaned messages: %v", acc, mset.name(), err)
+		} else {
+			s.Debugf("stream '%s > %s' auto purged %d messages", acc, mset.name(), purged)
+		}
+	}
 }

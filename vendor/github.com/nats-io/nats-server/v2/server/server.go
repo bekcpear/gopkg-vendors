@@ -152,6 +152,7 @@ type Server struct {
 	routeInfoJSON       []byte
 	routeResolver       netResolver
 	routesToSelf        map[string]struct{}
+	routeTLSName        string
 	leafNodeListener    net.Listener
 	leafNodeListenerErr error
 	leafNodeInfo        Info
@@ -2523,6 +2524,12 @@ func (s *Server) createClient(conn net.Conn) *client {
 	c.nonce = []byte(info.Nonce)
 	authRequired = info.AuthRequired
 
+	// Check to see if we have auth_required set but we also have a no_auth_user.
+	// If so set back to false.
+	if info.AuthRequired && opts.NoAuthUser != _EMPTY_ {
+		info.AuthRequired = false
+	}
+
 	s.totalClients++
 	s.mu.Unlock()
 
@@ -2911,9 +2918,7 @@ func (s *Server) numSubscriptions() uint32 {
 	var subs int
 	s.accounts.Range(func(k, v interface{}) bool {
 		acc := v.(*Account)
-		if acc.sl != nil {
-			subs += acc.TotalSubs()
-		}
+		subs += acc.TotalSubs()
 		return true
 	})
 	return uint32(subs)

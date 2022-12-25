@@ -134,14 +134,14 @@ func (sf *SuperFlag) String() string {
 }
 
 func (sf *SuperFlag) MergeAndCheckDefault(flag string) *SuperFlag {
-	sf, err := sf.MergeWithDefault(flag)
+	sf, err := sf.mergeAndCheckDefaultImpl(flag)
 	if err != nil {
 		glog.Fatal(err)
 	}
 	return sf
 }
 
-func (sf *SuperFlag) MergeWithDefault(flag string) (*SuperFlag, error) {
+func (sf *SuperFlag) mergeAndCheckDefaultImpl(flag string) (*SuperFlag, error) {
 	if sf == nil {
 		m, err := parseFlag(flag)
 		if err != nil {

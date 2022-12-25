@@ -166,7 +166,7 @@ github.com/codeclysm/extract
 # github.com/davecgh/go-spew v1.1.1
 ## explicit
 github.com/davecgh/go-spew/spew
-# github.com/dgraph-io/ristretto v0.1.1-0.20220403145359-8e850b710d6d
+# github.com/dgraph-io/ristretto v0.1.1
 ## explicit; go 1.12
 github.com/dgraph-io/ristretto
 github.com/dgraph-io/ristretto/z
@@ -321,11 +321,11 @@ github.com/matrix-org/go-sqlite3-js
 # github.com/matrix-org/gomatrix v0.0.0-20220926102614-ceba4d9f7530
 ## explicit; go 1.12
 github.com/matrix-org/gomatrix
-# github.com/matrix-org/gomatrixserverlib v0.0.0-20221101165746-0e4a8bb6db7e
+# github.com/matrix-org/gomatrixserverlib v0.0.0-20221129095800-8835f6db16b8
 ## explicit; go 1.18
 github.com/matrix-org/gomatrixserverlib
 github.com/matrix-org/gomatrixserverlib/tokens
-# github.com/matrix-org/pinecone v0.0.0-20221103125849-37f2e9b9ba37
+# github.com/matrix-org/pinecone v0.0.0-20221118192051-fef26631b847
 ## explicit; go 1.18
 github.com/matrix-org/pinecone/connections
 github.com/matrix-org/pinecone/multicast
@@ -365,7 +365,7 @@ github.com/mschoch/smat
 # github.com/nats-io/jwt/v2 v2.3.0
 ## explicit; go 1.16
 github.com/nats-io/jwt/v2
-# github.com/nats-io/nats-server/v2 v2.9.4
+# github.com/nats-io/nats-server/v2 v2.9.8
 ## explicit; go 1.19
 github.com/nats-io/nats-server/v2/conf
 github.com/nats-io/nats-server/v2/internal/ldap
@@ -373,7 +373,7 @@ github.com/nats-io/nats-server/v2/logger
 github.com/nats-io/nats-server/v2/server
 github.com/nats-io/nats-server/v2/server/pse
 github.com/nats-io/nats-server/v2/server/sysmem
-# github.com/nats-io/nats.go v1.19.0
+# github.com/nats-io/nats.go v1.20.0
 ## explicit; go 1.16
 github.com/nats-io/nats.go
 github.com/nats-io/nats.go/encoders/builtin

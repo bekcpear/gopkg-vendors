@@ -421,6 +421,10 @@ func (fs *fileStore) UpdateConfig(cfg *StreamConfig) error {
 		fs.ageChk.Stop()
 		fs.ageChk = nil
 	}
+
+	if cfg.MaxMsgsPer > 0 && cfg.MaxMsgsPer < old_cfg.MaxMsgsPer {
+		fs.enforceMsgPerSubjectLimit()
+	}
 	fs.mu.Unlock()
 
 	if cfg.MaxAge != 0 {
@@ -2141,7 +2145,7 @@ func (fs *fileStore) enforceBytesLimit() {
 	}
 }
 
-// Will make sure we have limits honored for max msgs per subject on recovery.
+// Will make sure we have limits honored for max msgs per subject on recovery or config update.
 // We will make sure to go through all msg blocks etc. but in practice this
 // will most likely only be the last one, so can take a more conservative approach.
 // Lock should be held.
@@ -6229,6 +6233,9 @@ func (o *consumerFileStore) UpdateConfig(cfg *ConsumerConfig) error {
 }
 
 func (o *consumerFileStore) Update(state *ConsumerState) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
 	// Sanity checks.
 	if state.AckFloor.Consumer > state.Delivered.Consumer {
 		return fmt.Errorf("bad ack floor for consumer")
@@ -6258,12 +6265,8 @@ func (o *consumerFileStore) Update(state *ConsumerState) error {
 		}
 	}
 
-	// Replace our state.
-	o.mu.Lock()
-
 	// Check to see if this is an outdated update.
 	if state.Delivered.Consumer < o.state.Delivered.Consumer {
-		o.mu.Unlock()
 		return fmt.Errorf("old update ignored")
 	}
 
@@ -6272,7 +6275,6 @@ func (o *consumerFileStore) Update(state *ConsumerState) error {
 	o.state.Pending = pending
 	o.state.Redelivered = redelivered
 	o.kickFlusher()
-	o.mu.Unlock()
 
 	return nil
 }
@@ -6441,6 +6443,16 @@ func (o *consumerFileStore) Type() StorageType { return FileStorage }
 // State retrieves the state from the state file.
 // This is not expected to be called in high performance code, only on startup.
 func (o *consumerFileStore) State() (*ConsumerState, error) {
+	return o.stateWithCopy(true)
+}
+
+// This will not copy pending or redelivered, so should only be done under the
+// consumer owner's lock.
+func (o *consumerFileStore) BorrowState() (*ConsumerState, error) {
+	return o.stateWithCopy(false)
+}
+
+func (o *consumerFileStore) stateWithCopy(doCopy bool) (*ConsumerState, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -6455,10 +6467,18 @@ func (o *consumerFileStore) State() (*ConsumerState, error) {
 		state.Delivered = o.state.Delivered
 		state.AckFloor = o.state.AckFloor
 		if len(o.state.Pending) > 0 {
-			state.Pending = o.copyPending()
+			if doCopy {
+				state.Pending = o.copyPending()
+			} else {
+				state.Pending = o.state.Pending
+			}
 		}
 		if len(o.state.Redelivered) > 0 {
-			state.Redelivered = o.copyRedelivered()
+			if doCopy {
+				state.Redelivered = o.copyRedelivered()
+			} else {
+				state.Redelivered = o.state.Redelivered
+			}
 		}
 		return state, nil
 	}
@@ -6491,15 +6511,23 @@ func (o *consumerFileStore) State() (*ConsumerState, error) {
 	o.state.Delivered = state.Delivered
 	o.state.AckFloor = state.AckFloor
 	if len(state.Pending) > 0 {
-		o.state.Pending = make(map[uint64]*Pending, len(state.Pending))
-		for seq, p := range state.Pending {
-			o.state.Pending[seq] = &Pending{p.Sequence, p.Timestamp}
+		if doCopy {
+			o.state.Pending = make(map[uint64]*Pending, len(state.Pending))
+			for seq, p := range state.Pending {
+				o.state.Pending[seq] = &Pending{p.Sequence, p.Timestamp}
+			}
+		} else {
+			o.state.Pending = state.Pending
 		}
 	}
 	if len(state.Redelivered) > 0 {
-		o.state.Redelivered = make(map[uint64]uint64, len(state.Redelivered))
-		for seq, dc := range state.Redelivered {
-			o.state.Redelivered[seq] = dc
+		if doCopy {
+			o.state.Redelivered = make(map[uint64]uint64, len(state.Redelivered))
+			for seq, dc := range state.Redelivered {
+				o.state.Redelivered[seq] = dc
+			}
+		} else {
+			o.state.Redelivered = state.Redelivered
 		}
 	}
 
