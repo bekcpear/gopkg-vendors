@@ -105,7 +105,7 @@ case ${MODE} in
     . "${WORKDIR}/.funcs/_vercmp.sh"
     i=${index[${MODULE}]}
     TYPE=${sources[$i]}
-    REPO=${paths[$i]}
+    RPATH=${paths[$i]}
     _current_tag_prefix="vendor-${MODULE}-"
     _gg_query_tag_f="{
         \"query\": \"query { \
@@ -121,7 +121,7 @@ case ${MODE} in
           } \
         }\"
       }"
-    printf -v _gg_query_tag "${_gg_query_tag_f}" bekcpear gopkg-vendors \
+    printf -v _gg_query_tag "${_gg_query_tag_f}" ${GITHUB_REPO%/*} ${GITHUB_REPO#*/} \
       "query: \\\"${_current_tag_prefix}\\\", "
     _res=$(curl -X POST \
       -H "Accept: application/json" \
@@ -133,7 +133,7 @@ case ${MODE} in
     echo "current version: ${_current}"
     case ${TYPE} in
       github)
-        printf -v _gg_query_tag "${_gg_query_tag_f}" ${REPO%/*} ${REPO#*/}
+        printf -v _gg_query_tag "${_gg_query_tag_f}" ${RPATH%/*} ${RPATH#*/}
         _res=$(curl -X POST \
           -H "Accept: application/json" \
           -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -150,10 +150,10 @@ case ${MODE} in
   download-latest)
     i=${index[${MODULE}]}
     TYPE=${sources[$i]}
-    REPO=${paths[$i]}
+    RPATH=${paths[$i]}
     case $TYPE in
       github)
-        URL="https://github.com/$REPO/archive/refs/tags/$TAG.tar.gz"
+        URL="https://github.com/$RPATH/archive/refs/tags/$TAG.tar.gz"
     esac
     curl -fL -o $DST $URL
     ;;

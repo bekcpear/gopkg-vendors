@@ -13,6 +13,7 @@ on:
     paths:
       - 'modules-list'
       - 'geninfo.sh'
+      - '.github/workflows/make-vendor.yaml'
   schedule:
     - cron: 16 */1 * * *
   workflow_dispatch:
@@ -115,10 +116,10 @@ jobs:
       actions: read
       contents: write
     steps:
-      - name: confirm that git and curl are installed
+      - name: confirm that curl, git and gpg are installed
         run: |
           sudo apt-get update
-          sudo apt -y install git curl
+          sudo apt -y install curl git gpg
       - name: checkout the main branch of this repo
         uses: actions/checkout@v3
         with:
@@ -162,6 +163,22 @@ jobs:
         with:
           repository: bekcpear/vendor-for-go
           path: 'sh'
+      - name: import and setup gpg keys
+        env:
+          GPG_KEY: ${{ secrets.CI_OSS_AC_PRIV_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.CI_OSS_AC_PRIV_KEY_PP }}
+        shell: bash
+        run: |
+          mkdir -m 700 -p ~/.gnupg
+          curl -fL -o ~/.gnupg/gpg.conf 'https://gist.githubusercontent.com/bekcpear/ea30609b36c416b5c0900b73b1525d80/raw/69fb89178ed5f92473301a9cb304aa0cbd1ae14b/gpg.conf'
+          echo allow-preset-passphrase >~/.gnupg/gpg-agent.conf
+          gpg-connect-agent 'RELOADAGENT' '/bye'
+          gpg --version
+          gpg-agent --version
+          gpg --batch --import <<<"$GPG_KEY"
+          # don't set -x here to prevent leaking the hex-passphrase
+          HEXPP=$(echo -n "$GPG_PASSPHRASE" | od -An -w100 -t x1 | sed 's/\s//g')
+          gpg-connect-agent "PRESET_PASSPHRASE 0322FA1F33708FD3922A5C3655380A38A7533AF9 -1 $HEXPP" '/bye'
       - name: generate vendor dir and push to remote branch
         env:
           TAG: ${{ steps.download.outputs.tag }}
@@ -169,8 +186,11 @@ jobs:
         shell: bash
         run: |
           subpath=$(./goven/geninfo.sh --get-subpath $BRANCH_NAME)
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "github-actions[bot]"
+          git config --global user.email "ci@oss.ac"
+          git config --global user.name "OSS CI"
+          git config --global user.signingkey "0xC5097096E0A57AD6"
+          git config --global commit.gpgsign true
           export _PKG_PATH=$(pwd)/tarball/$BRANCH_NAME
           export _EXTRA_PUSH_ARGS="--atomic $REMOTE $BRANCH_NAME"
           ./sh/.do/do.sh $(pwd)/ven ${BRANCH_NAME}${subpath:+/}${subpath} $TAG
+          gpg-connect-agent 'CLEAR_PASSPHRASE 0322FA1F33708FD3922A5C3655380A38A7533AF9' '/bye' || true
