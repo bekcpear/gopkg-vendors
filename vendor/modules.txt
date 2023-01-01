@@ -73,7 +73,7 @@ github.com/creack/pty
 # github.com/davecgh/go-spew v1.1.1
 ## explicit
 github.com/davecgh/go-spew/spew
-# github.com/docker/cli v20.10.21+incompatible
+# github.com/docker/cli v20.10.22+incompatible
 ## explicit
 github.com/docker/cli/cli/compose/interpolation
 github.com/docker/cli/cli/compose/loader
@@ -92,7 +92,7 @@ github.com/docker/cli/opts
 ## explicit
 github.com/docker/distribution/digestset
 github.com/docker/distribution/reference
-# github.com/docker/docker v20.10.21+incompatible
+# github.com/docker/docker v20.10.22+incompatible
 ## explicit
 github.com/docker/docker/api
 github.com/docker/docker/api/types
