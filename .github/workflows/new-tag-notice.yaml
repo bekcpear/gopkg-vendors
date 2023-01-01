@@ -1,0 +1,36 @@
+# Used to send notifications when new tag pushed.
+#
+# Author: Ryan Qian <i@bitbili.net>
+#
+
+name: new tag notice
+on:
+  push:
+    tags:
+      - vendor*
+
+jobs:
+  send-notification:
+    name: send notification
+    runs-on: ubuntu-latest
+    steps:
+      - name: send
+        env:
+          REF: ${{ github.ref }}
+          REPO: ${{ github.repository }}
+          BARK_SERVER_URL: ${{ secrets.BARK_SERVER_URL }}
+          BARK_DEVICE_KEY: ${{ secrets.BARK_DEVICE_KEY }}
+        shell: bash
+        run: |
+          tag=${REF#refs/tags/}
+          curl -X "POST" "${BARK_SERVER_URL}/push" \
+               -H 'Content-Type: application/json; charset=utf-8' \
+               -d "{ \
+            \"body\": \"Tag: ${tag}\", \
+            \"device_key\": \"${BARK_DEVICE_KEY}\", \
+            \"title\": \"[gopkg-vendors] New tag created\", \
+            \"badge\": 1, \
+            \"group\": \"gopkg-vendors-new-tag\", \
+            \"icon\": \"${BARK_SERVER_URL%/*}/github-logo.png?v=2\", \
+            \"url\": \"https://github.com/${REPO}/releases/tag/${tag}\" \
+          }"
