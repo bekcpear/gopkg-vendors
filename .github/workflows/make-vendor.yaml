@@ -192,5 +192,6 @@ jobs:
           git config --global commit.gpgsign true
           export _PKG_PATH=$(pwd)/tarball/$BRANCH_NAME
           export _EXTRA_PUSH_ARGS="--atomic $REMOTE $BRANCH_NAME"
+          export _VERBOSE=1
           ./sh/.do/do.sh $(pwd)/ven ${BRANCH_NAME}${subpath:+/}${subpath} $TAG
           gpg-connect-agent 'CLEAR_PASSPHRASE 0322FA1F33708FD3922A5C3655380A38A7533AF9' '/bye' || true
