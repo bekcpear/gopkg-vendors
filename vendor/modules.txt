@@ -321,7 +321,7 @@ github.com/matrix-org/go-sqlite3-js
 # github.com/matrix-org/gomatrix v0.0.0-20220926102614-ceba4d9f7530
 ## explicit; go 1.12
 github.com/matrix-org/gomatrix
-# github.com/matrix-org/gomatrixserverlib v0.0.0-20230105074811-965b10ae73ab
+# github.com/matrix-org/gomatrixserverlib v0.0.0-20230119151039-d8748f6d5dc8
 ## explicit; go 1.18
 github.com/matrix-org/gomatrixserverlib
 github.com/matrix-org/gomatrixserverlib/tokens
