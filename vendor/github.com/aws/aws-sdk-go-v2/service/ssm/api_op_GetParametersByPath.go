@@ -38,17 +38,17 @@ func (c *Client) GetParametersByPath(ctx context.Context, params *GetParametersB
 type GetParametersByPathInput struct {
 
 	// The hierarchy for the parameter. Hierarchies start with a forward slash (/). The
-	// hierachy is the parameter name except the last part of the parameter. For the
-	// API call to succeeed, the last part of the parameter name can't be in the path.
-	// A parameter name hierarchy can have a maximum of 15 levels. Here is an example
-	// of a hierarchy: /Finance/Prod/IAD/WinServ2016/license33
+	// hierarchy is the parameter name except the last part of the parameter. For the
+	// API call to succeed, the last part of the parameter name can't be in the path. A
+	// parameter name hierarchy can have a maximum of 15 levels. Here is an example of
+	// a hierarchy: /Finance/Prod/IAD/WinServ2016/license33
 	//
 	// This member is required.
 	Path *string
 
 	// The maximum number of items to return for this call. The call also returns a
 	// token that you can specify in a subsequent call to get the next set of results.
-	MaxResults int32
+	MaxResults *int32
 
 	// A token to start the list. Use this token to get the next set of results.
 	NextToken *string
@@ -63,10 +63,10 @@ type GetParametersByPathInput struct {
 	// permission to access path /a, then the user can also access /a/b. Even if a user
 	// has explicitly been denied access in IAM for parameter /a/b, they can still call
 	// the GetParametersByPath API operation recursively for /a and view /a/b.
-	Recursive bool
+	Recursive *bool
 
 	// Retrieve all parameters in a hierarchy with their value decrypted.
-	WithDecryption bool
+	WithDecryption *bool
 
 	noSmithyDocumentSerde
 }
@@ -185,8 +185,8 @@ func NewGetParametersByPathPaginator(client GetParametersByPathAPIClient, params
 	}
 
 	options := GetParametersByPathPaginatorOptions{}
-	if params.MaxResults != 0 {
-		options.Limit = params.MaxResults
+	if params.MaxResults != nil {
+		options.Limit = *params.MaxResults
 	}
 
 	for _, fn := range optFns {
@@ -198,12 +198,13 @@ func NewGetParametersByPathPaginator(client GetParametersByPathAPIClient, params
 		client:    client,
 		params:    params,
 		firstPage: true,
+		nextToken: params.NextToken,
 	}
 }
 
 // HasMorePages returns a boolean indicating whether more pages are available
 func (p *GetParametersByPathPaginator) HasMorePages() bool {
-	return p.firstPage || p.nextToken != nil
+	return p.firstPage || (p.nextToken != nil && len(*p.nextToken) != 0)
 }
 
 // NextPage retrieves the next GetParametersByPath page.
@@ -215,7 +216,11 @@ func (p *GetParametersByPathPaginator) NextPage(ctx context.Context, optFns ...f
 	params := *p.params
 	params.NextToken = p.nextToken
 
-	params.MaxResults = p.options.Limit
+	var limit *int32
+	if p.options.Limit > 0 {
+		limit = &p.options.Limit
+	}
+	params.MaxResults = limit
 
 	result, err := p.client.GetParametersByPath(ctx, &params, optFns...)
 	if err != nil {
@@ -226,7 +231,10 @@ func (p *GetParametersByPathPaginator) NextPage(ctx context.Context, optFns ...f
 	prevToken := p.nextToken
 	p.nextToken = result.NextToken
 
-	if p.options.StopOnDuplicateToken && prevToken != nil && p.nextToken != nil && *prevToken == *p.nextToken {
+	if p.options.StopOnDuplicateToken &&
+		prevToken != nil &&
+		p.nextToken != nil &&
+		*prevToken == *p.nextToken {
 		p.nextToken = nil
 	}
 

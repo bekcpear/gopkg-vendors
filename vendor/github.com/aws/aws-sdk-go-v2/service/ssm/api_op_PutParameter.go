@@ -59,11 +59,11 @@ type PutParameterInput struct {
 	// Creating Systems Manager parameters
 	// (https://docs.aws.amazon.com/systems-manager/latest/userguide/sysman-paramstore-su-create.html)
 	// in the Amazon Web Services Systems Manager User Guide. The maximum length
-	// constraint listed below includes capacity for additional system attributes that
-	// aren't part of the name. The maximum length for a parameter name, including the
-	// full length of the parameter ARN, is 1011 characters. For example, the length of
-	// the following parameter name is 65 characters, not 20 characters:
-	// arn:aws:ssm:us-east-2:111122223333:parameter/ExampleParameterName
+	// constraint of 2048 characters listed below includes 1037 characters reserved for
+	// internal use by Systems Manager. The maximum length for a parameter name that
+	// you create is 1011 characters. This includes the characters in the ARN that
+	// precede the name you specify, such as
+	// arn:aws:ssm:us-east-2:111122223333:parameter/.
 	//
 	// This member is required.
 	Name *string
@@ -89,12 +89,14 @@ type PutParameterInput struct {
 	//
 	// * aws:ec2:image
 	//
-	// When you create a String parameter and
-	// specify aws:ec2:image, Amazon Web Services Systems Manager validates the
-	// parameter value is in the required format, such as ami-12345abcdeEXAMPLE, and
-	// that the specified AMI is available in your Amazon Web Services account. For
-	// more information, see Native parameter support for Amazon Machine Image (AMI)
-	// IDs
+	// * aws:ssm:integration
+	//
+	// When you create a
+	// String parameter and specify aws:ec2:image, Amazon Web Services Systems Manager
+	// validates the parameter value is in the required format, such as
+	// ami-12345abcdeEXAMPLE, and that the specified AMI is available in your Amazon
+	// Web Services account. For more information, see Native parameter support for
+	// Amazon Machine Image (AMI) IDs
 	// (https://docs.aws.amazon.com/systems-manager/latest/userguide/parameter-store-ec2-aliases.html)
 	// in the Amazon Web Services Systems Manager User Guide.
 	DataType *string
@@ -119,7 +121,7 @@ type PutParameterInput struct {
 	KeyId *string
 
 	// Overwrite an existing parameter. The default value is false.
-	Overwrite bool
+	Overwrite *bool
 
 	// One or more policies to apply to a parameter. This operation takes a JSON array.
 	// Parameter Store, a capability of Amazon Web Services Systems Manager supports

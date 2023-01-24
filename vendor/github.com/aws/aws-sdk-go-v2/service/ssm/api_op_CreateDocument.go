@@ -58,7 +58,7 @@ type CreateDocumentInput struct {
 	// name prefixes. These are reserved by Amazon Web Services for use as document
 	// name prefixes:
 	//
-	// * aws-
+	// * aws
 	//
 	// * amazon
 	//
@@ -79,7 +79,8 @@ type CreateDocumentInput struct {
 	// YAML, or TEXT. JSON is the default format.
 	DocumentFormat types.DocumentFormat
 
-	// The type of document to create.
+	// The type of document to create. The DeploymentStrategy document type is an
+	// internal-use-only document type reserved for AppConfig.
 	DocumentType types.DocumentType
 
 	// A list of SSM documents required by a document. This parameter is used
@@ -118,8 +119,8 @@ type CreateDocumentInput struct {
 	TargetType *string
 
 	// An optional field specifying the version of the artifact you are creating with
-	// the document. For example, "Release 12, Update 6". This value is unique across
-	// all versions of a document, and can't be changed.
+	// the document. For example, Release12.1. This value is unique across all versions
+	// of a document, and can't be changed.
 	VersionName *string
 
 	noSmithyDocumentSerde

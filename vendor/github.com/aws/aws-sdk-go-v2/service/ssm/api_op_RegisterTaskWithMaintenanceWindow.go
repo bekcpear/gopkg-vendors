@@ -45,6 +45,9 @@ type RegisterTaskWithMaintenanceWindowInput struct {
 	// This member is required.
 	WindowId *string
 
+	// The CloudWatch alarm you want to apply to your maintenance window task.
+	AlarmConfiguration *types.AlarmConfiguration
+
 	// User-provided idempotency token.
 	ClientToken *string
 
@@ -82,16 +85,24 @@ type RegisterTaskWithMaintenanceWindowInput struct {
 	// window task types, see MaintenanceWindowTaskInvocationParameters.
 	LoggingInfo *types.LoggingInfo
 
-	// The maximum number of targets this task can be run for in parallel. For
-	// maintenance window tasks without a target specified, you can't supply a value
-	// for this option. Instead, the system inserts a placeholder value of 1. This
-	// value doesn't affect the running of your task.
+	// The maximum number of targets this task can be run for, in parallel. Although
+	// this element is listed as "Required: No", a value can be omitted only when you
+	// are registering or updating a targetless task
+	// (https://docs.aws.amazon.com/systems-manager/latest/userguide/maintenance-windows-targetless-tasks.html)
+	// You must provide a value in all other cases. For maintenance window tasks
+	// without a target specified, you can't supply a value for this option. Instead,
+	// the system inserts a placeholder value of 1. This value doesn't affect the
+	// running of your task.
 	MaxConcurrency *string
 
-	// The maximum number of errors allowed before this task stops being scheduled. For
-	// maintenance window tasks without a target specified, you can't supply a value
-	// for this option. Instead, the system inserts a placeholder value of 1. This
-	// value doesn't affect the running of your task.
+	// The maximum number of errors allowed before this task stops being scheduled.
+	// Although this element is listed as "Required: No", a value can be omitted only
+	// when you are registering or updating a targetless task
+	// (https://docs.aws.amazon.com/systems-manager/latest/userguide/maintenance-windows-targetless-tasks.html)
+	// You must provide a value in all other cases. For maintenance window tasks
+	// without a target specified, you can't supply a value for this option. Instead,
+	// the system inserts a placeholder value of 1. This value doesn't affect the
+	// running of your task.
 	MaxErrors *string
 
 	// An optional name for the task.
@@ -100,7 +111,7 @@ type RegisterTaskWithMaintenanceWindowInput struct {
 	// The priority of the task in the maintenance window, the lower the number the
 	// higher the priority. Tasks in a maintenance window are scheduled in priority
 	// order with tasks that have the same priority scheduled in parallel.
-	Priority int32
+	Priority *int32
 
 	// The Amazon Resource Name (ARN) of the IAM service role for Amazon Web Services
 	// Systems Manager to assume when running a maintenance window task. If you do not

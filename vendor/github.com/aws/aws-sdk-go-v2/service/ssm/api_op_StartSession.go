@@ -42,14 +42,18 @@ type StartSessionInput struct {
 	// This member is required.
 	Target *string
 
-	// The name of the SSM document to define the parameters and plugin settings for
-	// the session. For example, SSM-SessionManagerRunShell. You can call the
-	// GetDocument API to verify the document exists before attempting to start a
-	// session. If no document name is provided, a shell to the managed node is
-	// launched by default.
+	// The name of the SSM document you want to use to define the type of session,
+	// input parameters, or preferences for the session. For example,
+	// SSM-SessionManagerRunShell. You can call the GetDocument API to verify the
+	// document exists before attempting to start a session. If no document name is
+	// provided, a shell to the managed node is launched by default. For more
+	// information, see Start a session
+	// (https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-sessions-start.html)
+	// in the Amazon Web Services Systems Manager User Guide.
 	DocumentName *string
 
-	// Reserved for future use.
+	// The values you want to specify for the parameters defined in the Session
+	// document.
 	Parameters map[string][]string
 
 	// The reason for connecting to the instance. This value is included in the details
@@ -76,8 +80,10 @@ type StartSessionOutput struct {
 	// Manager session, such as 1a2b3c4dEXAMPLE.
 	StreamUrl *string
 
-	// An encrypted token value containing session and caller information. Used to
-	// authenticate the connection to the managed node.
+	// An encrypted token value containing session and caller information. This token
+	// is used to authenticate the connection to the managed node, and is valid only
+	// long enough to ensure the connection is successful. Never share your session's
+	// token.
 	TokenValue *string
 
 	// Metadata pertaining to the operation's result.

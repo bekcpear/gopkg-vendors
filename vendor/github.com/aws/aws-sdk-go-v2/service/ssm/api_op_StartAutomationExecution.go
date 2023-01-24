@@ -39,6 +39,9 @@ type StartAutomationExecutionInput struct {
 	// This member is required.
 	DocumentName *string
 
+	// The CloudWatch alarm you want to apply to your automation.
+	AlarmConfiguration *types.AlarmConfiguration
+
 	// User-provided idempotency token. The token must be unique, is case insensitive,
 	// enforces the UUID format, and can't be reused.
 	ClientToken *string
@@ -85,7 +88,7 @@ type StartAutomationExecutionInput struct {
 	// * Key=OS,Value=Windows
 	//
 	// To add tags to an existing
-	// patch baseline, use the AddTagsToResource operation.
+	// automation, use the AddTagsToResource operation.
 	Tags []types.Tag
 
 	// A location is a combination of Amazon Web Services Regions and/or Amazon Web

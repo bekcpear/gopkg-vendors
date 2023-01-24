@@ -60,6 +60,50 @@ type Activation struct {
 	noSmithyDocumentSerde
 }
 
+// A CloudWatch alarm you apply to an automation or command.
+type Alarm struct {
+
+	// The name of your CloudWatch alarm.
+	//
+	// This member is required.
+	Name *string
+
+	noSmithyDocumentSerde
+}
+
+// The details for the CloudWatch alarm you want to apply to an automation or
+// command.
+type AlarmConfiguration struct {
+
+	// The name of the CloudWatch alarm specified in the configuration.
+	//
+	// This member is required.
+	Alarms []Alarm
+
+	// If you specify true for this value, your automation or command continue to run
+	// even if we can't gather information about the state of your CloudWatch alarm.
+	// The default value is false.
+	IgnorePollAlarmFailure bool
+
+	noSmithyDocumentSerde
+}
+
+// The details about the state of your CloudWatch alarm.
+type AlarmStateInformation struct {
+
+	// The name of your CloudWatch alarm.
+	//
+	// This member is required.
+	Name *string
+
+	// The state of your CloudWatch alarm.
+	//
+	// This member is required.
+	State ExternalAlarmState
+
+	noSmithyDocumentSerde
+}
+
 // Describes an association of a Amazon Web Services Systems Manager document (SSM
 // document) and a managed node.
 type Association struct {
@@ -74,7 +118,15 @@ type Association struct {
 	// The association version.
 	AssociationVersion *string
 
-	// The version of the document used in the association.
+	// The version of the document used in the association. If you change a document
+	// version for a State Manager association, Systems Manager immediately runs the
+	// association unless you previously specifed the apply-only-at-cron-interval
+	// parameter. State Manager doesn't support running associations that use a new
+	// version of a document if that document is shared from another account. State
+	// Manager always runs the default version of a document if shared from another
+	// account, even though the Systems Manager console shows that a new version was
+	// processed. If you want to run an association using a new version of a document
+	// shared form another account, you must set the document version to default.
 	DocumentVersion *string
 
 	// The managed node ID.
@@ -93,6 +145,13 @@ type Association struct {
 	// schedule runs in Coordinated Universal Time (UTC).
 	ScheduleExpression *string
 
+	// Number of days to wait after the scheduled day to run an association.
+	ScheduleOffset *int32
+
+	// A key-value mapping of document parameters to target resources. Both Targets and
+	// TargetMaps can't be specified together.
+	TargetMaps []map[string][]string
+
 	// The managed nodes targeted by the request to create an association. You can
 	// target all managed nodes in an Amazon Web Services account by specifying the
 	// InstanceIds key with a value of *.
@@ -103,6 +162,10 @@ type Association struct {
 
 // Describes the parameters for a document.
 type AssociationDescription struct {
+
+	// The details for the CloudWatch alarm you want to apply to an automation or
+	// command.
+	AlarmConfiguration *AlarmConfiguration
 
 	// By default, when you create a new associations, the system runs it immediately
 	// after it is created and then according to the schedule you specified. Specify
@@ -192,6 +255,9 @@ type AssociationDescription struct {
 	// A cron expression that specifies a schedule when the association runs.
 	ScheduleExpression *string
 
+	// Number of days to wait after the scheduled day to run an association.
+	ScheduleOffset *int32
+
 	// The association status.
 	Status *AssociationStatus
 
@@ -210,14 +276,25 @@ type AssociationDescription struct {
 	// where you want to run the association.
 	TargetLocations []TargetLocation
 
+	// A key-value mapping of document parameters to target resources. Both Targets and
+	// TargetMaps can't be specified together.
+	TargetMaps []map[string][]string
+
 	// The managed nodes targeted by the request.
 	Targets []Target
+
+	// The CloudWatch alarm that was invoked during the association.
+	TriggeredAlarms []AlarmStateInformation
 
 	noSmithyDocumentSerde
 }
 
 // Includes information about the specified association.
 type AssociationExecution struct {
+
+	// The details for the CloudWatch alarm you want to apply to an automation or
+	// command.
+	AlarmConfiguration *AlarmConfiguration
 
 	// The association ID.
 	AssociationId *string
@@ -242,6 +319,9 @@ type AssociationExecution struct {
 
 	// The status of the association execution.
 	Status *string
+
+	// The CloudWatch alarms that were invoked by the association.
+	TriggeredAlarms []AlarmStateInformation
 
 	noSmithyDocumentSerde
 }
@@ -447,6 +527,9 @@ type AssociationVersionInfo struct {
 	// version was created.
 	ScheduleExpression *string
 
+	// Number of days to wait after the scheduled day to run an association.
+	ScheduleOffset *int32
+
 	// The mode for generating association compliance. You can specify AUTO or MANUAL.
 	// In AUTO mode, the system uses the status of the association execution to
 	// determine the compliance status. If the association execution runs successfully,
@@ -462,6 +545,10 @@ type AssociationVersionInfo struct {
 	// where you wanted to run the association when this association version was
 	// created.
 	TargetLocations []TargetLocation
+
+	// A key-value mapping of document parameters to target resources. Both Targets and
+	// TargetMaps can't be specified together.
+	TargetMaps []map[string][]string
 
 	// The targets specified for the association when the association version was
 	// created.
@@ -539,6 +626,9 @@ type AttachmentsSource struct {
 // Detailed information about the current state of an individual Automation
 // execution.
 type AutomationExecution struct {
+
+	// The details for the CloudWatch alarm applied to your automation.
+	AlarmConfiguration *AlarmConfiguration
 
 	// The ID of a State Manager association used in the Automation operation.
 	AssociationId *string
@@ -645,6 +735,9 @@ type AutomationExecution struct {
 	// The specified targets.
 	Targets []Target
 
+	// The CloudWatch alarm that was invoked by the automation.
+	TriggeredAlarms []AlarmStateInformation
+
 	noSmithyDocumentSerde
 }
 
@@ -668,6 +761,9 @@ type AutomationExecutionFilter struct {
 
 // Details about a specific Automation execution.
 type AutomationExecutionMetadata struct {
+
+	// The details for the CloudWatch alarm applied to your automation.
+	AlarmConfiguration *AlarmConfiguration
 
 	// The ID of a State Manager association used in the Automation operation.
 	AssociationId *string
@@ -765,6 +861,9 @@ type AutomationExecutionMetadata struct {
 	// The targets defined by the user when starting the automation.
 	Targets []Target
 
+	// The CloudWatch alarm that was invoked by the automation.
+	TriggeredAlarms []AlarmStateInformation
+
 	noSmithyDocumentSerde
 }
 
@@ -835,6 +934,9 @@ type CloudWatchOutputConfig struct {
 // Describes a command request.
 type Command struct {
 
+	// The details for the CloudWatch alarm applied to your command.
+	AlarmConfiguration *AlarmConfiguration
+
 	// Amazon CloudWatch Logs information where you want Amazon Web Services Systems
 	// Manager to send the command output.
 	CloudWatchOutputConfig *CloudWatchOutputConfig
@@ -848,7 +950,7 @@ type Command struct {
 
 	// The number of targets for which the command invocation reached a terminal state.
 	// Terminal states include the following: Success, Failed, Execution Timed Out,
-	// Delivery Timed Out, Canceled, Terminated, or Undeliverable.
+	// Delivery Timed Out, Cancelled, Terminated, or Undeliverable.
 	CompletedCount int32
 
 	// The number of targets for which the status is Delivery Timed Out.
@@ -863,9 +965,12 @@ type Command struct {
 	// The number of targets for which the status is Failed or Execution Timed Out.
 	ErrorCount int32
 
-	// If this time is reached and the command hasn't already started running, it won't
-	// run. Calculated based on the ExpiresAfter user input provided as part of the
-	// SendCommand API operation.
+	// If a command expires, it changes status to DeliveryTimedOut for all invocations
+	// that have the status InProgress, Pending, or Delayed. ExpiresAfter is calculated
+	// based on the total timeout for the overall command. For more information, see
+	// Understanding command timeout values
+	// (https://docs.aws.amazon.com/systems-manager/latest/userguide/monitor-commands.html?icmpid=docs_ec2_console#monitor-about-status-timeouts)
+	// in the Amazon Web Services Systems Manager User Guide.
 	ExpiresAfter *time.Time
 
 	// The managed node IDs against which this command was requested.
@@ -953,13 +1058,16 @@ type Command struct {
 	// doesn't have a value of Success but not enough invocations failed for the status
 	// to be Failed. This is a terminal state.
 	//
-	// * Canceled: The command was terminated
+	// * Cancelled: The command was terminated
 	// before it was completed. This is a terminal state.
 	//
 	// * Rate Exceeded: The number
 	// of managed nodes targeted by the command exceeded the account limit for pending
 	// invocations. The system has canceled the command before running it on any
 	// managed node. This is a terminal state.
+	//
+	// * Delayed: The system attempted to send
+	// the command to the managed node but wasn't successful. The system retries again.
 	StatusDetails *string
 
 	// The number of targets for the command.
@@ -972,6 +1080,9 @@ type Command struct {
 
 	// The TimeoutSeconds value specified for a command.
 	TimeoutSeconds int32
+
+	// The CloudWatch alarm that was invoked by the command.
+	TriggeredAlarms []AlarmStateInformation
 
 	noSmithyDocumentSerde
 }
@@ -1179,7 +1290,7 @@ type CommandInvocation struct {
 	// for one or more plugins wasn't zero. Invocation failures count against the
 	// MaxErrors limit of the parent command. This is a terminal state.
 	//
-	// * Canceled:
+	// * Cancelled:
 	// The command was terminated before it was completed. This is a terminal state.
 	//
 	// *
@@ -1192,6 +1303,9 @@ type CommandInvocation struct {
 	// * Terminated: The parent command exceeded its MaxErrors limit and
 	// subsequent command invocations were canceled by the system. This is a terminal
 	// state.
+	//
+	// * Delayed: The system attempted to send the command to the managed node
+	// but wasn't successful. The system retries again.
 	StatusDetails *string
 
 	// Gets the trace output sent by the agent.
@@ -1290,7 +1404,7 @@ type CommandPlugin struct {
 	// for one or more plugins wasn't zero. Invocation failures count against the
 	// MaxErrors limit of the parent command. This is a terminal state.
 	//
-	// * Canceled:
+	// * Cancelled:
 	// The command was terminated before it was completed. This is a terminal state.
 	//
 	// *
@@ -1465,6 +1579,10 @@ type CreateAssociationBatchRequestEntry struct {
 	// This member is required.
 	Name *string
 
+	// The details for the CloudWatch alarm you want to apply to an automation or
+	// command.
+	AlarmConfiguration *AlarmConfiguration
+
 	// By default, when you create a new associations, the system runs it immediately
 	// after it is created and then according to the schedule you specified. Specify
 	// this option if you don't want an association to run immediately after you create
@@ -1534,6 +1652,9 @@ type CreateAssociationBatchRequestEntry struct {
 	// A cron expression that specifies a schedule when the association runs.
 	ScheduleExpression *string
 
+	// Number of days to wait after the scheduled day to run an association.
+	ScheduleOffset *int32
+
 	// The mode for generating association compliance. You can specify AUTO or MANUAL.
 	// In AUTO mode, the system uses the status of the association execution to
 	// determine the compliance status. If the association execution runs successfully,
@@ -1548,6 +1669,10 @@ type CreateAssociationBatchRequestEntry struct {
 	// Use this action to create an association in multiple Regions and multiple
 	// accounts.
 	TargetLocations []TargetLocation
+
+	// A key-value mapping of document parameters to target resources. Both Targets and
+	// TargetMaps can't be specified together.
+	TargetMaps []map[string][]string
 
 	// The managed nodes targeted by the request.
 	Targets []Target
@@ -1582,7 +1707,7 @@ type DocumentDefaultVersionDescription struct {
 	noSmithyDocumentSerde
 }
 
-// Describes a Amazon Web Services Systems Manager document (SSM document).
+// Describes an Amazon Web Services Systems Manager document (SSM document).
 type DocumentDescription struct {
 
 	// The version of the document currently approved for use in the organization.
@@ -1594,6 +1719,12 @@ type DocumentDescription struct {
 
 	// The user in your organization who created the document.
 	Author *string
+
+	// The classification of a document to help you identify and categorize its use.
+	Category []string
+
+	// The value that identifies a document's category.
+	CategoryEnum []string
 
 	// The date when the document was created.
 	CreatedDate *time.Time
@@ -1640,7 +1771,7 @@ type DocumentDescription struct {
 	// The version of the document that is currently under review.
 	PendingReviewVersion *string
 
-	// The list of OS platforms compatible with this SSM document.
+	// The list of operating system (OS) platforms compatible with this SSM document.
 	PlatformTypes []PlatformType
 
 	// A list of SSM documents required by a document. For example, an
@@ -1779,17 +1910,15 @@ type DocumentIdentifier struct {
 //
 // * Command
 //
-// * DeploymentStrategy
-//
 // * Package
 //
-// *
-// Policy
+// * Policy
 //
 // * Session
 //
-// Owner Note that only one Owner can be specified in a request.
-// For example: Key=Owner,Values=Self.
+// Owner
+// Note that only one Owner can be specified in a request. For example:
+// Key=Owner,Values=Self.
 //
 // * Amazon
 //
@@ -1802,7 +1931,7 @@ type DocumentIdentifier struct {
 // *
 // ThirdParty
 //
-// PlatformTypes
+// # PlatformTypes
 //
 // * Linux
 //
@@ -1875,8 +2004,16 @@ type DocumentRequires struct {
 	// This member is required.
 	Name *string
 
+	// The document type of the required SSM document.
+	RequireType *string
+
 	// The document version required by the current document.
 	Version *string
+
+	// An optional field specifying the version of the artifact associated with the
+	// document. For example, "Release 12, Update 6". This value is unique across all
+	// versions of a document, and can't be changed.
+	VersionName *string
 
 	noSmithyDocumentSerde
 }
@@ -2034,6 +2171,31 @@ type FailureDetails struct {
 	noSmithyDocumentSerde
 }
 
+// A resource policy helps you to define the IAM entity (for example, an Amazon Web
+// Services account) that can manage your Systems Manager resources. Currently,
+// OpsItemGroup is the only resource that supports Systems Manager resource
+// policies. The resource policy for OpsItemGroup enables Amazon Web Services
+// accounts to view and interact with OpsCenter operational work items (OpsItems).
+type GetResourcePoliciesResponseEntry struct {
+
+	// A resource policy helps you to define the IAM entity (for example, an Amazon Web
+	// Services account) that can manage your Systems Manager resources. Currently,
+	// OpsItemGroup is the only resource that supports Systems Manager resource
+	// policies. The resource policy for OpsItemGroup enables Amazon Web Services
+	// accounts to view and interact with OpsCenter operational work items (OpsItems).
+	Policy *string
+
+	// ID of the current policy version. The hash helps to prevent a situation where
+	// multiple users attempt to overwrite a policy. You must provide this hash when
+	// updating or deleting a policy.
+	PolicyHash *string
+
+	// A policy ID.
+	PolicyId *string
+
+	noSmithyDocumentSerde
+}
+
 // Status information about the aggregated associations.
 type InstanceAggregatedAssociationOverview struct {
 
@@ -2168,7 +2330,7 @@ type InstanceInformation struct {
 	// managed node. This field doesn't indicate whether or not the latest version is
 	// installed on Windows managed nodes, because some older versions of Windows
 	// Server use the EC2Config service to process Systems Manager requests.
-	IsLatestVersion bool
+	IsLatestVersion *bool
 
 	// The date the association was last run.
 	LastAssociationExecutionDate *time.Time
@@ -2251,12 +2413,28 @@ type InstanceInformationFilter struct {
 // The filters to describe or get information about your managed nodes.
 type InstanceInformationStringFilter struct {
 
-	// The filter key name to describe your managed nodes. For example:
-	// "InstanceIds"|"AgentVersion"|"PingStatus"|"PlatformTypes"|"ActivationIds"|"IamRole"|"ResourceType"|"AssociationStatus"|"Tag
-	// Key" Tag key isn't a valid filter. You must specify either tag-key or
-	// tag:keyname and a string. Here are some valid examples: tag-key, tag:123,
-	// tag:al!, tag:Windows. Here are some invalid examples: tag-keys, Tag Key, tag:,
-	// tagKey, abc:keyname.
+	// The filter key name to describe your managed nodes. Valid filter key values:
+	// ActivationIds | AgentVersion | AssociationStatus | IamRole | InstanceIds |
+	// PingStatus | PlatformTypes | ResourceType | SourceIds | SourceTypes | "tag-key"
+	// | "tag:{keyname}
+	//
+	// * Valid values for the AssociationStatus filter key: Success |
+	// Pending | Failed
+	//
+	// * Valid values for the PingStatus filter key: Online |
+	// ConnectionLost | Inactive (deprecated)
+	//
+	// * Valid values for the PlatformType
+	// filter key: Windows | Linux | MacOS
+	//
+	// * Valid values for the ResourceType filter
+	// key: EC2Instance | ManagedInstance
+	//
+	// * Valid values for the SourceType filter
+	// key: AWS::EC2::Instance | AWS::SSM::ManagedInstance | AWS::IoT::Thing
+	//
+	// * Valid
+	// tag examples: Key=tag-key,Values=Purpose | Key=tag:Purpose,Values=Test.
 	//
 	// This member is required.
 	Key *string
@@ -2311,12 +2489,12 @@ type InstancePatchState struct {
 	// This member is required.
 	PatchGroup *string
 
-	// The number of managed nodes where patches that are specified as Critical for
-	// compliance reporting in the patch baseline aren't installed. These patches might
-	// be missing, have failed installation, were rejected, or were installed but
-	// awaiting a required managed node reboot. The status of these managed nodes is
+	// The number of patches per node that are specified as Critical for compliance
+	// reporting in the patch baseline aren't installed. These patches might be
+	// missing, have failed installation, were rejected, or were installed but awaiting
+	// a required managed node reboot. The status of these managed nodes is
 	// NON_COMPLIANT.
-	CriticalNonCompliantCount int32
+	CriticalNonCompliantCount *int32
 
 	// The number of patches from the patch baseline that were attempted to be
 	// installed during the last patching operation, but failed to install.
@@ -2342,14 +2520,14 @@ type InstancePatchState struct {
 
 	// The number of patches installed by Patch Manager since the last time the managed
 	// node was rebooted.
-	InstalledPendingRebootCount int32
+	InstalledPendingRebootCount *int32
 
 	// The number of patches installed on a managed node that are specified in a
 	// RejectedPatches list. Patches with a status of InstalledRejected were typically
 	// installed before they were added to a RejectedPatches list. If
 	// ALLOW_AS_DEPENDENCY is the specified option for RejectedPatchesAction, the value
 	// of InstalledRejectedCount will always be 0 (zero).
-	InstalledRejectedCount int32
+	InstalledRejectedCount *int32
 
 	// The time of the last attempt to patch the managed node with NoReboot specified
 	// as the reboot option.
@@ -2365,10 +2543,10 @@ type InstancePatchState struct {
 	// this limit are reported in UnreportedNotApplicableCount.
 	NotApplicableCount int32
 
-	// The number of managed nodes with patches installed that are specified as other
-	// than Critical or Security but aren't compliant with the patch baseline. The
-	// status of these managed nodes is NON_COMPLIANT.
-	OtherNonCompliantCount int32
+	// The number of patches per node that are specified as other than Critical or
+	// Security but aren't compliant with the patch baseline. The status of these
+	// managed nodes is NON_COMPLIANT.
+	OtherNonCompliantCount *int32
 
 	// Placeholder information. This field will always be empty in the current release
 	// of the service.
@@ -2388,11 +2566,11 @@ type InstancePatchState struct {
 	// not be in effect until a reboot is performed.
 	RebootOption RebootOption
 
-	// The number of managed nodes where patches that are specified as Security in a
-	// patch advisory aren't installed. These patches might be missing, have failed
+	// The number of patches per node that are specified as Security in a patch
+	// advisory aren't installed. These patches might be missing, have failed
 	// installation, were rejected, or were installed but awaiting a required managed
 	// node reboot. The status of these managed nodes is NON_COMPLIANT.
-	SecurityNonCompliantCount int32
+	SecurityNonCompliantCount *int32
 
 	// The ID of the patch baseline snapshot used during the patching operation when
 	// this compliance data was collected.
@@ -2401,7 +2579,7 @@ type InstancePatchState struct {
 	// The number of patches beyond the supported limit of NotApplicableCount that
 	// aren't reported by name to Inventory. Inventory is a capability of Amazon Web
 	// Services Systems Manager.
-	UnreportedNotApplicableCount int32
+	UnreportedNotApplicableCount *int32
 
 	noSmithyDocumentSerde
 }
@@ -2715,7 +2893,7 @@ type InventoryResultItem struct {
 // window task types, see MaintenanceWindowTaskInvocationParameters.
 type LoggingInfo struct {
 
-	// The name of an S3 bucket where execution logs are stored .
+	// The name of an S3 bucket where execution logs are stored.
 	//
 	// This member is required.
 	S3BucketName *string
@@ -2784,6 +2962,9 @@ type MaintenanceWindowExecution struct {
 // execution.
 type MaintenanceWindowExecutionTaskIdentity struct {
 
+	// The details for the CloudWatch alarm applied to your maintenance window task.
+	AlarmConfiguration *AlarmConfiguration
+
 	// The time the task execution finished.
 	EndTime *time.Time
 
@@ -2805,6 +2986,9 @@ type MaintenanceWindowExecutionTaskIdentity struct {
 
 	// The type of task that ran.
 	TaskType MaintenanceWindowTaskType
+
+	// The CloudWatch alarm that was invoked by the maintenance window task.
+	TriggeredAlarms []AlarmStateInformation
 
 	// The ID of the maintenance window execution that ran the task.
 	WindowExecutionId *string
@@ -2921,7 +3105,7 @@ type MaintenanceWindowIdentity struct {
 
 	// The number of days to wait to run a maintenance window after the scheduled cron
 	// expression date and time.
-	ScheduleOffset int32
+	ScheduleOffset *int32
 
 	// The time zone that the scheduled maintenance window executions are based on, in
 	// Internet Assigned Numbers Authority (IANA) format.
@@ -3043,7 +3227,7 @@ type MaintenanceWindowRunCommandParameters struct {
 
 	// If this time is reached and the command hasn't already started running, it
 	// doesn't run.
-	TimeoutSeconds int32
+	TimeoutSeconds *int32
 
 	noSmithyDocumentSerde
 }
@@ -3107,6 +3291,9 @@ type MaintenanceWindowTarget struct {
 // Information about a task defined for a maintenance window.
 type MaintenanceWindowTask struct {
 
+	// The details for the CloudWatch alarm applied to your maintenance window task.
+	AlarmConfiguration *AlarmConfiguration
+
 	// The specification for whether tasks should continue to run after the cutoff time
 	// specified in the maintenance windows is reached.
 	CutoffBehavior MaintenanceWindowTaskCutoffBehavior
@@ -3122,10 +3309,24 @@ type MaintenanceWindowTask struct {
 	// window task types, see MaintenanceWindowTaskInvocationParameters.
 	LoggingInfo *LoggingInfo
 
-	// The maximum number of targets this task can be run for, in parallel.
+	// The maximum number of targets this task can be run for, in parallel. Although
+	// this element is listed as "Required: No", a value can be omitted only when you
+	// are registering or updating a targetless task
+	// (https://docs.aws.amazon.com/systems-manager/latest/userguide/maintenance-windows-targetless-tasks.html)
+	// You must provide a value in all other cases. For maintenance window tasks
+	// without a target specified, you can't supply a value for this option. Instead,
+	// the system inserts a placeholder value of 1. This value doesn't affect the
+	// running of your task.
 	MaxConcurrency *string
 
 	// The maximum number of errors allowed before this task stops being scheduled.
+	// Although this element is listed as "Required: No", a value can be omitted only
+	// when you are registering or updating a targetless task
+	// (https://docs.aws.amazon.com/systems-manager/latest/userguide/maintenance-windows-targetless-tasks.html)
+	// You must provide a value in all other cases. For maintenance window tasks
+	// without a target specified, you can't supply a value for this option. Instead,
+	// the system inserts a placeholder value of 1. This value doesn't affect the
+	// running of your task.
 	MaxErrors *string
 
 	// The task name.
@@ -3385,11 +3586,24 @@ type OpsItem struct {
 	// in the Amazon Web Services Systems Manager User Guide.
 	OperationalData map[string]OpsItemDataValue
 
+	// The OpsItem Amazon Resource Name (ARN).
+	OpsItemArn *string
+
 	// The ID of the OpsItem.
 	OpsItemId *string
 
-	// The type of OpsItem. Currently, the only valid values are /aws/changerequest and
-	// /aws/issue.
+	// The type of OpsItem. Systems Manager supports the following types of
+	// OpsItems:
+	//
+	// * /aws/issue This type of OpsItem is used for default OpsItems
+	// created by OpsCenter.
+	//
+	// * /aws/changerequest This type of OpsItem is used by
+	// Change Manager for reviewing and approving or rejecting change requests.
+	//
+	// *
+	// /aws/insights This type of OpsItem is used by OpsCenter for aggregating and
+	// reporting on duplicate OpsItems.
 	OpsItemType *string
 
 	// The time specified in a change request for a runbook workflow to end. Currently
@@ -3624,8 +3838,18 @@ type OpsItemSummary struct {
 	// The ID of the OpsItem.
 	OpsItemId *string
 
-	// The type of OpsItem. Currently, the only valid values are /aws/changerequest and
-	// /aws/issue.
+	// The type of OpsItem. Systems Manager supports the following types of
+	// OpsItems:
+	//
+	// * /aws/issue This type of OpsItem is used for default OpsItems
+	// created by OpsCenter.
+	//
+	// * /aws/changerequest This type of OpsItem is used by
+	// Change Manager for reviewing and approving or rejecting change requests.
+	//
+	// *
+	// /aws/insights This type of OpsItem is used by OpsCenter for aggregating and
+	// reporting on duplicate OpsItems.
 	OpsItemType *string
 
 	// The time specified in a change request for a runbook workflow to end. Currently
@@ -3744,10 +3968,12 @@ type Parameter struct {
 	SourceResult *string
 
 	// The type of parameter. Valid values include the following: String, StringList,
-	// and SecureString.
+	// and SecureString. If type is StringList, the system returns a comma-separated
+	// string with no spaces between commas in the Value field.
 	Type ParameterType
 
-	// The parameter value.
+	// The parameter value. If type is StringList, the system returns a comma-separated
+	// string with no spaces between commas in the Value field.
 	Value *string
 
 	// The parameter version.
@@ -3818,8 +4044,8 @@ type ParameterInlinePolicy struct {
 	// The JSON text of the policy.
 	PolicyText *string
 
-	// The type of policy. Parameter Store, a capablility of Amazon Web Services
-	// Systems Manager, supports the following policy types: Expiration,
+	// The type of policy. Parameter Store, a capability of Amazon Web Services Systems
+	// Manager, supports the following policy types: Expiration,
 	// ExpirationNotification, and NoChangeNotification.
 	PolicyType *string
 
@@ -4055,7 +4281,7 @@ type PatchComplianceData struct {
 	// This member is required.
 	KBId *string
 
-	// The severity of the patchsuch as Critical, Important, and Moderate.
+	// The severity of the patch such as Critical, Important, and Moderate.
 	//
 	// This member is required.
 	Severity *string
@@ -4168,7 +4394,7 @@ type PatchRule struct {
 	// the patch is marked as approved in the patch baseline. For example, a value of 7
 	// means that patches are approved seven days after they are released. Not
 	// supported on Debian Server or Ubuntu Server.
-	ApproveAfterDays int32
+	ApproveAfterDays *int32
 
 	// The cutoff date for auto approval of released patches. Any patches released on
 	// or before this date are installed automatically. Not supported on Debian Server
@@ -4181,7 +4407,7 @@ type PatchRule struct {
 	// For managed nodes identified by the approval rule filters, enables a patch
 	// baseline to apply non-security updates available in the specified repository.
 	// The default value is false. Applies to Linux managed nodes only.
-	EnableNonSecurity bool
+	EnableNonSecurity *bool
 
 	noSmithyDocumentSerde
 }
@@ -4601,6 +4827,10 @@ type Runbook struct {
 	// accounts targeted by the current Runbook operation.
 	TargetLocations []TargetLocation
 
+	// A key-value mapping of runbook parameters to target resources. Both Targets and
+	// TargetMaps can't be specified together.
+	TargetMaps []map[string][]string
+
 	// The name of the parameter used as the target resource for the rate-controlled
 	// runbook workflow. Required if you specify Targets.
 	TargetParameterName *string
@@ -4808,7 +5038,7 @@ type SessionManagerOutputUrl struct {
 type SeveritySummary struct {
 
 	// The total number of resources or compliance items that have a severity level of
-	// critical. Critical severity is determined by the organization that published the
+	// Critical. Critical severity is determined by the organization that published the
 	// compliance items.
 	CriticalCount int32
 
@@ -4865,15 +5095,15 @@ type StepExecution struct {
 
 	// The flag which can be used to help decide whether the failure of current step
 	// leads to the Automation failure.
-	IsCritical bool
+	IsCritical *bool
 
 	// The flag which can be used to end automation no matter whether the step succeeds
 	// or fails.
-	IsEnd bool
+	IsEnd *bool
 
 	// The maximum number of tries to run the action of the step. The default value is
 	// 1.
-	MaxAttempts int32
+	MaxAttempts *int32
 
 	// The next step after the step succeeds.
 	NextStep *string
@@ -4910,7 +5140,10 @@ type StepExecution struct {
 	Targets []Target
 
 	// The timeout seconds of the step.
-	TimeoutSeconds int64
+	TimeoutSeconds *int64
+
+	// The CloudWatch alarms that were invoked by the automation.
+	TriggeredAlarms []AlarmStateInformation
 
 	// Strategies used when step fails, we support Continue and Abort. Abort will fail
 	// the automation when the step fails. Continue will ignore the failure of current
@@ -5049,6 +5282,10 @@ type TargetLocation struct {
 
 	// The Amazon Web Services Regions targeted by the current Automation execution.
 	Regions []string
+
+	// The details for the CloudWatch alarm you want to apply to an automation or
+	// command.
+	TargetLocationAlarmConfiguration *AlarmConfiguration
 
 	// The maximum number of Amazon Web Services Regions and Amazon Web Services
 	// accounts allowed to run the Automation concurrently.

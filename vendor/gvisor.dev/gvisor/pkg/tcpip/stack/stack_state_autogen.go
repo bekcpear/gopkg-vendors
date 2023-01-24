@@ -188,6 +188,62 @@ func (bkt *bucket) StateLoad(stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &bkt.tuples)
 }
 
+func (l *groPacketList) StateTypeName() string {
+	return "pkg/tcpip/stack.groPacketList"
+}
+
+func (l *groPacketList) StateFields() []string {
+	return []string{
+		"head",
+		"tail",
+	}
+}
+
+func (l *groPacketList) beforeSave() {}
+
+// +checklocksignore
+func (l *groPacketList) StateSave(stateSinkObject state.Sink) {
+	l.beforeSave()
+	stateSinkObject.Save(0, &l.head)
+	stateSinkObject.Save(1, &l.tail)
+}
+
+func (l *groPacketList) afterLoad() {}
+
+// +checklocksignore
+func (l *groPacketList) StateLoad(stateSourceObject state.Source) {
+	stateSourceObject.Load(0, &l.head)
+	stateSourceObject.Load(1, &l.tail)
+}
+
+func (e *groPacketEntry) StateTypeName() string {
+	return "pkg/tcpip/stack.groPacketEntry"
+}
+
+func (e *groPacketEntry) StateFields() []string {
+	return []string{
+		"next",
+		"prev",
+	}
+}
+
+func (e *groPacketEntry) beforeSave() {}
+
+// +checklocksignore
+func (e *groPacketEntry) StateSave(stateSinkObject state.Sink) {
+	e.beforeSave()
+	stateSinkObject.Save(0, &e.next)
+	stateSinkObject.Save(1, &e.prev)
+}
+
+func (e *groPacketEntry) afterLoad() {}
+
+// +checklocksignore
+func (e *groPacketEntry) StateLoad(stateSourceObject state.Source) {
+	stateSourceObject.Load(0, &e.next)
+	stateSourceObject.Load(1, &e.prev)
+}
+
 func (it *IPTables) StateTypeName() string {
 	return "pkg/tcpip/stack.IPTables"
 }
@@ -407,11 +463,36 @@ func (e *neighborEntryEntry) StateLoad(stateSourceObject state.Source) {
 	stateSourceObject.Load(1, &e.prev)
 }
 
-func (pk *PacketBuffer) StateTypeName() string {
-	return "pkg/tcpip/stack.PacketBuffer"
+func (pk *PacketBufferPtr) StateTypeName() string {
+	return "pkg/tcpip/stack.PacketBufferPtr"
 }
 
-func (pk *PacketBuffer) StateFields() []string {
+func (pk *PacketBufferPtr) StateFields() []string {
+	return []string{
+		"packetBuffer",
+	}
+}
+
+func (pk *PacketBufferPtr) beforeSave() {}
+
+// +checklocksignore
+func (pk *PacketBufferPtr) StateSave(stateSinkObject state.Sink) {
+	pk.beforeSave()
+	stateSinkObject.Save(0, &pk.packetBuffer)
+}
+
+func (pk *PacketBufferPtr) afterLoad() {}
+
+// +checklocksignore
+func (pk *PacketBufferPtr) StateLoad(stateSourceObject state.Source) {
+	stateSourceObject.Load(0, &pk.packetBuffer)
+}
+
+func (pk *packetBuffer) StateTypeName() string {
+	return "pkg/tcpip/stack.packetBuffer"
+}
+
+func (pk *packetBuffer) StateFields() []string {
 	return []string{
 		"packetBufferRefs",
 		"buf",
@@ -429,16 +510,16 @@ func (pk *PacketBuffer) StateFields() []string {
 		"dnatDone",
 		"PktType",
 		"NICID",
-		"RXTransportChecksumValidated",
+		"RXChecksumValidated",
 		"NetworkPacketInfo",
 		"tuple",
 	}
 }
 
-func (pk *PacketBuffer) beforeSave() {}
+func (pk *packetBuffer) beforeSave() {}
 
 // +checklocksignore
-func (pk *PacketBuffer) StateSave(stateSinkObject state.Sink) {
+func (pk *packetBuffer) StateSave(stateSinkObject state.Sink) {
 	pk.beforeSave()
 	stateSinkObject.Save(0, &pk.packetBufferRefs)
 	stateSinkObject.Save(1, &pk.buf)
@@ -456,15 +537,15 @@ func (pk *PacketBuffer) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(13, &pk.dnatDone)
 	stateSinkObject.Save(14, &pk.PktType)
 	stateSinkObject.Save(15, &pk.NICID)
-	stateSinkObject.Save(16, &pk.RXTransportChecksumValidated)
+	stateSinkObject.Save(16, &pk.RXChecksumValidated)
 	stateSinkObject.Save(17, &pk.NetworkPacketInfo)
 	stateSinkObject.Save(18, &pk.tuple)
 }
 
-func (pk *PacketBuffer) afterLoad() {}
+func (pk *packetBuffer) afterLoad() {}
 
 // +checklocksignore
-func (pk *PacketBuffer) StateLoad(stateSourceObject state.Source) {
+func (pk *packetBuffer) StateLoad(stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &pk.packetBufferRefs)
 	stateSourceObject.Load(1, &pk.buf)
 	stateSourceObject.Load(2, &pk.reserved)
@@ -481,7 +562,7 @@ func (pk *PacketBuffer) StateLoad(stateSourceObject state.Source) {
 	stateSourceObject.Load(13, &pk.dnatDone)
 	stateSourceObject.Load(14, &pk.PktType)
 	stateSourceObject.Load(15, &pk.NICID)
-	stateSourceObject.Load(16, &pk.RXTransportChecksumValidated)
+	stateSourceObject.Load(16, &pk.RXChecksumValidated)
 	stateSourceObject.Load(17, &pk.NetworkPacketInfo)
 	stateSourceObject.Load(18, &pk.tuple)
 }
@@ -1467,13 +1548,16 @@ func init() {
 	state.Register((*conn)(nil))
 	state.Register((*ConnTrack)(nil))
 	state.Register((*bucket)(nil))
+	state.Register((*groPacketList)(nil))
+	state.Register((*groPacketEntry)(nil))
 	state.Register((*IPTables)(nil))
 	state.Register((*Table)(nil))
 	state.Register((*Rule)(nil))
 	state.Register((*IPHeaderFilter)(nil))
 	state.Register((*neighborEntryList)(nil))
 	state.Register((*neighborEntryEntry)(nil))
-	state.Register((*PacketBuffer)(nil))
+	state.Register((*PacketBufferPtr)(nil))
+	state.Register((*packetBuffer)(nil))
 	state.Register((*headerInfo)(nil))
 	state.Register((*PacketData)(nil))
 	state.Register((*PacketBufferList)(nil))

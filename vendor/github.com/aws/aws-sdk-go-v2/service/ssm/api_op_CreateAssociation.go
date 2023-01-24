@@ -55,6 +55,10 @@ type CreateAssociationInput struct {
 	// This member is required.
 	Name *string
 
+	// The details for the CloudWatch alarm you want to apply to an automation or
+	// command.
+	AlarmConfiguration *types.AlarmConfiguration
+
 	// By default, when you create a new association, the system runs it immediately
 	// after it is created and then according to the schedule you specified. Specify
 	// this option if you don't want an association to run immediately after you create
@@ -81,7 +85,13 @@ type CreateAssociationInput struct {
 	ComplianceSeverity types.AssociationComplianceSeverity
 
 	// The document version you want to associate with the target(s). Can be a specific
-	// version or the default version.
+	// version or the default version. State Manager doesn't support running
+	// associations that use a new version of a document if that document is shared
+	// from another account. State Manager always runs the default version of a
+	// document if shared from another account, even though the Systems Manager console
+	// shows that a new version was processed. If you want to run an association using
+	// a new version of a document shared form another account, you must set the
+	// document version to default.
 	DocumentVersion *string
 
 	// The managed node ID. InstanceId has been deprecated. To specify a managed node
@@ -127,6 +137,17 @@ type CreateAssociationInput struct {
 	// A cron expression when the association will be applied to the target(s).
 	ScheduleExpression *string
 
+	// Number of days to wait after the scheduled day to run an association. For
+	// example, if you specified a cron schedule of cron(0 0 ? * THU#2 *), you could
+	// specify an offset of 3 to run the association each Sunday after the second
+	// Thursday of the month. For more information about cron schedules for
+	// associations, see Reference: Cron and rate expressions for Systems Manager
+	// (https://docs.aws.amazon.com/systems-manager/latest/userguide/reference-cron-and-rate-expressions.html)
+	// in the Amazon Web Services Systems Manager User Guide. To use offsets, you must
+	// specify the ApplyOnlyAtCronInterval parameter. This option tells the system not
+	// to run an association immediately after you create it.
+	ScheduleOffset *int32
+
 	// The mode for generating association compliance. You can specify AUTO or MANUAL.
 	// In AUTO mode, the system uses the status of the association execution to
 	// determine the compliance status. If the association execution runs successfully,
@@ -138,10 +159,21 @@ type CreateAssociationInput struct {
 	// associations use AUTO mode.
 	SyncCompliance types.AssociationSyncCompliance
 
+	// Adds or overwrites one or more tags for a State Manager association. Tags are
+	// metadata that you can assign to your Amazon Web Services resources. Tags enable
+	// you to categorize your resources in different ways, for example, by purpose,
+	// owner, or environment. Each tag consists of a key and an optional value, both of
+	// which you define.
+	Tags []types.Tag
+
 	// A location is a combination of Amazon Web Services Regions and Amazon Web
 	// Services accounts where you want to run the association. Use this action to
 	// create an association in multiple Regions and multiple accounts.
 	TargetLocations []types.TargetLocation
+
+	// A key-value mapping of document parameters to target resources. Both Targets and
+	// TargetMaps can't be specified together.
+	TargetMaps []map[string][]string
 
 	// The targets for the association. You can target managed nodes by using tags,
 	// Amazon Web Services resource groups, all managed nodes in an Amazon Web Services

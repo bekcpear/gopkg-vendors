@@ -37,7 +37,7 @@ type DescribeMaintenanceWindowScheduleInput struct {
 
 	// The maximum number of items to return for this call. The call also returns a
 	// token that you can specify in a subsequent call to get the next set of results.
-	MaxResults int32
+	MaxResults *int32
 
 	// The token for the next set of items to return. (You received this token from a
 	// previous call.)
@@ -170,8 +170,8 @@ func NewDescribeMaintenanceWindowSchedulePaginator(client DescribeMaintenanceWin
 	}
 
 	options := DescribeMaintenanceWindowSchedulePaginatorOptions{}
-	if params.MaxResults != 0 {
-		options.Limit = params.MaxResults
+	if params.MaxResults != nil {
+		options.Limit = *params.MaxResults
 	}
 
 	for _, fn := range optFns {
@@ -183,12 +183,13 @@ func NewDescribeMaintenanceWindowSchedulePaginator(client DescribeMaintenanceWin
 		client:    client,
 		params:    params,
 		firstPage: true,
+		nextToken: params.NextToken,
 	}
 }
 
 // HasMorePages returns a boolean indicating whether more pages are available
 func (p *DescribeMaintenanceWindowSchedulePaginator) HasMorePages() bool {
-	return p.firstPage || p.nextToken != nil
+	return p.firstPage || (p.nextToken != nil && len(*p.nextToken) != 0)
 }
 
 // NextPage retrieves the next DescribeMaintenanceWindowSchedule page.
@@ -200,7 +201,11 @@ func (p *DescribeMaintenanceWindowSchedulePaginator) NextPage(ctx context.Contex
 	params := *p.params
 	params.NextToken = p.nextToken
 
-	params.MaxResults = p.options.Limit
+	var limit *int32
+	if p.options.Limit > 0 {
+		limit = &p.options.Limit
+	}
+	params.MaxResults = limit
 
 	result, err := p.client.DescribeMaintenanceWindowSchedule(ctx, &params, optFns...)
 	if err != nil {
@@ -211,7 +216,10 @@ func (p *DescribeMaintenanceWindowSchedulePaginator) NextPage(ctx context.Contex
 	prevToken := p.nextToken
 	p.nextToken = result.NextToken
 
-	if p.options.StopOnDuplicateToken && prevToken != nil && p.nextToken != nil && *prevToken == *p.nextToken {
+	if p.options.StopOnDuplicateToken &&
+		prevToken != nil &&
+		p.nextToken != nil &&
+		*prevToken == *p.nextToken {
 		p.nextToken = nil
 	}
 
