@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/mobile/internal/sdkpath"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -60,7 +61,7 @@ Flag -iosversion sets the minimal version of the iOS SDK to compile against.
 The default version is 13.0.
 
 Flag -androidapi sets the Android API version to compile against.
-The default and minimum is 15.
+The default and minimum is 16.
 
 The -bundleid flag is required for -target ios and sets the bundle ID to use
 with the app.
@@ -215,7 +216,7 @@ func printcmd(format string, args ...interface{}) {
 	if tmpdir != "" {
 		cmd = strings.Replace(cmd, tmpdir, "$WORK", -1)
 	}
-	if androidHome := os.Getenv("ANDROID_HOME"); androidHome != "" {
+	if androidHome, err := sdkpath.AndroidHome(); err == nil {
 		cmd = strings.Replace(cmd, androidHome, "$ANDROID_HOME", -1)
 	}
 	if gomobilepath != "" {
@@ -269,11 +270,6 @@ func addBuildFlagsNVXWork(cmd *command) {
 	cmd.flag.BoolVar(&buildV, "v", false, "")
 	cmd.flag.BoolVar(&buildX, "x", false, "")
 	cmd.flag.BoolVar(&buildWork, "work", false, "")
-}
-
-type binInfo struct {
-	hasPkgApp bool
-	hasPkgAL  bool
 }
 
 func init() {
@@ -336,7 +332,15 @@ func goCmdAt(at string, subcmd string, srcs []string, env []string, args ...stri
 	}
 	cmd.Args = append(cmd.Args, args...)
 	cmd.Args = append(cmd.Args, srcs...)
-	cmd.Env = append([]string{}, env...)
+
+	// Specify GOMODCACHE explicitly. The default cache path is GOPATH[0]/pkg/mod,
+	// but the path varies when GOPATH is specified at env, which results in cold cache.
+	if gmc, err := goModCachePath(); err == nil {
+		env = append([]string{"GOMODCACHE=" + gmc}, env...)
+	} else {
+		env = append([]string{}, env...)
+	}
+	cmd.Env = env
 	cmd.Dir = at
 	return runCmd(cmd)
 }
@@ -346,7 +350,15 @@ func goModTidyAt(at string, env []string) error {
 	if buildV {
 		cmd.Args = append(cmd.Args, "-v")
 	}
-	cmd.Env = append([]string{}, env...)
+
+	// Specify GOMODCACHE explicitly. The default cache path is GOPATH[0]/pkg/mod,
+	// but the path varies when GOPATH is specified at env, which results in cold cache.
+	if gmc, err := goModCachePath(); err == nil {
+		env = append([]string{"GOMODCACHE=" + gmc}, env...)
+	} else {
+		env = append([]string{}, env...)
+	}
+	cmd.Env = env
 	cmd.Dir = at
 	return runCmd(cmd)
 }
@@ -354,10 +366,11 @@ func goModTidyAt(at string, env []string) error {
 // parseBuildTarget parses buildTarget into 1 or more platforms and architectures.
 // Returns an error if buildTarget contains invalid input.
 // Example valid target strings:
-//    android
-//    android/arm64,android/386,android/amd64
-//    ios,iossimulator,maccatalyst
-//    macos/amd64
+//
+//	android
+//	android/arm64,android/386,android/amd64
+//	ios,iossimulator,maccatalyst
+//	macos/amd64
 func parseBuildTarget(buildTarget string) ([]targetInfo, error) {
 	if buildTarget == "" {
 		return nil, fmt.Errorf(`invalid target ""`)
@@ -424,4 +437,12 @@ type targetInfo struct {
 
 func (t targetInfo) String() string {
 	return t.platform + "/" + t.arch
+}
+
+func goModCachePath() (string, error) {
+	out, err := exec.Command("go", "env", "GOMODCACHE").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }

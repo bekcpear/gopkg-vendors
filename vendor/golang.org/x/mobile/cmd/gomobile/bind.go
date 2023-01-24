@@ -15,7 +15,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
+	"golang.org/x/mobile/internal/sdkpath"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/tools/go/packages"
 )
@@ -42,9 +44,10 @@ example, in Android Studio (1.2+), an AAR file can be imported using
 the module import wizard (File > New > New Module > Import .JAR or
 .AAR package), and setting it as a new dependency
 (File > Project Structure > Dependencies).  This requires 'javac'
-(version 1.7+) and Android SDK (API level 15 or newer) to build the
-library for Android. The environment variable ANDROID_HOME must be set
-to the path to Android SDK. Use the -javapkg flag to specify the Java
+(version 1.7+) and Android SDK (API level 16 or newer) to build the
+library for Android. The ANDROID_HOME and ANDROID_NDK_HOME environment
+variables can be used to specify the Android SDK and NDK if they are
+not in the default locations. Use the -javapkg flag to specify the Java
 package prefix for the generated classes.
 
 By default, -target=android builds shared libraries for all supported
@@ -85,7 +88,7 @@ func runBind(cmd *command) error {
 		if bindPrefix != "" {
 			return fmt.Errorf("-prefix is supported only for Apple targets")
 		}
-		if _, err := ndkRoot(); err != nil {
+		if _, err := ndkRoot(targets[0]); err != nil {
 			return err
 		}
 	} else {
@@ -156,7 +159,7 @@ func bootClasspath() (string, error) {
 	if bindBootClasspath != "" {
 		return bindBootClasspath, nil
 	}
-	apiPath, err := androidAPIPath()
+	apiPath, err := sdkpath.AndroidAPIPath(buildAndroidAPI)
 	if err != nil {
 		return "", err
 	}
@@ -280,7 +283,7 @@ func getModuleVersions(targetPlatform string, targetArch string, src string) (*m
 	return f, nil
 }
 
-// writeGoMod writes go.mod file at $WORK/src when Go modules are used.
+// writeGoMod writes go.mod file at dir when Go modules are used.
 func writeGoMod(dir, targetPlatform, targetArch string) error {
 	m, err := areGoModulesUsed()
 	if err != nil {
@@ -291,7 +294,7 @@ func writeGoMod(dir, targetPlatform, targetArch string) error {
 		return nil
 	}
 
-	return writeFile(filepath.Join(dir, "src", "go.mod"), func(w io.Writer) error {
+	return writeFile(filepath.Join(dir, "go.mod"), func(w io.Writer) error {
 		f, err := getModuleVersions(targetPlatform, targetArch, ".")
 		if err != nil {
 			return err
@@ -310,14 +313,23 @@ func writeGoMod(dir, targetPlatform, targetArch string) error {
 	})
 }
 
+var (
+	areGoModulesUsedResult struct {
+		used bool
+		err  error
+	}
+	areGoModulesUsedOnce sync.Once
+)
+
 func areGoModulesUsed() (bool, error) {
-	out, err := exec.Command("go", "env", "GOMOD").Output()
-	if err != nil {
-		return false, err
-	}
-	outstr := strings.TrimSpace(string(out))
-	if outstr == "" {
-		return false, nil
-	}
-	return true, nil
+	areGoModulesUsedOnce.Do(func() {
+		out, err := exec.Command("go", "env", "GOMOD").Output()
+		if err != nil {
+			areGoModulesUsedResult.err = err
+			return
+		}
+		outstr := strings.TrimSpace(string(out))
+		areGoModulesUsedResult.used = outstr != ""
+	})
+	return areGoModulesUsedResult.used, areGoModulesUsedResult.err
 }

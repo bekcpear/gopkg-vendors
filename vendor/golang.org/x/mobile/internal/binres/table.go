@@ -22,10 +22,11 @@ type TableRef uint32
 // Resolve returns the Entry of TableRef in the given table.
 //
 // A TableRef is structured as follows:
-//  0xpptteeee
-//  pp: package index
-//  tt: type spec index in package
-//  eeee: entry index in type spec
+//
+//	0xpptteeee
+//	pp: package index
+//	tt: type spec index in package
+//	eeee: entry index in type spec
 //
 // The package and type spec values start at 1 for the first item,
 // to help catch cases where they have not been supplied.
@@ -127,8 +128,10 @@ func OpenTable() (*Table, error) {
 // indices.
 //
 // For example:
-//  tbl.SpecByName("@android:style/Theme.NoTitleBar")
-//  tbl.SpecByName("style")
+//
+//	tbl.SpecByName("@android:style/Theme.NoTitleBar")
+//	tbl.SpecByName("style")
+//
 // Both locate the spec by name "style".
 func (tbl *Table) SpecByName(name string) (int, *Package, int, *TypeSpec, error) {
 	n := strings.TrimPrefix(name, "@android:")
@@ -245,7 +248,8 @@ type Package struct {
 	typePool *Pool // type names; e.g. theme
 	keyPool  *Pool // resource names; e.g. Theme.NoTitleBar
 
-	specs []*TypeSpec
+	aliases []*StagedAlias
+	specs   []*TypeSpec
 }
 
 func (pkg *Package) UnmarshalBinary(bin []byte) error {
@@ -295,7 +299,7 @@ func (pkg *Package) UnmarshalBinary(bin []byte) error {
 		return nil
 	}
 
-	buf := bin[idOffset:]
+	buf := bin[idOffset:pkg.byteSize]
 	for len(buf) > 0 {
 		t := ResType(btou16(buf))
 		switch t {
@@ -314,8 +318,15 @@ func (pkg *Package) UnmarshalBinary(bin []byte) error {
 			last := pkg.specs[len(pkg.specs)-1]
 			last.types = append(last.types, typ)
 			buf = buf[typ.byteSize:]
+		case ResTableStagedAlias:
+			alias := new(StagedAlias)
+			if err := alias.UnmarshalBinary(buf); err != nil {
+				return err
+			}
+			pkg.aliases = append(pkg.aliases, alias)
+			buf = buf[alias.byteSize:]
 		default:
-			return errWrongType(t, ResTableTypeSpec, ResTableType)
+			return errWrongType(t, ResTableTypeSpec, ResTableType, ResTableStagedAlias)
 		}
 	}
 
@@ -365,6 +376,14 @@ func (pkg *Package) MarshalBinary() ([]byte, error) {
 		}
 		putu32(bin[276:], uint32(len(bin)))
 		putu32(bin[280:], pkg.lastPublicKey)
+		bin = append(bin, b...)
+	}
+
+	for _, alias := range pkg.aliases {
+		b, err := alias.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
 		bin = append(bin, b...)
 	}
 
@@ -534,14 +553,15 @@ func (typ *Type) UnmarshalBinary(bin []byte) error {
 	// fmt.Println("language/country:", u16tos(typ.config.locale.language), u16tos(typ.config.locale.country))
 
 	buf := bin[typ.headerByteSize:typ.entriesStart]
-	for len(buf) > 0 {
-		typ.indices = append(typ.indices, btou32(buf))
-		buf = buf[4:]
+	if len(buf) != 4*int(typ.entryCount) {
+		return fmt.Errorf("index buffer len[%v] doesn't match entryCount[%v]", len(buf), typ.entryCount)
 	}
 
-	if len(typ.indices) != int(typ.entryCount) {
-		return fmt.Errorf("indices len[%v] doesn't match entryCount[%v]", len(typ.indices), typ.entryCount)
+	typ.indices = make([]uint32, typ.entryCount)
+	for i := range typ.indices {
+		typ.indices[i] = btou32(buf[i*4:])
 	}
+
 	typ.entries = make([]*Entry, typ.entryCount)
 
 	for i, x := range typ.indices {
@@ -569,9 +589,9 @@ func (typ *Type) MarshalBinary() ([]byte, error) {
 	putu32(bin[12:], uint32(len(typ.entries)))
 	putu32(bin[16:], uint32(56+len(typ.entries)*4))
 
-	// assure typ.config.size is always written as 52; extended configuration beyond supported
+	// assure typ.config.size is always written as 36; extended configuration beyond supported
 	// API level is not supported by this marshal implementation but will be forward-compatible.
-	putu32(bin[20:], 52)
+	putu32(bin[20:], 36)
 
 	putu16(bin[24:], typ.config.imsi.mcc)
 	putu16(bin[26:], typ.config.imsi.mnc)
@@ -610,6 +630,65 @@ func (typ *Type) MarshalBinary() ([]byte, error) {
 	bin = append(bin, ntbin...)
 
 	putu32(bin[4:], uint32(len(bin)))
+	return bin, nil
+}
+
+type StagedAliasEntry struct {
+	stagedID    uint32
+	finalizedID uint32
+}
+
+func (ae *StagedAliasEntry) MarshalBinary() ([]byte, error) {
+	bin := make([]byte, 8)
+	putu32(bin, ae.stagedID)
+	putu32(bin[4:], ae.finalizedID)
+	return bin, nil
+}
+
+func (ae *StagedAliasEntry) UnmarshalBinary(bin []byte) error {
+	ae.stagedID = btou32(bin)
+	ae.finalizedID = btou32(bin[4:])
+	return nil
+}
+
+type StagedAlias struct {
+	chunkHeader
+	count   uint32
+	entries []StagedAliasEntry
+}
+
+func (a *StagedAlias) UnmarshalBinary(bin []byte) error {
+	if err := (&a.chunkHeader).UnmarshalBinary(bin); err != nil {
+		return err
+	}
+	if a.typ != ResTableStagedAlias {
+		return errWrongType(a.typ, ResTableStagedAlias)
+	}
+	a.count = btou32(bin[8:])
+	a.entries = make([]StagedAliasEntry, a.count)
+	for i := range a.entries {
+		if err := a.entries[i].UnmarshalBinary(bin[12+i*8:]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *StagedAlias) MarshalBinary() ([]byte, error) {
+	chunkHeaderBin, err := a.chunkHeader.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	countBin := make([]byte, 4)
+	putu32(countBin, a.count)
+	bin := append(chunkHeaderBin, countBin...)
+	for _, entry := range a.entries {
+		entryBin, err := entry.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		bin = append(bin, entryBin...)
+	}
 	return bin, nil
 }
 

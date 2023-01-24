@@ -12,9 +12,9 @@
 // sent to unmarshalling. This allows tests to validate each struct representation
 // of the binary format as follows:
 //
-//  * unmarshal the output of aapt
-//  * marshal the struct representation
-//  * perform byte-to-byte comparison with aapt output per chunk header and body
+//   - unmarshal the output of aapt
+//   - marshal the struct representation
+//   - perform byte-to-byte comparison with aapt output per chunk header and body
 //
 // This process should strive to make structs idiomatic to make parsing xml text
 // into structs trivial.
@@ -22,9 +22,9 @@
 // Once the struct representation is validated, tests for parsing xml text
 // into structs can become self-referential as the following holds true:
 //
-//  * the unmarshalled input of aapt output is the only valid target
-//  * the unmarshalled input of xml text may be compared to the unmarshalled
-//    input of aapt output to identify errors, e.g. text-trims, wrong flags, etc
+//   - the unmarshalled input of aapt output is the only valid target
+//   - the unmarshalled input of xml text may be compared to the unmarshalled
+//     input of aapt output to identify errors, e.g. text-trims, wrong flags, etc
 //
 // This provides validation, byte-for-byte, for producing binary xml resources.
 //
@@ -34,11 +34,11 @@
 //
 // A simple view of binary xml document structure:
 //
-//  XML
-//    Pool
-//    Map
-//    Namespace
-//    [...node]
+//	XML
+//	  Pool
+//	  Map
+//	  Namespace
+//	  [...node]
 //
 // Additional resources:
 // https://android.googlesource.com/platform/frameworks/base/+/master/libs/androidfw/include/androidfw/ResourceTypes.h
@@ -82,10 +82,13 @@ const (
 
 	ResXMLResourceMap ResType = 0x0180
 
-	ResTablePackage  ResType = 0x0200
-	ResTableType     ResType = 0x0201
-	ResTableTypeSpec ResType = 0x0202
-	ResTableLibrary  ResType = 0x0203
+	ResTablePackage           ResType = 0x0200
+	ResTableType              ResType = 0x0201
+	ResTableTypeSpec          ResType = 0x0202
+	ResTableLibrary           ResType = 0x0203
+	ResTableOverlayable       ResType = 0x0204
+	ResTableOverlayablePolicy ResType = 0x0205
+	ResTableStagedAlias       ResType = 0x0206
 )
 
 var (
@@ -247,14 +250,14 @@ func UnmarshalXML(r io.Reader, withIcon bool) (*XML, error) {
 							Space: "",
 							Local: "platformBuildVersionCode",
 						},
-						Value: "15",
+						Value: "16",
 					},
 					xml.Attr{
 						Name: xml.Name{
 							Space: "",
 							Local: "platformBuildVersionName",
 						},
-						Value: "4.0.4-1406430",
+						Value: "4.1.2-1425332",
 					})
 
 				q = append(q, ltoken{tkn, line})
@@ -906,7 +909,7 @@ func poolTrim(s string) string {
 }
 
 // byNamespace sorts attributes based on string pool position of namespace.
-// Given that "android" always preceeds "" in the pool, this results in the
+// Given that "android" always proceeds "" in the pool, this results in the
 // correct ordering of attributes.
 type byNamespace []*Attribute
 

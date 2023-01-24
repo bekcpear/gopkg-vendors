@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -152,7 +151,7 @@ func WriteHTML(bucketName string, prefixes string, suffix string, outPath string
 		if err != nil {
 			return err
 		}
-		err = ioutil.WriteFile(outPath, buf.Bytes(), 0644)
+		err = os.WriteFile(outPath, buf.Bytes(), 0644)
 		if err != nil {
 			return err
 		}
@@ -239,7 +238,8 @@ func CopyLatest(bucketName string, platform string, dryRun bool) error {
 
 const (
 	// PlatformTypeDarwin is platform type for OS X
-	PlatformTypeDarwin = "darwin"
+	PlatformTypeDarwin      = "darwin"
+	PlatformTypeDarwinArm64 = "darwin-arm64"
 	// PlatformTypeLinux is platform type for Linux
 	PlatformTypeLinux = "linux"
 	// PlatformTypeWindows is platform type for windows
@@ -247,12 +247,14 @@ const (
 )
 
 var platformDarwin = Platform{Name: PlatformTypeDarwin, Prefix: "darwin/", PrefixSupport: "darwin-support/", LatestName: "Keybase.dmg"}
+var platformDarwinArm64 = Platform{Name: PlatformTypeDarwinArm64, Prefix: "darwin-arm64/", PrefixSupport: "darwin-arm64-support/", LatestName: "Keybase-arm64.dmg"}
 var platformLinuxDeb = Platform{Name: "deb", Prefix: "linux_binaries/deb/", Suffix: "_amd64.deb", LatestName: "keybase_amd64.deb"}
 var platformLinuxRPM = Platform{Name: "rpm", Prefix: "linux_binaries/rpm/", Suffix: ".x86_64.rpm", LatestName: "keybase_amd64.rpm"}
 var platformWindows = Platform{Name: PlatformTypeWindows, Prefix: "windows/", PrefixSupport: "windows-support/", LatestName: "keybase_setup_amd64.msi"}
 
 var platformsAll = []Platform{
 	platformDarwin,
+	platformDarwinArm64,
 	platformLinuxDeb,
 	platformLinuxRPM,
 	platformWindows,
@@ -263,6 +265,8 @@ func Platforms(name string) ([]Platform, error) {
 	switch name {
 	case PlatformTypeDarwin:
 		return []Platform{platformDarwin}, nil
+	case PlatformTypeDarwinArm64:
+		return []Platform{platformDarwinArm64}, nil
 	case PlatformTypeLinux:
 		return []Platform{platformLinuxDeb, platformLinuxRPM}, nil
 	case PlatformTypeWindows:
@@ -346,6 +350,12 @@ func (p Platform) Files(releaseName string) ([]string, error) {
 			fmt.Sprintf("darwin-updates/Keybase-%s.zip", releaseName),
 			fmt.Sprintf("darwin-support/update-darwin-prod-%s.json", releaseName),
 		}, nil
+	case PlatformTypeDarwinArm64:
+		return []string{
+			fmt.Sprintf("darwin-arm64/Keybase-%s.dmg", releaseName),
+			fmt.Sprintf("darwin-arm64-updates/Keybase-%s.zip", releaseName),
+			fmt.Sprintf("darwin-arm64-support/update-darwin-prod-%s.json", releaseName),
+		}, nil
 	default:
 		return nil, fmt.Errorf("Unsupported for this platform: %s", p.Name)
 	}
@@ -366,9 +376,10 @@ func (c *Client) CopyLatest(bucketName string, platform string, dryRun bool) err
 		var url string
 		// Use update json to look for current DMG (for darwin)
 		// TODO: Fix for linux
-		if platform.Name == PlatformTypeDarwin || platform.Name == PlatformTypeWindows {
+		switch platform.Name {
+		case PlatformTypeDarwin, PlatformTypeDarwinArm64, PlatformTypeWindows:
 			url, err = c.copyFromUpdate(platform, bucketName)
-		} else {
+		default:
 			_, url, err = c.copyFromReleases(platform, bucketName)
 		}
 		if err != nil {
@@ -408,7 +419,7 @@ func (c *Client) copyFromUpdate(platform Platform, bucketName string) (url strin
 		return
 	}
 	switch platform.Name {
-	case PlatformTypeDarwin:
+	case PlatformTypeDarwin, PlatformTypeDarwinArm64:
 		url = urlString(bucketName, platform.Prefix, fmt.Sprintf("Keybase-%s.dmg", currentUpdate.Version))
 	case PlatformTypeWindows:
 		url = urlString(bucketName, platform.Prefix, fmt.Sprintf("Keybase_%s.amd64.msi", currentUpdate.Version))
@@ -430,6 +441,7 @@ func (c *Client) copyFromReleases(platform Platform, bucketName string) (release
 // CurrentUpdate returns current update for a platform
 func (c *Client) CurrentUpdate(bucketName string, channel string, platformName string, env string) (currentUpdate *Update, path string, err error) {
 	path = updateJSONName(channel, platformName, env)
+	log.Printf("Fetching current update at %s", path)
 	resp, err := c.svc.GetObject(&s3.GetObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(path),
@@ -459,8 +471,12 @@ func updateJSONName(channel string, platformName string, env string) string {
 
 // PromoteARelease promotes a specific release to Prod.
 func PromoteARelease(releaseName string, bucketName string, platform string, dryRun bool) (release *Release, err error) {
-	if platform != PlatformTypeDarwin && platform != PlatformTypeWindows {
+	switch platform {
+	case PlatformTypeDarwin, PlatformTypeDarwinArm64, PlatformTypeWindows:
+		// pass
+	default:
 		return nil, fmt.Errorf("Promoting releases is only supported for darwin or windows")
+
 	}
 
 	client, err := NewClient()
@@ -491,7 +507,7 @@ func PromoteARelease(releaseName string, bucketName string, platform string, dry
 func (c *Client) promoteAReleaseToProd(releaseName string, bucketName string, platform Platform, env string, toChannel string, dryRun bool) (release *Release, err error) {
 	var filePath string
 	switch platform.Name {
-	case PlatformTypeDarwin:
+	case PlatformTypeDarwin, PlatformTypeDarwinArm64:
 		filePath = fmt.Sprintf("Keybase-%s.dmg", releaseName)
 	case PlatformTypeWindows:
 		filePath = fmt.Sprintf("Keybase_%s.amd64.msi", releaseName)
@@ -529,7 +545,7 @@ func (c *Client) promoteAReleaseToProd(releaseName string, bucketName string, pl
 
 // PromoteRelease promotes a release to a channel
 func (c *Client) PromoteRelease(bucketName string, delay time.Duration, beforeHourEastern int, toChannel string, platform Platform, env string, allowDowngrade bool, releaseName string) (*Release, error) {
-	log.Printf("Finding release to promote to %q (%s delay)", toChannel, delay)
+	log.Printf("Finding release to promote to %q (%s delay) in env %s", toChannel, delay, env)
 	var release *Release
 	var err error
 
@@ -654,6 +670,8 @@ func Report(bucketName string, writer io.Writer) error {
 	fmt.Fprintln(tw, "Platform\tChannel\tVersion\tCreated\tSource")
 	client.report(tw, bucketName, "test-v2", PlatformTypeDarwin)
 	client.report(tw, bucketName, "v2", PlatformTypeDarwin)
+	client.report(tw, bucketName, "test-v2", PlatformTypeDarwinArm64)
+	client.report(tw, bucketName, "v2", PlatformTypeDarwinArm64)
 	client.report(tw, bucketName, "test", PlatformTypeLinux)
 	client.report(tw, bucketName, "", PlatformTypeLinux)
 	return tw.Flush()
@@ -662,6 +680,10 @@ func Report(bucketName string, writer io.Writer) error {
 // promoteTestReleaseForDarwin creates a test release for darwin
 func promoteTestReleaseForDarwin(bucketName string, release string) (*Release, error) {
 	return promoteRelease(bucketName, time.Duration(0), 0, "test-v2", platformDarwin, "prod", true, release)
+}
+
+func promoteTestReleaseForDarwinArm64(bucketName string, release string) (*Release, error) {
+	return promoteRelease(bucketName, time.Duration(0), 0, "test-v2", platformDarwinArm64, "prod", true, release)
 }
 
 // promoteTestReleaseForLinux creates a test release for linux
@@ -682,6 +704,9 @@ func PromoteTestReleases(bucketName string, platformName string, release string)
 	case PlatformTypeDarwin:
 		_, err := promoteTestReleaseForDarwin(bucketName, release)
 		return err
+	case PlatformTypeDarwinArm64:
+		_, err := promoteTestReleaseForDarwinArm64(bucketName, release)
+		return err
 	case PlatformTypeLinux:
 		return promoteTestReleaseForLinux(bucketName)
 	case PlatformTypeWindows:
@@ -692,22 +717,23 @@ func PromoteTestReleases(bucketName string, platformName string, release string)
 }
 
 // PromoteReleases creates releases for a platform
-func PromoteReleases(bucketName string, platform string) (release *Release, err error) {
-	switch platform {
+func PromoteReleases(bucketName string, platformType string) (release *Release, err error) {
+	var platform Platform
+	switch platformType {
 	case PlatformTypeDarwin:
-		release, err = promoteRelease(bucketName, time.Hour*27, 10, defaultChannel, platformDarwin, "prod", false, "")
-		if err != nil {
-			return nil, err
-		}
-		if release != nil {
-			log.Printf("Promoted (darwin) release: %s\n", release.Name)
-		}
-	case PlatformTypeLinux:
-		log.Printf("Promoting releases is unsupported for linux")
-	case PlatformTypeWindows:
-		log.Printf("Promoting releases is unsupported for windows")
+		platform = platformDarwin
+	case PlatformTypeDarwinArm64:
+		platform = platformDarwinArm64
 	default:
-		log.Printf("Invalid platform %s", platform)
+		log.Printf("Promoting releases is unsupported for %s", platformType)
+		return
+	}
+	release, err = promoteRelease(bucketName, time.Hour*27, 10, defaultChannel, platform, "prod", false, "")
+	if err != nil {
+		return nil, err
+	}
+	if release != nil {
+		log.Printf("Promoted (darwin) release: %s\n", release.Name)
 	}
 	return release, nil
 }
