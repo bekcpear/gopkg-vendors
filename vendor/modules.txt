@@ -761,6 +761,7 @@ tailscale.com/net/tshttpproxy
 tailscale.com/net/wsconn
 tailscale.com/paths
 tailscale.com/safesocket
+tailscale.com/smallzstd
 tailscale.com/syncs
 tailscale.com/tailcfg
 tailscale.com/tka
