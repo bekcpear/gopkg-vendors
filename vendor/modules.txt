@@ -1374,7 +1374,7 @@ golang.org/x/tools/internal/imports
 golang.org/x/tools/internal/packagesinternal
 golang.org/x/tools/internal/typeparams
 golang.org/x/tools/internal/typesinternal
-# golang.zx2c4.com/wintun v0.0.0-20211104114900-415007cec224
+# golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
 ## explicit; go 1.17
 golang.zx2c4.com/wintun
 # golang.zx2c4.com/wireguard/windows v0.5.3
