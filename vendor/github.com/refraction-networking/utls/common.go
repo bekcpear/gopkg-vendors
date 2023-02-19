@@ -656,6 +656,14 @@ type Config struct {
 	// testing or in combination with VerifyConnection or VerifyPeerCertificate.
 	InsecureSkipVerify bool
 
+	// InsecureServerNameToVerify is used to verify the hostname on the returned
+	// certificates. It is intended to use with spoofed ServerName.
+	// If InsecureServerNameToVerify is "*", crypto/tls will do normal
+	// certificate validation but ignore certifacate's DNSName.
+	//
+	// This field is ignored when InsecureSkipVerify is true.
+	InsecureServerNameToVerify string // [uTLS]
+
 	// CipherSuites is a list of enabled TLS 1.0–1.2 cipher suites. The order of
 	// the list is ignored. Note that TLS 1.3 ciphersuites are not configurable.
 	//
@@ -813,6 +821,7 @@ func (c *Config) Clone() *Config {
 		ClientAuth:                  c.ClientAuth,
 		ClientCAs:                   c.ClientCAs,
 		InsecureSkipVerify:          c.InsecureSkipVerify,
+		InsecureServerNameToVerify:  c.InsecureServerNameToVerify,
 		CipherSuites:                c.CipherSuites,
 		PreferServerCipherSuites:    c.PreferServerCipherSuites,
 		SessionTicketsDisabled:      c.SessionTicketsDisabled,

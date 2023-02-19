@@ -1,17 +1,14 @@
 package dtls
 
-import (
-	"sync"
-
-	"github.com/pion/logging"
-)
-
 /*
   DTLS messages are grouped into a series of message flights, according
   to the diagrams below.  Although each flight of messages may consist
   of a number of messages, they should be viewed as monolithic for the
   purpose of timeout and retransmission.
   https://tools.ietf.org/html/rfc4347#section-4.2.4
+
+  Message flights for full handshake:
+
   Client                                          Server
   ------                                          ------
                                       Waiting                 Flight 0
@@ -37,6 +34,23 @@ import (
                                       [ChangeCipherSpec]    \ Flight 6
                           <--------             Finished    /
 
+  Message flights for session-resuming handshake (no cookie exchange):
+
+  Client                                          Server
+  ------                                          ------
+                                      Waiting                 Flight 0
+
+  ClientHello             -------->                           Flight 1
+
+                                             ServerHello    \
+                                      [ChangeCipherSpec]      Flight 4b
+                          <--------             Finished    /
+
+  [ChangeCipherSpec]                                        \ Flight 5b
+  Finished                -------->                         /
+
+                                      [ChangeCipherSpec]    \ Flight 6
+                          <--------             Finished    /
 */
 
 type flightVal uint8
@@ -47,7 +61,9 @@ const (
 	flight2
 	flight3
 	flight4
+	flight4b
 	flight5
+	flight5b
 	flight6
 )
 
@@ -63,8 +79,12 @@ func (f flightVal) String() string {
 		return "Flight 3"
 	case flight4:
 		return "Flight 4"
+	case flight4b:
+		return "Flight 4b"
 	case flight5:
 		return "Flight 5"
+	case flight5b:
+		return "Flight 5b"
 	case flight6:
 		return "Flight 6"
 	default:
@@ -72,41 +92,10 @@ func (f flightVal) String() string {
 	}
 }
 
-type flight struct {
-	sync.RWMutex
-	val           flightVal
-	workerTrigger chan struct{} // Temporary way to trigger next flight
-
-	log logging.LeveledLogger
+func (f flightVal) isLastSendFlight() bool {
+	return f == flight6 || f == flight5b
 }
 
-func newFlight(isClient bool, logger logging.LeveledLogger) *flight {
-	val := flight0
-	if isClient {
-		val = flight1
-	}
-	return &flight{
-		val:           val,
-		workerTrigger: make(chan struct{}, 1),
-
-		log: logger,
-	}
-}
-
-func (f *flight) get() flightVal {
-	f.RLock()
-	defer f.RUnlock()
-	return f.val
-}
-
-func (f *flight) set(val flightVal) {
-	f.Lock()
-	f.log.Tracef("[handshake] Moving from %s to %s", f.val.String(), val.String())
-	f.val = val // TODO ensure no invalid transitions
-	f.Unlock()
-
-	select {
-	case f.workerTrigger <- struct{}{}:
-	default:
-	}
+func (f flightVal) isLastRecvFlight() bool {
+	return f == flight5 || f == flight4b
 }

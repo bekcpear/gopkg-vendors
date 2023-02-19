@@ -40,9 +40,12 @@ var testingOnlyForceClientHelloSignatureAlgorithms []SignatureScheme
 
 func (c *Conn) makeClientHello() (*clientHelloMsg, ecdheParameters, error) {
 	config := c.config
-	if len(config.ServerName) == 0 && !config.InsecureSkipVerify {
-		return nil, nil, errors.New("tls: either ServerName or InsecureSkipVerify must be specified in the tls.Config")
+
+	// [UTLS SECTION START]
+	if len(config.ServerName) == 0 && !config.InsecureSkipVerify && len(config.InsecureServerNameToVerify) == 0 {
+		return nil, nil, errors.New("tls: at least one of ServerName, InsecureSkipVerify or InsecureServerNameToVerify must be specified in the tls.Config")
 	}
+	// [UTLS SECTION END]
 
 	nextProtosLength := 0
 	for _, proto := range config.NextProtos {
@@ -600,6 +603,11 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 		}
 	}
 
+	// [UTLS SECTION START]
+	/* sessionHash does not include CertificateVerify */
+	sessionHash := hs.finishedHash.Sum()
+	// [UTLS SECTION END]
+
 	if chainToSend != nil && len(chainToSend.Certificate) > 0 {
 		certVerify := &certificateVerifyMsg{}
 
@@ -648,11 +656,14 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 		}
 	}
 
+	// [UTLS SECTION START]
 	if hs.hello.ems && hs.serverHello.ems {
-		hs.masterSecret = extendedMasterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret, hs.finishedHash)
+		hs.masterSecret = extendedMasterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret, sessionHash)
 	} else {
 		hs.masterSecret = masterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret, hs.hello.random, hs.serverHello.random)
 	}
+	// [UTLS SECTION END]
+
 	if err := c.config.writeKeyLog(keyLogLabelTLS12, hs.hello.random, hs.masterSecret); err != nil {
 		c.sendAlert(alertInternalError)
 		return errors.New("tls: failed to write to key log: " + err.Error())
@@ -866,12 +877,19 @@ func (c *Conn) verifyServerCertificate(certificates [][]byte) error {
 	}
 
 	if !c.config.InsecureSkipVerify {
+		// [UTLS SECTION START]
 		opts := x509.VerifyOptions{
 			Roots:         c.config.RootCAs,
 			CurrentTime:   c.config.time(),
-			DNSName:       c.config.ServerName,
 			Intermediates: x509.NewCertPool(),
 		}
+
+		if len(c.config.InsecureServerNameToVerify) == 0 {
+			opts.DNSName = c.config.ServerName
+		} else if c.config.InsecureServerNameToVerify != "*" {
+			opts.DNSName = c.config.InsecureServerNameToVerify
+		}
+		// [UTLS SECTION END]
 
 		for _, cert := range certs[1:] {
 			opts.Intermediates.AddCert(cert)

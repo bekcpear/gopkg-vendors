@@ -3,6 +3,7 @@ package dtls
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -12,14 +13,15 @@ import (
 	"math/big"
 	"time"
 
-	"golang.org/x/crypto/ed25519"
+	"github.com/pion/dtls/v2/pkg/crypto/elliptic"
+	"github.com/pion/dtls/v2/pkg/crypto/hash"
 )
 
 type ecdsaSignature struct {
 	R, S *big.Int
 }
 
-func valueKeySignature(clientRandom, serverRandom, publicKey []byte, namedCurve namedCurve, hashAlgorithm hashAlgorithm) []byte {
+func valueKeyMessage(clientRandom, serverRandom, publicKey []byte, namedCurve elliptic.Curve) []byte {
 	serverECDHParams := make([]byte, 4)
 	serverECDHParams[0] = 3 // named curve
 	binary.BigEndian.PutUint16(serverECDHParams[1:], uint16(namedCurve))
@@ -30,7 +32,8 @@ func valueKeySignature(clientRandom, serverRandom, publicKey []byte, namedCurve 
 	plaintext = append(plaintext, serverRandom...)
 	plaintext = append(plaintext, serverECDHParams...)
 	plaintext = append(plaintext, publicKey...)
-	return hashAlgorithm.digest(plaintext)
+
+	return plaintext
 }
 
 // If the client provided a "signature_algorithms" extension, then all
@@ -38,22 +41,24 @@ func valueKeySignature(clientRandom, serverRandom, publicKey []byte, namedCurve 
 // hash/signature algorithm pair that appears in that extension
 //
 // https://tools.ietf.org/html/rfc5246#section-7.4.2
-func generateKeySignature(clientRandom, serverRandom, publicKey []byte, namedCurve namedCurve, privateKey crypto.PrivateKey, hashAlgorithm hashAlgorithm) ([]byte, error) {
-	hashed := valueKeySignature(clientRandom, serverRandom, publicKey, namedCurve, hashAlgorithm)
+func generateKeySignature(clientRandom, serverRandom, publicKey []byte, namedCurve elliptic.Curve, privateKey crypto.PrivateKey, hashAlgorithm hash.Algorithm) ([]byte, error) {
+	msg := valueKeyMessage(clientRandom, serverRandom, publicKey, namedCurve)
 	switch p := privateKey.(type) {
 	case ed25519.PrivateKey:
 		// https://crypto.stackexchange.com/a/55483
-		return p.Sign(rand.Reader, hashed, crypto.Hash(0))
+		return p.Sign(rand.Reader, msg, crypto.Hash(0))
 	case *ecdsa.PrivateKey:
-		return p.Sign(rand.Reader, hashed, crypto.SHA256)
+		hashed := hashAlgorithm.Digest(msg)
+		return p.Sign(rand.Reader, hashed, hashAlgorithm.CryptoHash())
 	case *rsa.PrivateKey:
-		return p.Sign(rand.Reader, hashed, crypto.SHA256)
+		hashed := hashAlgorithm.Digest(msg)
+		return p.Sign(rand.Reader, hashed, hashAlgorithm.CryptoHash())
 	}
 
 	return nil, errKeySignatureGenerateUnimplemented
 }
 
-func verifyKeySignature(hash, remoteKeySignature []byte, hashAlgorithm hashAlgorithm, rawCertificates [][]byte) error {
+func verifyKeySignature(message, remoteKeySignature []byte, hashAlgorithm hash.Algorithm, rawCertificates [][]byte) error { //nolint:dupl
 	if len(rawCertificates) == 0 {
 		return errLengthMismatch
 	}
@@ -64,7 +69,7 @@ func verifyKeySignature(hash, remoteKeySignature []byte, hashAlgorithm hashAlgor
 
 	switch p := certificate.PublicKey.(type) {
 	case ed25519.PublicKey:
-		if ok := ed25519.Verify(p, hash, remoteKeySignature); !ok {
+		if ok := ed25519.Verify(p, message, remoteKeySignature); !ok {
 			return errKeySignatureMismatch
 		}
 		return nil
@@ -76,14 +81,18 @@ func verifyKeySignature(hash, remoteKeySignature []byte, hashAlgorithm hashAlgor
 		if ecdsaSig.R.Sign() <= 0 || ecdsaSig.S.Sign() <= 0 {
 			return errInvalidECDSASignature
 		}
-		if !ecdsa.Verify(p, hash, ecdsaSig.R, ecdsaSig.S) {
+		hashed := hashAlgorithm.Digest(message)
+		if !ecdsa.Verify(p, hashed, ecdsaSig.R, ecdsaSig.S) {
 			return errKeySignatureMismatch
 		}
 		return nil
 	case *rsa.PublicKey:
 		switch certificate.SignatureAlgorithm {
 		case x509.SHA1WithRSA, x509.SHA256WithRSA, x509.SHA384WithRSA, x509.SHA512WithRSA:
-			return rsa.VerifyPKCS1v15(p, hashAlgorithm.cryptoHash(), hash, remoteKeySignature)
+			hashed := hashAlgorithm.Digest(message)
+			return rsa.VerifyPKCS1v15(p, hashAlgorithm.CryptoHash(), hashed, remoteKeySignature)
+		default:
+			return errKeySignatureVerifyUnimplemented
 		}
 	}
 
@@ -98,7 +107,14 @@ func verifyKeySignature(hash, remoteKeySignature []byte, hashAlgorithm hashAlgor
 // CertificateVerify message is sent to explicitly verify possession of
 // the private key in the certificate.
 // https://tools.ietf.org/html/rfc5246#section-7.3
-func generateCertificateVerify(handshakeBodies []byte, privateKey crypto.PrivateKey) ([]byte, error) {
+func generateCertificateVerify(handshakeBodies []byte, privateKey crypto.PrivateKey, hashAlgorithm hash.Algorithm) ([]byte, error) {
+	if p, ok := privateKey.(ed25519.PrivateKey); ok {
+		// https://pkg.go.dev/crypto/ed25519#PrivateKey.Sign
+		// Sign signs the given message with priv. Ed25519 performs two passes over
+		// messages to be signed and therefore cannot handle pre-hashed messages.
+		return p.Sign(rand.Reader, handshakeBodies, crypto.Hash(0))
+	}
+
 	h := sha256.New()
 	if _, err := h.Write(handshakeBodies); err != nil {
 		return nil, err
@@ -106,19 +122,16 @@ func generateCertificateVerify(handshakeBodies []byte, privateKey crypto.Private
 	hashed := h.Sum(nil)
 
 	switch p := privateKey.(type) {
-	case ed25519.PrivateKey:
-		// https://crypto.stackexchange.com/a/55483
-		return p.Sign(rand.Reader, hashed, crypto.Hash(0))
 	case *ecdsa.PrivateKey:
-		return p.Sign(rand.Reader, hashed, crypto.SHA256)
+		return p.Sign(rand.Reader, hashed, hashAlgorithm.CryptoHash())
 	case *rsa.PrivateKey:
-		return p.Sign(rand.Reader, hashed, crypto.SHA256)
+		return p.Sign(rand.Reader, hashed, hashAlgorithm.CryptoHash())
 	}
 
 	return nil, errInvalidSignatureAlgorithm
 }
 
-func verifyCertificateVerify(handshakeBodies []byte, hashAlgorithm hashAlgorithm, remoteKeySignature []byte, rawCertificates [][]byte) error {
+func verifyCertificateVerify(handshakeBodies []byte, hashAlgorithm hash.Algorithm, remoteKeySignature []byte, rawCertificates [][]byte) error { //nolint:dupl
 	if len(rawCertificates) == 0 {
 		return errLengthMismatch
 	}
@@ -127,10 +140,9 @@ func verifyCertificateVerify(handshakeBodies []byte, hashAlgorithm hashAlgorithm
 		return err
 	}
 
-	hash := hashAlgorithm.digest(handshakeBodies)
 	switch p := certificate.PublicKey.(type) {
 	case ed25519.PublicKey:
-		if ok := ed25519.Verify(p, hash, remoteKeySignature); !ok {
+		if ok := ed25519.Verify(p, handshakeBodies, remoteKeySignature); !ok {
 			return errKeySignatureMismatch
 		}
 		return nil
@@ -142,6 +154,7 @@ func verifyCertificateVerify(handshakeBodies []byte, hashAlgorithm hashAlgorithm
 		if ecdsaSig.R.Sign() <= 0 || ecdsaSig.S.Sign() <= 0 {
 			return errInvalidECDSASignature
 		}
+		hash := hashAlgorithm.Digest(handshakeBodies)
 		if !ecdsa.Verify(p, hash, ecdsaSig.R, ecdsaSig.S) {
 			return errKeySignatureMismatch
 		}
@@ -149,7 +162,10 @@ func verifyCertificateVerify(handshakeBodies []byte, hashAlgorithm hashAlgorithm
 	case *rsa.PublicKey:
 		switch certificate.SignatureAlgorithm {
 		case x509.SHA1WithRSA, x509.SHA256WithRSA, x509.SHA384WithRSA, x509.SHA512WithRSA:
-			return rsa.VerifyPKCS1v15(p, hashAlgorithm.cryptoHash(), hash, remoteKeySignature)
+			hash := hashAlgorithm.Digest(handshakeBodies)
+			return rsa.VerifyPKCS1v15(p, hashAlgorithm.CryptoHash(), hash, remoteKeySignature)
+		default:
+			return errKeySignatureVerifyUnimplemented
 		}
 	}
 
@@ -206,18 +222,4 @@ func verifyServerCert(rawCertificates [][]byte, roots *x509.CertPool, serverName
 		Intermediates: intermediateCAPool,
 	}
 	return certificate[0].Verify(opts)
-}
-
-func generateAEADAdditionalData(h *recordLayerHeader, payloadLen int) []byte {
-	var additionalData [13]byte
-	// SequenceNumber MUST be set first
-	// we only want uint48, clobbering an extra 2 (using uint64, Golang doesn't have uint48)
-	binary.BigEndian.PutUint64(additionalData[:], h.sequenceNumber)
-	binary.BigEndian.PutUint16(additionalData[:], h.epoch)
-	additionalData[8] = byte(h.contentType)
-	additionalData[9] = h.protocolVersion.major
-	additionalData[10] = h.protocolVersion.minor
-	binary.BigEndian.PutUint16(additionalData[len(additionalData)-2:], uint16(payloadLen))
-
-	return additionalData[:]
 }
