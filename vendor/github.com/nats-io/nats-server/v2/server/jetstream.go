@@ -142,7 +142,7 @@ type jsAccount struct {
 	store     TemplateStore
 
 	// From server
-	sendq *ipQueue // of *pubMsg
+	sendq *ipQueue[*pubMsg]
 
 	// Usage/limits related fields that will be protected by usageMu
 	usageMu    sync.RWMutex
@@ -784,9 +784,9 @@ func (js *jetStream) setJetStreamStandAlone(isStandAlone bool) {
 // JetStreamEnabled reports if jetstream is enabled for this server.
 func (s *Server) JetStreamEnabled() bool {
 	var js *jetStream
-	s.mu.Lock()
+	s.mu.RLock()
 	js = s.js
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	return js.isEnabled()
 }
 
@@ -853,9 +853,9 @@ func (s *Server) signalPullConsumers() {
 
 // Shutdown jetstream for this server.
 func (s *Server) shutdownJetStream() {
-	s.mu.Lock()
+	s.mu.RLock()
 	js := s.js
-	s.mu.Unlock()
+	s.mu.RUnlock()
 
 	if js == nil {
 		return
@@ -1381,6 +1381,7 @@ func (a *Account) EnableJetStream(limits map[string]JetStreamAccountLimits) erro
 	// Check interest policy streams for auto cleanup.
 	for _, mset := range ipstreams {
 		mset.checkForOrphanMsgs()
+		mset.checkConsumerReplication()
 	}
 
 	s.Debugf("JetStream state for account %q recovered", a.Name)

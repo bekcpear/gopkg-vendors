@@ -92,7 +92,7 @@ type internal struct {
 	sweeper  *time.Timer
 	stmr     *time.Timer
 	replies  map[string]msgHandler
-	sendq    *ipQueue // of *pubMsg
+	sendq    *ipQueue[*pubMsg]
 	resetCh  chan struct{}
 	wg       sync.WaitGroup
 	sq       *sendq
@@ -270,7 +270,7 @@ func newPubMsg(c *client, sub, rply string, si *ServerInfo, hdr map[string]strin
 	} else {
 		m = &pubMsg{}
 	}
-	// When getting something from a pool it is criticical that all fields are
+	// When getting something from a pool it is critical that all fields are
 	// initialized. Doing this way guarantees that if someone adds a field to
 	// the structure, the compiler will fail the build if this line is not updated.
 	(*m) = pubMsg{c, sub, rply, si, hdr, msg, oct, echo, last}
@@ -332,8 +332,7 @@ RESET:
 		select {
 		case <-sendq.ch:
 			msgs := sendq.pop()
-			for _, pmi := range msgs {
-				pm := pmi.(*pubMsg)
+			for _, pm := range msgs {
 				if pm.si != nil {
 					pm.si.Name = servername
 					pm.si.Domain = domain
