@@ -23,7 +23,6 @@ import (
 // Functions (including methods) and Globals use RelString and
 // all types are displayed with relType, so that only cross-package
 // references are package-qualified.
-//
 func relName(v Value, i Instruction) string {
 	if v == nil {
 		return "<nil>"
@@ -174,6 +173,7 @@ func (v *ChangeType) String() string          { return printConv("ChangeType", v
 func (v *Convert) String() string             { return printConv("Convert", v, v.X) }
 func (v *ChangeInterface) String() string     { return printConv("ChangeInterface", v, v.X) }
 func (v *SliceToArrayPointer) String() string { return printConv("SliceToArrayPointer", v, v.X) }
+func (v *SliceToArray) String() string        { return printConv("SliceToArray", v, v.X) }
 func (v *MakeInterface) String() string       { return printConv("MakeInterface", v, v.X) }
 
 func (v *MakeClosure) String() string {
