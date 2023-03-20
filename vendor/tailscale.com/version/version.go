@@ -41,14 +41,11 @@ func init() {
 		return
 	}
 	var dirty string // "-dirty" suffix if dirty
-	var commitHashAbbrev, commitDate string
+	var commitDate string
 	for _, s := range bi.Settings {
 		switch s.Key {
 		case "vcs.revision":
 			GitCommit = s.Value
-			if len(s.Value) >= 9 {
-				commitHashAbbrev = s.Value[:9]
-			}
 		case "vcs.time":
 			if len(s.Value) >= len("yyyy-mm-dd") {
 				commitDate = s.Value[:len("yyyy-mm-dd")]
@@ -60,6 +57,10 @@ func init() {
 				GitDirty = true
 			}
 		}
+	}
+	commitHashAbbrev := GitCommit
+	if len(commitHashAbbrev) >= 9 {
+		commitHashAbbrev = commitHashAbbrev[:9]
 	}
 
 	// Backup path, using Go 1.18's built-in git stamping.
@@ -73,7 +74,7 @@ func init() {
 // --exclude "*" --dirty --abbrev=200`.
 var GitCommit = ""
 
-// GitDirty is whether Go stamped the binary has having dirty version
+// GitDirty is whether Go stamped the binary as having dirty version
 // control changes in the working directory (debug.ReadBuildInfo
 // setting "vcs.modified" was true).
 var GitDirty bool

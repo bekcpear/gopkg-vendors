@@ -36,6 +36,9 @@ func defaultRoute() (d DefaultRouteDetails, err error) {
 	return d, nil
 }
 
+// DefaultRouteInterfaceIndex returns the index of the network interface that
+// owns the default route. It returns the first IPv4 or IPv6 default route it
+// finds (it does not prefer one or the other).
 func DefaultRouteInterfaceIndex() (int, error) {
 	// $ netstat -nr
 	// Routing tables
@@ -65,6 +68,11 @@ func DefaultRouteInterfaceIndex() (int, error) {
 			continue
 		}
 		if isDefaultGateway(rm) {
+			if delegatedIndex, err := getDelegatedInterface(rm.Index); err == nil && delegatedIndex != 0 {
+				return delegatedIndex, nil
+			} else if err != nil {
+				log.Printf("interfaces_bsd: could not get delegated interface: %v", err)
+			}
 			return rm.Index, nil
 		}
 	}
