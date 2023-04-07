@@ -1,10 +1,10 @@
-// Copyright (c) 2020 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 package interfaces
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -28,6 +28,10 @@ func parseRoutingTable(rib []byte) ([]route.Message, error) {
 var ifNames struct {
 	sync.Mutex
 	m map[int]string // ifindex => name
+}
+
+func init() {
+	interfaceDebugExtras = interfaceDebugExtrasDarwin
 }
 
 // getDelegatedInterface returns the interface index of the underlying interface
@@ -93,4 +97,15 @@ func getDelegatedInterface(ifIndex int) (int, error) {
 		return 0, errno
 	}
 	return int(ifr.ifr_delegated), nil
+}
+
+func interfaceDebugExtrasDarwin(ifIndex int) (string, error) {
+	delegated, err := getDelegatedInterface(ifIndex)
+	if err != nil {
+		return "", err
+	}
+	if delegated == 0 {
+		return "", nil
+	}
+	return fmt.Sprintf("delegated=%d", delegated), nil
 }

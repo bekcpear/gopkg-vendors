@@ -1,6 +1,5 @@
-// Copyright (c) 2020 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 // Package tsaddr handles Tailscale-specific IPs and ranges.
 package tsaddr
@@ -27,7 +26,7 @@ var chromeOSRange oncePrefix
 
 // CGNATRange returns the Carrier Grade NAT address range that
 // is the superset range that Tailscale assigns out of.
-// See https://tailscale.com/kb/1015/100.x-addresses.
+// See https://tailscale.com/s/cgnat
 // Note that Tailscale does not assign out of the ChromeOSVMRange.
 func CGNATRange() netip.Prefix {
 	cgnatRange.Do(func() { mustPrefix(&cgnatRange.v, "100.64.0.0/10") })

@@ -49,44 +49,6 @@
     # doesn't build any software.
     fileContents = nixpkgs.legacyPackages.x86_64-linux.lib.fileContents;
 
-    tailscale-go-rev = fileContents ./go.toolchain.rev;
-    tailscale-go-sri = fileContents ./go.toolchain.sri;
-
-    # pkgsWithTailscaleGo takes a nixpkgs package set, and replaces
-    # its Go 1.19 compiler with tailscale's fork.
-    #
-    # We need to do this because the buildGoModule helper function is
-    # constructed with legacy nix imports, so we cannot construct a
-    # buildGoModule variant that uses tailscale's toolchain. Instead,
-    # we have to replace the toolchain in nixpkgs, and let lazy
-    # evaluation propagate it into the nixpkgs instance of
-    # buildGoModule.
-    #
-    # This is a bit roundabout, but there doesn't seem to be a more
-    # elegant way of resolving the impedance mismatch between legacy
-    # nixpkgs style imports and flake semantics, unless upstream
-    # nixpkgs exposes the buildGoModule constructor func explicitly.
-    pkgsWithTailscaleGo = pkgs: pkgs.extend (final: prev: rec {
-      tailscale_go = prev.lib.overrideDerivation prev.go_1_19 (attrs: rec {
-        name = "tailscale-go-${version}";
-        version = tailscale-go-rev;
-        src = pkgs.fetchFromGitHub {
-          owner = "tailscale";
-          repo = "go";
-          rev = tailscale-go-rev;
-          sha256 = tailscale-go-sri;
-        };
-        nativeBuildInputs = attrs.nativeBuildInputs ++ [ pkgs.git ];
-		    # Remove dependency on xcbuild as that causes iOS/macOS builds to fail.
-        propagatedBuildInputs = [];
-        checkPhase = "";
-        TAILSCALE_TOOLCHAIN_REV = tailscale-go-rev;
-      });
-      # Override go_1_19 so that buildGo119Module below uses
-      # tailscale's toolchain as well.
-      go_1_19 = tailscale_go;
-    });
-
     # tailscaleRev is the git commit at which this flake was imported,
     # or the empty string when building from a local checkout of the
     # tailscale repo.
@@ -100,7 +62,7 @@
     # specify vendorSha256, and that sha changes any time we alter
     # go.mod. We don't want to force a nix dependency on everyone
     # hacking on Tailscale, so this flake is likely to have broken
-    # builds periodically until somoene comes through and manually
+    # builds periodically until someone comes through and manually
     # fixes them up. I sure wish there was a way to express "please
     # just trust the local go.mod, vendorSha256 has no benefit here",
     # but alas.
@@ -108,7 +70,7 @@
     # So really, this flake is for tailscale devs to dogfood with, if
     # you're an end user you should be prepared for this flake to not
     # build periodically.
-    tailscale = pkgs: pkgs.buildGo119Module rec {
+    tailscale = pkgs: pkgs.buildGo120Module rec {
       name = "tailscale";
 
       src = ./.;
@@ -131,27 +93,26 @@
     # OS/CPU combos that nix supports, as well as a dev shell so that
     # "nix develop" and "nix-shell" give you a dev env.
     flakeForSystem = nixpkgs: system: let
-      upstreamPkgs = nixpkgs.legacyPackages.${system};
-      pkgs = pkgsWithTailscaleGo upstreamPkgs;
+      pkgs = nixpkgs.legacyPackages.${system};
       ts = tailscale pkgs;
     in {
       packages = {
-        tailscale-go = pkgs.tailscale-go;
         tailscale = ts;
       };
       devShell = pkgs.mkShell {
-        packages = with upstreamPkgs; [
+        packages = with pkgs; [
           curl
           git
           gopls
           gotools
           graphviz
           perl
-          pkgs.tailscale_go
+          go_1_20
+          yarn
         ];
       };
     };
   in
     flake-utils.lib.eachDefaultSystem (system: flakeForSystem nixpkgs system);
 }
-# nix-direnv cache busting line: sha256-imidcDJGVor43PqdTX7Js4/tjQ0JA2E1GdjuyLiPDHI= sha256-zBfANuVhYtDOOiZu6SPVmM0cTEsOHVdycOz5EZDapKk=
+# nix-direnv cache busting line: sha256-LIvaxSo+4LuHUk8DIZ27IaRQwaDnjW6Jwm5AEc/V95A=
