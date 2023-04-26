@@ -3,7 +3,6 @@
 [![MIT License](http://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Doc](https://img.shields.io/badge/godoc-reference-4b68a3.svg)](https://godoc.org/github.com/go-xmlfmt/xmlfmt)
 [![Go Report Card](https://goreportcard.com/badge/github.com/go-xmlfmt/xmlfmt)](https://goreportcard.com/report/github.com/go-xmlfmt/xmlfmt)
-[![Codeship Status](https://codeship.com/projects/c49f02b0-a384-0134-fb20-2e0351080565/status?branch=master)](https://codeship.com/projects/190297)
 
 ## Synopsis
 
@@ -15,7 +14,6 @@ package main
 import "github.com/go-xmlfmt/xmlfmt"
 
 func main() {
-	xmlfmt.NL = "\n"
 	xml1 := `<root><this><is>a</is><test /><message><!-- with comment --><org><cn>Some org-or-other</cn><ph>Wouldnt you like to know</ph></org><contact><fn>Pat</fn><ln>Califia</ln></contact></message></this></root>`
 	x := xmlfmt.FormatXML(xml1, "\t", "  ")
 	print(x)
@@ -37,22 +35,17 @@ Output:
 ```xml
 	<root>
 	  <this>
-	    <is>a
-	    </is>
+	    <is>a</is>
 	    <test />
 	    <message>
 	      <!-- with comment -->
 	      <org>
-	        <cn>Some org-or-other
-	        </cn>
-	        <ph>Wouldnt you like to know
-	        </ph>
+	        <cn>Some org-or-other</cn>
+	        <ph>Wouldnt you like to know</ph>
 	      </org>
 	      <contact>
-	        <fn>Pat
-	        </fn>
-	        <ln>Califia
-	        </ln>
+	        <fn>Pat</fn>
+	        <ln>Califia</ln>
 	      </contact>
 	    </message>
 	  </this>
@@ -60,11 +53,9 @@ Output:
 
 
 <book>
-  <author>Fred
-  </author>
+  <author>Fred</author>
   <!-- <price>20</price><currency>USD</currency> -->
-  <isbn>23456
-  </isbn>
+  <isbn>23456</isbn>
 </book>
 ```
 
@@ -72,7 +63,7 @@ There is no XML decoding and encoding involved, only pure regular expression mat
 
 Note that 
 
-- the XML is mainly used in Windows environments, thus the default line ending is in Windows' `CRLF` format. To change the default line ending, see the above sample code (first line).
+- the default line ending is handled by the package automatically now. For Windows it's `CRLF`, and standard for anywhere else. No need to change the default line ending now.
 - the case of XML comments nested within XML comments is ***not*** supported. Please avoid them or use any other tools to correct them before using this package.
 - don't turn on the `nestedTagsInComments` parameter blindly, as the code has become 10+ times more complicated because of it.
 
@@ -82,55 +73,69 @@ To use it on command line, check out [xmlfmt](https://github.com/AntonioSun/xmlf
 
 
 ```
-$ xmlfmt 
-XML Formatter
-Version 1.1.0 built on 2021-12-06
-Copyright (C) 2021, Antonio Sun
+$ xmlfmt -V
+xmlfmt - XML Formatter
+Copyright (C) 2016-2022, Antonio Sun
 
 The xmlfmt will format the XML string without rewriting the document
 
-Options:
+Built on 2022-02-06
+Version 1.1.1
 
-  -h, --help          display help information
-  -f, --file         *The xml file to read from (or stdin)
-  -p, --prefix        each element begins on a new line and this prefix
-  -i, --indent[=  ]   indent string for nested elements
-  -n, --nested        nested tags in comments
+$ xmlfmt
+the required flag `-f, --file' was not specified
 
-$ xmlfmt -f https://pastebin.com/raw/z3euQ5PR
+Usage:
+  xmlfmt [OPTIONS]
+
+Application Options:
+  -f, --file=    The xml file to read from (or "-" for stdin) [$XMLFMT_FILEI]
+  -p, --prefix=  Each element begins on a new line and this prefix [$XMLFMT_PREFIX]
+  -i, --indent=  Indent string for nested elements (default:   ) [$XMLFMT_INDENT]
+  -n, --nested   Nested tags in comments [$XMLFMT_NESTED]
+  -v, --verbose  Verbose mode (Multiple -v options increase the verbosity)
+  -V, --version  Show program version and exit
+
+Help Options:
+  -h, --help     Show this help message
+
+
+$ curl -sL https://pastebin.com/raw/z3euQ5PR | xmlfmt -f -
 
 <root>
   <this>
-    <is>a
-    </is>
+    <is>a</is>
     <test />
     <message>
       <!-- with comment -->
       <org>
-        <cn>Some org-or-other
-        </cn>
-        <ph>Wouldnt you like to know
-        </ph>
+        <cn>Some org-or-other</cn>
+        <ph>Wouldnt you like to know</ph>
       </org>
       <contact>
-        <fn>Pat
-        </fn>
-        <ln>Califia
-        </ln>
+        <fn>Pat</fn>
+        <ln>Califia</ln>
       </contact>
     </message>
   </this>
 </root>
 
-$ xmlfmt -f https://pastebin.com/raw/Zs0qy0qz -n
+$ curl -sL https://pastebin.com/raw/Zs0qy0qz | tee /tmp/xmlfmt.xml | xmlfmt -f - -n
 
 <book>
-  <author>Fred
-  </author>
+  <author>Fred</author>
   <!-- <price>20</price><currency>USD</currency> -->
-  <isbn>23456
-  </isbn>
+  <isbn>23456</isbn>
 </book>
+
+$ XMLFMT_NESTED=true XMLFMT_PREFIX='|' xmlfmt -f /tmp/xmlfmt.xml
+
+|
+|<book>
+|  <author>Fred</author>
+|  <!-- <price>20</price><currency>USD</currency> -->
+|  <isbn>23456</isbn>
+|</book>
 ```
 
 
@@ -138,7 +143,7 @@ $ xmlfmt -f https://pastebin.com/raw/Zs0qy0qz -n
 
 ### The format
 
-The Go XML Formatter is not called XML Beautifier because the result is not *exactly* as what people would expect -- some, but not all, closing tags stays on the same line, just as shown above. Having been looking at the result and thinking over it, I now think it is actually a better way to present it, as those closing tags on the same line are better stay that way in my opinion. I.e., 
+The Go XML Formatter is not called XML Beautifier because the result is not *exactly* as what people would expect -- most of the closing tags stays on the same line, just as shown above. Having been looking at the result and thinking over it, I now think it is actually a better way to present it, as those closing tags on the same line are better stay that way in my opinion. I.e.,
 
 When it comes to very big XML strings, which is what I’m dealing every day, saving spaces by not allowing those closing tags taking extra lines is plus instead of negative to me. 
 
@@ -237,4 +242,4 @@ echo '<Envelope xmlns="http://schemas.xmlsoap.org/soap/envelope/" xmlns:_xmlns="
 ```
 
 This package is a direct translate from above Perl code into Go,
-then further enhanced by @ruandao.
+then further enhanced by @ruandao and @chenbihao.

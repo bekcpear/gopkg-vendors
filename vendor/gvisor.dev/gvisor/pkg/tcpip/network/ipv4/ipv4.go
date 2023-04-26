@@ -77,6 +77,7 @@ var _ stack.MulticastForwardingNetworkEndpoint = (*endpoint)(nil)
 var _ stack.GroupAddressableEndpoint = (*endpoint)(nil)
 var _ stack.AddressableEndpoint = (*endpoint)(nil)
 var _ stack.NetworkEndpoint = (*endpoint)(nil)
+var _ IGMPEndpoint = (*endpoint)(nil)
 
 type endpoint struct {
 	nic        stack.NetworkInterface
@@ -107,6 +108,32 @@ type endpoint struct {
 
 	// +checklocks:mu
 	igmp igmpState
+}
+
+// SetIGMPVersion implements IGMPEndpoint.
+func (e *endpoint) SetIGMPVersion(v IGMPVersion) IGMPVersion {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.setIGMPVersionLocked(v)
+}
+
+// GetIGMPVersion implements IGMPEndpoint.
+func (e *endpoint) GetIGMPVersion() IGMPVersion {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.getIGMPVersionLocked()
+}
+
+// +checklocks:e.mu
+// +checklocksalias:e.igmp.ep.mu=e.mu
+func (e *endpoint) setIGMPVersionLocked(v IGMPVersion) IGMPVersion {
+	return e.igmp.setVersion(v)
+}
+
+// +checklocksread:e.mu
+// +checklocksalias:e.igmp.ep.mu=e.mu
+func (e *endpoint) getIGMPVersionLocked() IGMPVersion {
+	return e.igmp.getVersion()
 }
 
 // HandleLinkResolutionFailure implements stack.LinkResolvableNetworkEndpoint.
@@ -691,6 +718,8 @@ func (e *endpoint) forwardPacketWithRoute(route *stack.Route, pkt stack.PacketBu
 		// necessary and the bit is also set.
 		_ = e.protocol.returnError(&icmpReasonFragmentationNeeded{}, pkt, false /* deliveredLocally */)
 		return &ip.ErrMessageTooLong{}
+	case *tcpip.ErrNoBufferSpace:
+		return &ip.ErrOutgoingDeviceNoBufferSpace{}
 	default:
 		return &ip.ErrOther{Err: err}
 	}
@@ -854,6 +883,35 @@ func (e *endpoint) handleLocalPacket(pkt stack.PacketBufferPtr, canSkipRXChecksu
 }
 
 func validateAddressesForForwarding(h header.IPv4) ip.ForwardingError {
+	srcAddr := h.SourceAddress()
+
+	// As per RFC 5735 section 3,
+	//
+	//   0.0.0.0/8 - Addresses in this block refer to source hosts on "this"
+	//   network.  Address 0.0.0.0/32 may be used as a source address for this
+	//   host on this network; other addresses within 0.0.0.0/8 may be used to
+	//   refer to specified hosts on this network ([RFC1122], Section 3.2.1.3).
+	//
+	// And RFC 6890 section 2.2.2,
+	//
+	//                +----------------------+----------------------------+
+	//                | Attribute            | Value                      |
+	//                +----------------------+----------------------------+
+	//                | Address Block        | 0.0.0.0/8                  |
+	//                | Name                 | "This host on this network"|
+	//                | RFC                  | [RFC1122], Section 3.2.1.3 |
+	//                | Allocation Date      | September 1981             |
+	//                | Termination Date     | N/A                        |
+	//                | Source               | True                       |
+	//                | Destination          | False                      |
+	//                | Forwardable          | False                      |
+	//                | Global               | False                      |
+	//                | Reserved-by-Protocol | True                       |
+	//                +----------------------+----------------------------+
+	if header.IPv4CurrentNetworkSubnet.Contains(srcAddr) {
+		return &ip.ErrInitializingSourceAddress{}
+	}
+
 	// As per RFC 3927 section 7,
 	//
 	//   A router MUST NOT forward a packet with an IPv4 Link-Local source or
@@ -864,10 +922,10 @@ func validateAddressesForForwarding(h header.IPv4) ip.ForwardingError {
 	//   destination address MUST NOT forward the packet.  This prevents
 	//   forwarding of packets back onto the network segment from which they
 	//   originated, or to any other segment.
-	if header.IsV4LinkLocalUnicastAddress(h.SourceAddress()) {
+	if header.IsV4LinkLocalUnicastAddress(srcAddr) {
 		return &ip.ErrLinkLocalSourceAddress{}
 	}
-	if header.IsV4LinkLocalUnicastAddress(h.DestinationAddress()) || header.IsV4LinkLocalMulticastAddress(h.DestinationAddress()) {
+	if dstAddr := h.DestinationAddress(); header.IsV4LinkLocalUnicastAddress(dstAddr) || header.IsV4LinkLocalMulticastAddress(dstAddr) {
 		return &ip.ErrLinkLocalDestinationAddress{}
 	}
 	return nil
@@ -1105,9 +1163,11 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt stack.PacketBufferPt
 // counters.
 func (e *endpoint) handleForwardingError(err ip.ForwardingError) {
 	stats := e.stats.ip
-	switch err.(type) {
+	switch err := err.(type) {
 	case nil:
 		return
+	case *ip.ErrInitializingSourceAddress:
+		stats.Forwarding.InitializingSource.Increment()
 	case *ip.ErrLinkLocalSourceAddress:
 		stats.Forwarding.LinkLocalSource.Increment()
 	case *ip.ErrLinkLocalDestinationAddress:
@@ -1126,6 +1186,8 @@ func (e *endpoint) handleForwardingError(err ip.ForwardingError) {
 		stats.Forwarding.UnexpectedMulticastInputInterface.Increment()
 	case *ip.ErrUnknownOutputEndpoint:
 		stats.Forwarding.UnknownOutputEndpoint.Increment()
+	case *ip.ErrOutgoingDeviceNoBufferSpace:
+		stats.Forwarding.OutgoingDeviceNoBufferSpace.Increment()
 	default:
 		panic(fmt.Sprintf("unrecognized forwarding error: %s", err))
 	}

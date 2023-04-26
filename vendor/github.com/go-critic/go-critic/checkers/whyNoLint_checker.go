@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/go-critic/go-critic/checkers/internal/astwalk"
-	"github.com/go-critic/go-critic/framework/linter"
+	"github.com/go-critic/go-critic/linter"
 )
 
 func init() {
@@ -17,12 +17,11 @@ func init() {
 		Before:  `//nolint`,
 		After:   `//nolint // reason`,
 	}
-	re := regexp.MustCompile(`^// *nolint(?::[^ ]+)? *(.*)$`)
 
 	collection.AddChecker(&info, func(ctx *linter.CheckerContext) (linter.FileWalker, error) {
 		return astwalk.WalkerForComment(&whyNoLintChecker{
 			ctx: ctx,
-			re:  re,
+			re:  regexp.MustCompile(`^// *nolint(?::[^ ]+)? *(.*)$`),
 		}), nil
 	})
 }

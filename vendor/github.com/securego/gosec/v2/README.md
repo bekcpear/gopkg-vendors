@@ -21,7 +21,7 @@ You may obtain a copy of the License [here](http://www.apache.org/licenses/LICEN
 [![Docs](https://readthedocs.org/projects/docs/badge/?version=latest)](https://securego.io/)
 [![Downloads](https://img.shields.io/github/downloads/securego/gosec/total.svg)](https://github.com/securego/gosec/releases)
 [![Docker Pulls](https://img.shields.io/docker/pulls/securego/gosec.svg)](https://hub.docker.com/r/securego/gosec/tags)
-[![Slack](http://securego.herokuapp.com/badge.svg)](http://securego.herokuapp.com)
+[![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](http://securego.slack.com)
 
 ## Install
 
@@ -143,6 +143,10 @@ directory you can supply `./...` as the input argument.
 - G108: Profiling endpoint automatically exposed on /debug/pprof
 - G109: Potential Integer overflow made by strconv.Atoi result conversion to int16/32
 - G110: Potential DoS vulnerability via decompression bomb
+- G111: Potential directory traversal
+- G112: Potential slowloris attack
+- G113: Usage of Rat.SetString in math/big with an overflow (CVE-2022-23772)
+- G114: Use of net/http serve function that has no support for setting timeouts
 - G201: SQL query construction using format string
 - G202: SQL query construction using string concatenation
 - G203: Use of unescaped data in HTML templates
@@ -218,7 +222,7 @@ of functions which will be skipped when auditing the not checked errors:
 }
 ```
 
-You can also configure the hard-coded credentials rule `G101` with additional patters, or adjust the entropy threshold:
+You can also configure the hard-coded credentials rule `G101` with additional patterns, or adjust the entropy threshold:
 
 ```JSON
 {
@@ -269,14 +273,15 @@ gosec -exclude-generated ./...
 ### Annotating code
 
 As with all automated detection tools, there will be cases of false positives. In cases where gosec reports a failure that has been manually verified as being safe,
-it is possible to annotate the code with a `#nosec` comment.
+it is possible to annotate the code with a comment that starts with `#nosec`.
+The `#nosec` comment should have the format `#nosec [RuleList] [-- Justification]`.
 
 The annotation causes gosec to stop processing any further nodes within the
 AST so can apply to a whole block or more granularly to a single expression.
 
 ```go
 
-import "md5" // #nosec
+import "md5" //#nosec
 
 
 func main(){
@@ -292,7 +297,11 @@ func main(){
 
 When a specific false positive has been identified and verified as safe, you may wish to suppress only that single rule (or a specific set of rules)
 within a section of code, while continuing to scan for other problems. To do this, you can list the rule(s) to be suppressed within
-the `#nosec` annotation, e.g: `/* #nosec G401 */` or `// #nosec G201 G202 G203`
+the `#nosec` annotation, e.g: `/* #nosec G401 */` or `//#nosec G201 G202 G203`
+
+You could put the description or justification text for the annotation. The
+justification should be after the rule(s) to suppress and start with two or
+more dashes, e.g: `//#nosec G101 G102 -- This is a false positive`
 
 In some cases you may also want to revisit places where `#nosec` annotations
 have been used. To run the scanner and ignore any `#nosec` annotations you
@@ -301,6 +310,27 @@ can do the following:
 ```bash
 gosec -nosec=true ./...
 ```
+
+### Tracking suppressions
+
+As described above, we could suppress violations externally (using `-include`/
+`-exclude`) or inline (using `#nosec` annotations) in gosec. This suppression
+inflammation can be used to generate corresponding signals for auditing
+purposes.
+
+We could track suppressions by the `-track-suppressions` flag as follows:
+
+```bash
+gosec -track-suppressions -exclude=G101 -fmt=sarif -out=results.sarif ./...
+```
+
+- For external suppressions, gosec records suppression info where `kind` is
+`external` and `justification` is a certain sentence "Globally suppressed".
+- For inline suppressions, gosec records suppression info where `kind` is
+`inSource` and `justification` is the text after two or more dashes in the
+comment.
+
+**Note:** Only SARIF and JSON formats support tracking suppressions.
 
 ### Build tags
 
@@ -381,6 +411,19 @@ git push origin v1.0.0
 The GitHub [release workflow](.github/workflows/release.yml) triggers immediately after the tag is pushed upstream. This flow will
 release the binaries using the [goreleaser](https://goreleaser.com/actions/) action and then it will build and publish the docker image into Docker Hub.
 
+The released artifacts are signed using [cosign](https://docs.sigstore.dev/). You can use the public key from [cosign.pub](cosign.pub) 
+file to verify the signature of docker image and binaries files.
+
+The docker image signature can be verified with the following command:
+```
+cosign verify --key cosign.pub securego/gosec:<TAG>
+```
+ 
+The binary files signature can be verified with the following command:
+```
+cosign verify-blob --key cosign.pub --signature gosec_<VERSION>_darwin_amd64.tar.gz.sig  gosec_<VERSION>_darwin_amd64.tar.gz
+```
+
 ### Docker image
 
 You can also build locally the docker image by using the command:
@@ -419,3 +462,9 @@ This will generate the `rules/tls_config.go` file which will contain the current
 ## Who is using gosec?
 
 This is a [list](USERS.md) with some of the gosec's users.
+
+## Sponsors
+
+Support this project by becoming a sponsor. Your logo will show up here with a link to your website
+
+<a href="https://github.com/mercedes-benz" target="_blank"><img src="https://avatars.githubusercontent.com/u/34240465?s=80&v=4"></a>

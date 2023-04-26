@@ -32,7 +32,6 @@ import (
 	"gvisor.dev/gvisor/pkg/bufferv2"
 	"gvisor.dev/gvisor/pkg/log"
 	cryptorand "gvisor.dev/gvisor/pkg/rand"
-	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/ports"
@@ -85,18 +84,18 @@ type Stack struct {
 	stats tcpip.Stats
 
 	// routeMu protects annotated fields below.
-	routeMu sync.RWMutex
+	routeMu routeStackRWMutex
 
 	// +checklocks:routeMu
 	routeTable []tcpip.Route
 
-	mu sync.RWMutex
+	mu stackRWMutex
 	// +checklocks:mu
 	nics                     map[tcpip.NICID]*nic
 	defaultForwardingEnabled map[tcpip.NetworkProtocolNumber]struct{}
 
 	// cleanupEndpointsMu protects cleanupEndpoints.
-	cleanupEndpointsMu sync.Mutex
+	cleanupEndpointsMu cleanupEndpointsMutex
 	// +checklocks:cleanupEndpointsMu
 	cleanupEndpoints map[TransportEndpoint]struct{}
 
@@ -958,9 +957,6 @@ func (s *Stack) removeNICLocked(id tcpip.NICID) tcpip.Error {
 	if !ok {
 		return &tcpip.ErrUnknownNICID{}
 	}
-	if nic.IsLoopback() {
-		return &tcpip.ErrNotSupported{}
-	}
 	delete(s.nics, id)
 
 	// Remove routes in-place. n tracks the number of routes written.
@@ -1053,9 +1049,11 @@ func (s *Stack) NICInfo() map[tcpip.NICID]NICInfo {
 		}
 
 		netStats := make(map[tcpip.NetworkProtocolNumber]NetworkEndpointStats)
+		nic.mu.RLock()
 		for proto, netEP := range nic.networkEndpoints {
 			netStats[proto] = netEP.Stats()
 		}
+		nic.mu.RUnlock()
 
 		info := NICInfo{
 			Name:                nic.name,
@@ -1766,6 +1764,12 @@ func (s *Stack) Wait() {
 		s.removeNICLocked(id)
 		n.NetworkLinkEndpoint.Wait()
 	}
+}
+
+// Destroy destroys the stack with all endpoints.
+func (s *Stack) Destroy() {
+	s.Close()
+	s.Wait()
 }
 
 // Pause pauses any protocol level background workers.

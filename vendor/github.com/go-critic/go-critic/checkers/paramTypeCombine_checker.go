@@ -4,7 +4,9 @@ import (
 	"go/ast"
 
 	"github.com/go-critic/go-critic/checkers/internal/astwalk"
-	"github.com/go-critic/go-critic/framework/linter"
+	"github.com/go-critic/go-critic/linter"
+
+	"github.com/go-toolsmith/astcopy"
 	"github.com/go-toolsmith/astequal"
 )
 
@@ -38,10 +40,12 @@ func (c *paramTypeCombineChecker) VisitFuncDecl(decl *ast.FuncDecl) {
 }
 
 func (c *paramTypeCombineChecker) optimizeFuncType(f *ast.FuncType) *ast.FuncType {
-	return &ast.FuncType{
-		Params:  c.optimizeParams(f.Params),
-		Results: c.optimizeParams(f.Results),
-	}
+	optimizedParamFunc := astcopy.FuncType(f)
+
+	optimizedParamFunc.Params = c.optimizeParams(f.Params)
+	optimizedParamFunc.Results = c.optimizeParams(f.Results)
+
+	return optimizedParamFunc
 }
 func (c *paramTypeCombineChecker) optimizeParams(params *ast.FieldList) *ast.FieldList {
 	// To avoid false positives, skip unnamed param lists.

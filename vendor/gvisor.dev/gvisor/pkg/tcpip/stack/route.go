@@ -17,7 +17,6 @@ package stack
 import (
 	"fmt"
 
-	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
@@ -34,7 +33,7 @@ type Route struct {
 	localAddressNIC *nic
 
 	// mu protects annotated fields below.
-	mu sync.RWMutex
+	mu routeRWMutex
 
 	// localAddressEndpoint is the local address this route is associated with.
 	// +checklocks:mu
@@ -328,8 +327,8 @@ func (r *Route) HasSaveRestoreCapability() bool {
 	return r.outgoingNIC.NetworkLinkEndpoint.Capabilities()&CapabilitySaveRestore != 0
 }
 
-// HasDisconncetOkCapability returns true if the route supports disconnecting.
-func (r *Route) HasDisconncetOkCapability() bool {
+// HasDisconnectOkCapability returns true if the route supports disconnecting.
+func (r *Route) HasDisconnectOkCapability() bool {
 	return r.outgoingNIC.NetworkLinkEndpoint.Capabilities()&CapabilityDisconnectOk != 0
 }
 
@@ -407,9 +406,6 @@ func (r *Route) resolvedFields(afterResolve func(ResolvedFieldsResult)) (RouteIn
 	}
 	afterResolveFields := fields
 	entry, ch, err := r.linkRes.neigh.entry(r.nextHop(), linkAddressResolutionRequestLocalAddr, func(lrr LinkResolutionResult) {
-		if lrr.Err != nil {
-			r.setCachedNeighborEntry(nil)
-		}
 		if afterResolve != nil {
 			if lrr.Err == nil {
 				afterResolveFields.RemoteLinkAddress = lrr.LinkAddress

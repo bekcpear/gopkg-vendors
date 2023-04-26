@@ -4,7 +4,7 @@ import (
 	"go/ast"
 
 	"github.com/go-critic/go-critic/checkers/internal/astwalk"
-	"github.com/go-critic/go-critic/framework/linter"
+	"github.com/go-critic/go-critic/linter"
 )
 
 func init() {
@@ -65,7 +65,8 @@ func (c *rangeValCopyChecker) VisitStmt(stmt ast.Stmt) {
 	if typ == nil {
 		return
 	}
-	if size := c.ctx.SizesInfo.Sizeof(typ); size >= c.sizeThreshold {
+	size, ok := c.ctx.SizeOf(typ)
+	if ok && size >= c.sizeThreshold {
 		c.warn(rng, size)
 	}
 }

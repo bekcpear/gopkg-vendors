@@ -5,7 +5,7 @@ import (
 	"go/types"
 
 	"github.com/go-critic/go-critic/checkers/internal/astwalk"
-	"github.com/go-critic/go-critic/framework/linter"
+	"github.com/go-critic/go-critic/linter"
 )
 
 func init() {
@@ -69,7 +69,7 @@ func (c *rangeExprCopyChecker) VisitStmt(stmt ast.Stmt) {
 	if _, ok := tv.Type.(*types.Array); !ok {
 		return
 	}
-	if size := c.ctx.SizesInfo.Sizeof(tv.Type); size >= c.sizeThreshold {
+	if size, ok := c.ctx.SizeOf(tv.Type); ok && size >= c.sizeThreshold {
 		c.warn(rng, size)
 	}
 }

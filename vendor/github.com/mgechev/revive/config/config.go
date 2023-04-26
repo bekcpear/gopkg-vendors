@@ -31,21 +31,23 @@ var defaultRules = []lint.Rule{
 	&rule.TimeNamingRule{},
 	&rule.ContextKeysType{},
 	&rule.ContextAsArgumentRule{},
+	&rule.IfReturnRule{},
+	&rule.EmptyBlockRule{},
+	&rule.SuperfluousElseRule{},
+	&rule.UnusedParamRule{},
+	&rule.UnreachableCodeRule{},
+	&rule.RedefinesBuiltinIDRule{},
 }
 
 var allRules = append([]lint.Rule{
 	&rule.ArgumentsLimitRule{},
 	&rule.CyclomaticRule{},
 	&rule.FileHeaderRule{},
-	&rule.EmptyBlockRule{},
-	&rule.SuperfluousElseRule{},
 	&rule.ConfusingNamingRule{},
 	&rule.GetReturnRule{},
 	&rule.ModifiesParamRule{},
 	&rule.ConfusingResultsRule{},
 	&rule.DeepExitRule{},
-	&rule.UnusedParamRule{},
-	&rule.UnreachableCodeRule{},
 	&rule.AddConstantRule{},
 	&rule.FlagParamRule{},
 	&rule.UnnecessaryStmtRule{},
@@ -53,7 +55,6 @@ var allRules = append([]lint.Rule{
 	&rule.ModifiesValRecRule{},
 	&rule.ConstantLogicalExprRule{},
 	&rule.BoolLiteralRule{},
-	&rule.RedefinesBuiltinIDRule{},
 	&rule.ImportsBlacklistRule{},
 	&rule.FunctionResultsLimitRule{},
 	&rule.MaxPublicStructsRule{},
@@ -79,8 +80,13 @@ var allRules = append([]lint.Rule{
 	&rule.UnexportedNamingRule{},
 	&rule.FunctionLength{},
 	&rule.NestedStructs{},
-	&rule.IfReturnRule{},
 	&rule.UselessBreak{},
+	&rule.TimeEqualRule{},
+	&rule.BannedCharsRule{},
+	&rule.OptimizeOperandsOrderRule{},
+	&rule.UseAnyRule{},
+	&rule.DataRaceRule{},
+	&rule.CommentSpacingsRule{},
 }, defaultRules...)
 
 var allFormatters = []lint.Formatter{
@@ -104,15 +110,21 @@ func getFormatters() map[string]lint.Formatter {
 }
 
 // GetLintingRules yields the linting rules that must be applied by the linter
-func GetLintingRules(config *lint.Config) ([]lint.Rule, error) {
+func GetLintingRules(config *lint.Config, extraRules []lint.Rule) ([]lint.Rule, error) {
 	rulesMap := map[string]lint.Rule{}
 	for _, r := range allRules {
 		rulesMap[r.Name()] = r
 	}
+	for _, r := range extraRules {
+		if _, ok := rulesMap[r.Name()]; ok {
+			continue
+		}
+		rulesMap[r.Name()] = r
+	}
 
-	lintingRules := []lint.Rule{}
+	var lintingRules []lint.Rule
 	for name, ruleConfig := range config.Rules {
-		rule, ok := rulesMap[name]
+		r, ok := rulesMap[name]
 		if !ok {
 			return nil, fmt.Errorf("cannot find rule: %s", name)
 		}
@@ -121,38 +133,32 @@ func GetLintingRules(config *lint.Config) ([]lint.Rule, error) {
 			continue // skip disabled rules
 		}
 
-		lintingRules = append(lintingRules, rule)
+		lintingRules = append(lintingRules, r)
 	}
 
 	return lintingRules, nil
 }
 
-func parseConfig(path string) (*lint.Config, error) {
-	config := &lint.Config{}
+func parseConfig(path string, config *lint.Config) error {
 	file, err := ioutil.ReadFile(path)
 	if err != nil {
-		return nil, errors.New("cannot read the config file")
+		return errors.New("cannot read the config file")
 	}
 	_, err = toml.Decode(string(file), config)
 	if err != nil {
-		return nil, fmt.Errorf("cannot parse the config file: %v", err)
+		return fmt.Errorf("cannot parse the config file: %v", err)
 	}
-	return config, nil
+	return nil
 }
 
 func normalizeConfig(config *lint.Config) {
-	const defaultConfidence = 0.8
-	if config.Confidence == 0 {
-		config.Confidence = defaultConfidence
-	}
-
 	if len(config.Rules) == 0 {
 		config.Rules = map[string]lint.RuleConfig{}
 	}
 	if config.EnableAllRules {
 		// Add to the configuration all rules not yet present in it
-		for _, rule := range allRules {
-			ruleName := rule.Name()
+		for _, r := range allRules {
+			ruleName := r.Name()
 			_, alreadyInConf := config.Rules[ruleName]
 			if alreadyInConf {
 				continue
@@ -179,16 +185,23 @@ func normalizeConfig(config *lint.Config) {
 	}
 }
 
+const defaultConfidence = 0.8
+
 // GetConfig yields the configuration
 func GetConfig(configPath string) (*lint.Config, error) {
-	config := defaultConfig()
-	if configPath != "" {
-		var err error
-		config, err = parseConfig(configPath)
+	config := &lint.Config{}
+	switch {
+	case configPath != "":
+		config.Confidence = defaultConfidence
+		err := parseConfig(configPath, config)
 		if err != nil {
 			return nil, err
 		}
+
+	default: // no configuration provided
+		config = defaultConfig()
 	}
+
 	normalizeConfig(config)
 	return config, nil
 }
@@ -196,20 +209,20 @@ func GetConfig(configPath string) (*lint.Config, error) {
 // GetFormatter yields the formatter for lint failures
 func GetFormatter(formatterName string) (lint.Formatter, error) {
 	formatters := getFormatters()
-	formatter := formatters["default"]
+	fmtr := formatters["default"]
 	if formatterName != "" {
 		f, ok := formatters[formatterName]
 		if !ok {
 			return nil, fmt.Errorf("unknown formatter %v", formatterName)
 		}
-		formatter = f
+		fmtr = f
 	}
-	return formatter, nil
+	return fmtr, nil
 }
 
 func defaultConfig() *lint.Config {
 	defaultConfig := lint.Config{
-		Confidence: 0.0,
+		Confidence: defaultConfidence,
 		Severity:   lint.SeverityWarning,
 		Rules:      map[string]lint.RuleConfig{},
 	}

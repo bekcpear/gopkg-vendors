@@ -1,4 +1,4 @@
-// Licensed under the MIT license, see LICENCE file for details.
+// Licensed under the MIT license, see LICENSE file for details.
 
 //go:build go1.13
 // +build go1.13
@@ -7,6 +7,7 @@ package quicktest
 
 import (
 	"errors"
+	"fmt"
 )
 
 // ErrorAs checks that the error is or wraps a specific error type. If so, it
@@ -46,10 +47,15 @@ func (c *errorAsChecker) Check(got interface{}, args []interface{}, note func(ke
 			err = BadCheckf("%s", r)
 		}
 	}()
-	if !errors.As(gotErr, args[0]) {
-		return errors.New("wanted type is not found in error chain")
+	as := args[0]
+	if errors.As(gotErr, as) {
+		return nil
 	}
-	return nil
+
+	note("error", Unquoted("wanted type is not found in error chain"))
+	note("got", gotErr)
+	note("as", Unquoted(fmt.Sprintf("%T", as)))
+	return ErrSilent
 }
 
 // ErrorIs checks that the error is or wraps a specific error value. This is
@@ -70,13 +76,16 @@ type errorIsChecker struct {
 // Check implements Checker.Check by checking that got is an error whose error
 // chain matches args[0].
 func (c *errorIsChecker) Check(got interface{}, args []interface{}, note func(key string, value interface{})) error {
+	if got == nil && args[0] == nil {
+		return nil
+	}
 	if err := checkFirstArgIsError(got, note); err != nil {
 		return err
 	}
 
 	gotErr := got.(error)
 	wantErr, ok := args[0].(error)
-	if !ok {
+	if !ok && args[0] != nil {
 		note("want", args[0])
 		return BadCheckf("second argument is not an error")
 	}

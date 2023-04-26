@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2022 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
  */
 
 package tuntest
@@ -111,7 +111,6 @@ type chTun struct {
 func (t *chTun) File() *os.File { return nil }
 
 func (t *chTun) Read(packets [][]byte, sizes []int, offset int) (int, error) {
-	// TODO(raggi): this could batch using a default case to decide when to return
 	select {
 	case <-t.c.closed:
 		return 0, os.ErrClosed

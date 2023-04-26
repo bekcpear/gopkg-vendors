@@ -180,6 +180,7 @@ var _ stack.GroupAddressableEndpoint = (*endpoint)(nil)
 var _ stack.AddressableEndpoint = (*endpoint)(nil)
 var _ stack.NetworkEndpoint = (*endpoint)(nil)
 var _ stack.NDPEndpoint = (*endpoint)(nil)
+var _ MLDEndpoint = (*endpoint)(nil)
 var _ NDPEndpoint = (*endpoint)(nil)
 
 type endpoint struct {
@@ -354,6 +355,20 @@ func (e *endpoint) InvalidateDefaultRouter(rtr tcpip.Address) {
 	// We represent default routers with a default (off-link) route through the
 	// router.
 	e.mu.ndp.invalidateOffLinkRoute(offLinkRoute{dest: header.IPv6EmptySubnet, router: rtr})
+}
+
+// SetMLDVersion implements MLDEndpoint.
+func (e *endpoint) SetMLDVersion(v MLDVersion) MLDVersion {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.mu.mld.setVersion(v)
+}
+
+// GetMLDVersion implements MLDEndpoint.
+func (e *endpoint) GetMLDVersion() MLDVersion {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.mu.mld.getVersion()
 }
 
 // SetNDPConfigurations implements NDPEndpoint.
@@ -902,14 +917,33 @@ func (e *endpoint) WriteHeaderIncludedPacket(r *stack.Route, pkt stack.PacketBuf
 }
 
 func validateAddressesForForwarding(h header.IPv6) ip.ForwardingError {
+	srcAddr := h.SourceAddress()
+
+	// As per RFC 4291 section 2.5.2,
+	//
+	//   The address 0:0:0:0:0:0:0:0 is called the unspecified address. It
+	//   must never be assigned to any node. It indicates the absence of an
+	//   address. One example of its use is in the Source Address field of
+	//   any IPv6 packets sent by an initializing host before it has learned
+	//   its own address.
+	//
+	//   The unspecified address must not be used as the destination address
+	//   of IPv6 packets or in IPv6 Routing headers. An IPv6 packet with a
+	//   source address of unspecified must never be forwarded by an IPv6
+	//   router.
+	if srcAddr.Unspecified() {
+		return &ip.ErrInitializingSourceAddress{}
+	}
+
 	// As per RFC 4291 section 2.5.6,
 	//
 	//   Routers must not forward any packets with Link-Local source or
 	//   destination addresses to other links.
-	if header.IsV6LinkLocalUnicastAddress(h.SourceAddress()) {
+	if header.IsV6LinkLocalUnicastAddress(srcAddr) {
 		return &ip.ErrLinkLocalSourceAddress{}
 	}
-	if header.IsV6LinkLocalUnicastAddress(h.DestinationAddress()) || header.IsV6LinkLocalMulticastAddress(h.DestinationAddress()) {
+
+	if dstAddr := h.DestinationAddress(); header.IsV6LinkLocalUnicastAddress(dstAddr) || header.IsV6LinkLocalMulticastAddress(dstAddr) {
 		return &ip.ErrLinkLocalDestinationAddress{}
 	}
 	return nil
@@ -1029,6 +1063,8 @@ func (e *endpoint) forwardPacketWithRoute(route *stack.Route, pkt stack.PacketBu
 		//   outgoing link.
 		_ = e.protocol.returnError(&icmpReasonPacketTooBig{}, pkt, false /* deliveredLocally */)
 		return &ip.ErrMessageTooLong{}
+	case *tcpip.ErrNoBufferSpace:
+		return &ip.ErrOutgoingDeviceNoBufferSpace{}
 	default:
 		return &ip.ErrOther{Err: err}
 	}
@@ -1227,9 +1263,11 @@ func (e *endpoint) forwardMulticastPacketForOutgoingInterface(pkt stack.PacketBu
 // counters.
 func (e *endpoint) handleForwardingError(err ip.ForwardingError) {
 	stats := e.stats.ip
-	switch err.(type) {
+	switch err := err.(type) {
 	case nil:
 		return
+	case *ip.ErrInitializingSourceAddress:
+		stats.Forwarding.InitializingSource.Increment()
 	case *ip.ErrLinkLocalSourceAddress:
 		stats.Forwarding.LinkLocalSource.Increment()
 	case *ip.ErrLinkLocalDestinationAddress:
@@ -1248,6 +1286,8 @@ func (e *endpoint) handleForwardingError(err ip.ForwardingError) {
 		stats.Forwarding.UnexpectedMulticastInputInterface.Increment()
 	case *ip.ErrUnknownOutputEndpoint:
 		stats.Forwarding.UnknownOutputEndpoint.Increment()
+	case *ip.ErrOutgoingDeviceNoBufferSpace:
+		stats.Forwarding.OutgoingDeviceNoBufferSpace.Increment()
 	default:
 		panic(fmt.Sprintf("unrecognized forwarding error: %s", err))
 	}
