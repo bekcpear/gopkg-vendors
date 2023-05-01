@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/util"
@@ -22,6 +21,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/storer"
 	"github.com/go-git/go-git/v5/utils/ioutil"
 	"github.com/go-git/go-git/v5/utils/merkletrie"
+	"github.com/go-git/go-git/v5/utils/sync"
 )
 
 var (
@@ -410,7 +410,7 @@ func (w *Worktree) checkoutChange(ch merkletrie.Change, t *object.Tree, idx *ind
 
 		isSubmodule = e.Mode == filemode.Submodule
 	case merkletrie.Delete:
-		return rmFileAndDirIfEmpty(w.Filesystem, ch.From.String())
+		return rmFileAndDirsIfEmpty(w.Filesystem, ch.From.String())
 	}
 
 	if isSubmodule {
@@ -532,12 +532,6 @@ func (w *Worktree) checkoutChangeRegularFile(name string,
 	return nil
 }
 
-var copyBufferPool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 32*1024)
-	},
-}
-
 func (w *Worktree) checkoutFile(f *object.File) (err error) {
 	mode, err := f.Mode.ToOSFileMode()
 	if err != nil {
@@ -561,9 +555,9 @@ func (w *Worktree) checkoutFile(f *object.File) (err error) {
 	}
 
 	defer ioutil.CheckClose(to, &err)
-	buf := copyBufferPool.Get().([]byte)
-	_, err = io.CopyBuffer(to, from, buf)
-	copyBufferPool.Put(buf)
+	buf := sync.GetByteSlice()
+	_, err = io.CopyBuffer(to, from, *buf)
+	sync.PutByteSlice(buf)
 	return
 }
 
@@ -784,8 +778,10 @@ func (w *Worktree) doClean(status Status, opts *CleanOptions, dir string, files 
 	}
 
 	if opts.Dir && dir != "" {
-		return doCleanDirectories(w.Filesystem, dir)
+		_, err := removeDirIfEmpty(w.Filesystem, dir)
+		return err
 	}
+
 	return nil
 }
 
@@ -926,25 +922,52 @@ func findMatchInFile(file *object.File, treeName string, opts *GrepOptions) ([]G
 	return grepResults, nil
 }
 
-func rmFileAndDirIfEmpty(fs billy.Filesystem, name string) error {
+// will walk up the directory tree removing all encountered empty
+// directories, not just the one containing this file
+func rmFileAndDirsIfEmpty(fs billy.Filesystem, name string) error {
 	if err := util.RemoveAll(fs, name); err != nil {
 		return err
 	}
 
 	dir := filepath.Dir(name)
-	return doCleanDirectories(fs, dir)
+	for {
+		removed, err := removeDirIfEmpty(fs, dir)
+		if err != nil {
+			return err
+		}
+
+		if !removed {
+			// directory was not empty and not removed,
+			// stop checking parents
+			break
+		}
+
+		// move to parent directory
+		dir = filepath.Dir(dir)
+	}
+
+	return nil
 }
 
-// doCleanDirectories removes empty subdirs (without files)
-func doCleanDirectories(fs billy.Filesystem, dir string) error {
+// removeDirIfEmpty will remove the supplied directory `dir` if
+// `dir` is empty
+// returns true if the directory was removed
+func removeDirIfEmpty(fs billy.Filesystem, dir string) (bool, error) {
 	files, err := fs.ReadDir(dir)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if len(files) == 0 {
-		return fs.Remove(dir)
+
+	if len(files) > 0 {
+		return false, nil
 	}
-	return nil
+
+	err = fs.Remove(dir)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 type indexBuilder struct {
