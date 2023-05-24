@@ -14,14 +14,9 @@ import (
 // Deletes the tags from the bucket. To use this operation, you must have
 // permission to perform the s3:PutBucketTagging action. By default, the bucket
 // owner has this permission and can grant this permission to others. The following
-// operations are related to DeleteBucketTagging:
-//
-// * GetBucketTagging
-// (https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketTagging.html)
-//
-// *
-// PutBucketTagging
-// (https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketTagging.html)
+// operations are related to DeleteBucketTagging :
+//   - GetBucketTagging (https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketTagging.html)
+//   - PutBucketTagging (https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketTagging.html)
 func (c *Client) DeleteBucketTagging(ctx context.Context, params *DeleteBucketTaggingInput, optFns ...func(*Options)) (*DeleteBucketTaggingOutput, error) {
 	if params == nil {
 		params = &DeleteBucketTaggingInput{}
@@ -45,7 +40,8 @@ type DeleteBucketTaggingInput struct {
 	Bucket *string
 
 	// The account ID of the expected bucket owner. If the bucket is owned by a
-	// different account, the request will fail with an HTTP 403 (Access Denied) error.
+	// different account, the request fails with the HTTP status code 403 Forbidden
+	// (access denied).
 	ExpectedBucketOwner *string
 
 	noSmithyDocumentSerde
@@ -113,6 +109,9 @@ func (c *Client) addOperationDeleteBucketTaggingMiddlewares(stack *middleware.St
 		return err
 	}
 	if err = addMetadataRetrieverMiddleware(stack); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addDeleteBucketTaggingUpdateEndpoint(stack, options); err != nil {

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -169,15 +170,43 @@ func (e *SyntacticError) withOffset(pos int64) error {
 	return &SyntacticError{ByteOffset: pos, str: e.str}
 }
 
-func newInvalidCharacterError(prefix []byte, where string) *SyntacticError {
+func newDuplicateNameError[Bytes ~[]byte | ~string](quoted Bytes) *SyntacticError {
+	return &SyntacticError{str: "duplicate name " + string(quoted) + " in object"}
+}
+
+func newInvalidCharacterError[Bytes ~[]byte | ~string](prefix Bytes, where string) *SyntacticError {
 	what := quoteRune(prefix)
 	return &SyntacticError{str: "invalid character " + what + " " + where}
 }
 
-func quoteRune(b []byte) string {
-	r, n := utf8.DecodeRune(b)
+func newInvalidEscapeSequenceError[Bytes ~[]byte | ~string](what Bytes) *SyntacticError {
+	label := "escape sequence"
+	if len(what) > 6 {
+		label = "surrogate pair"
+	}
+	needEscape := strings.IndexFunc(string(what), func(r rune) bool {
+		return r == '`' || r == utf8.RuneError || unicode.IsSpace(r) || !unicode.IsPrint(r)
+	}) >= 0
+	if needEscape {
+		return &SyntacticError{str: "invalid " + label + " " + strconv.Quote(string(what)) + " within string"}
+	} else {
+		return &SyntacticError{str: "invalid " + label + " `" + string(what) + "` within string"}
+	}
+}
+
+func quoteRune[Bytes ~[]byte | ~string](b Bytes) string {
+	r, n := utf8.DecodeRuneInString(string(truncateMaxUTF8(b)))
 	if r == utf8.RuneError && n == 1 {
 		return `'\x` + strconv.FormatUint(uint64(b[0]), 16) + `'`
 	}
 	return strconv.QuoteRune(r)
+}
+
+func firstError(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -10,9 +10,9 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Deletes the association between an OpsItem and a related item. For example, this
-// API operation can delete an Incident Manager incident from an OpsItem. Incident
-// Manager is a capability of Amazon Web Services Systems Manager.
+// Deletes the association between an OpsItem and a related item. For example,
+// this API operation can delete an Incident Manager incident from an OpsItem.
+// Incident Manager is a capability of Amazon Web Services Systems Manager.
 func (c *Client) DisassociateOpsItemRelatedItem(ctx context.Context, params *DisassociateOpsItemRelatedItemInput, optFns ...func(*Options)) (*DisassociateOpsItemRelatedItemOutput, error) {
 	if params == nil {
 		params = &DisassociateOpsItemRelatedItemInput{}
@@ -101,6 +101,9 @@ func (c *Client) addOperationDisassociateOpsItemRelatedItemMiddlewares(stack *mi
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDisassociateOpsItemRelatedItem(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

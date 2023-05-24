@@ -31,7 +31,7 @@ func (c *Client) ListDocumentMetadataHistory(ctx context.Context, params *ListDo
 type ListDocumentMetadataHistoryInput struct {
 
 	// The type of data for which details are being requested. Currently, the only
-	// supported value is DocumentReviews.
+	// supported value is DocumentReviews .
 	//
 	// This member is required.
 	Metadata types.DocumentMetadataEnum
@@ -129,6 +129,9 @@ func (c *Client) addOperationListDocumentMetadataHistoryMiddlewares(stack *middl
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opListDocumentMetadataHistory(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

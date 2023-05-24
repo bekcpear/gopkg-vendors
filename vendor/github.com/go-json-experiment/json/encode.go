@@ -185,7 +185,7 @@ func (e *Encoder) Reset(w io.Writer) {
 
 // needFlush determines whether to flush at this point.
 func (e *Encoder) needFlush() bool {
-	// NOTE: This function is carefully written to be inlineable.
+	// NOTE: This function is carefully written to be inlinable.
 
 	// Avoid flushing if e.wr is nil since there is no underlying writer.
 	// Flush if less than 25% of the capacity remains.
@@ -263,7 +263,17 @@ func (e *Encoder) flush() error {
 	return nil
 }
 
-func (e *encodeBuffer) previousOffsetEnd() int64 { return e.baseOffset + int64(len(e.buf)) }
+// injectSyntacticErrorWithPosition wraps a SyntacticError with the position,
+// otherwise it returns the error as is.
+// It takes a position relative to the start of the start of e.buf.
+func (e *encodeBuffer) injectSyntacticErrorWithPosition(err error, pos int) error {
+	if serr, ok := err.(*SyntacticError); ok {
+		return serr.withOffset(e.baseOffset + int64(pos))
+	}
+	return err
+}
+
+func (e *encodeBuffer) previousOffsetEnd() int64 { return e.baseOffset + len64(e.buf) }
 func (e *encodeBuffer) unflushedBuffer() []byte  { return e.buf }
 
 // avoidFlush indicates whether to avoid flushing to ensure there is always
@@ -347,8 +357,32 @@ func (e *Encoder) unwriteEmptyObjectMember(prevName *string) bool {
 	return true
 }
 
+// unwriteOnlyObjectMemberName unwrites the only object member name
+// and returns the unquoted name.
+func (e *Encoder) unwriteOnlyObjectMemberName() string {
+	if last := e.tokens.last; !last.isObject() || last.length() != 1 {
+		panic("BUG: must be called on an object after writing first name")
+	}
+
+	// Unwrite the name and whitespace.
+	b := trimSuffixString(e.buf)
+	isVerbatim := bytes.IndexByte(e.buf[len(b):], '\\') < 0
+	name := string(unescapeStringMayCopy(e.buf[len(b):], isVerbatim))
+	e.buf = trimSuffixWhitespace(b)
+
+	// Undo state changes.
+	e.tokens.last.decrement()
+	if !e.options.AllowDuplicateNames {
+		if e.tokens.last.isActiveNamespace() {
+			e.namespaces.last().removeLast()
+		}
+		e.names.clearLast()
+	}
+	return name
+}
+
 func trimSuffixWhitespace(b []byte) []byte {
-	// NOTE: The arguments and logic are kept simple to keep this inlineable.
+	// NOTE: The arguments and logic are kept simple to keep this inlinable.
 	n := len(b) - 1
 	for n >= 0 && (b[n] == ' ' || b[n] == '\t' || b[n] == '\r' || b[n] == '\n') {
 		n--
@@ -357,7 +391,7 @@ func trimSuffixWhitespace(b []byte) []byte {
 }
 
 func trimSuffixString(b []byte) []byte {
-	// NOTE: The arguments and logic are kept simple to keep this inlineable.
+	// NOTE: The arguments and logic are kept simple to keep this inlinable.
 	if len(b) > 0 && b[len(b)-1] == '"' {
 		b = b[:len(b)-1]
 	}
@@ -371,12 +405,12 @@ func trimSuffixString(b []byte) []byte {
 }
 
 func hasSuffixByte(b []byte, c byte) bool {
-	// NOTE: The arguments and logic are kept simple to keep this inlineable.
+	// NOTE: The arguments and logic are kept simple to keep this inlinable.
 	return len(b) > 0 && b[len(b)-1] == c
 }
 
 func trimSuffixByte(b []byte, c byte) []byte {
-	// NOTE: The arguments and logic are kept simple to keep this inlineable.
+	// NOTE: The arguments and logic are kept simple to keep this inlinable.
 	if len(b) > 0 && b[len(b)-1] == c {
 		return b[:len(b)-1]
 	}
@@ -391,6 +425,7 @@ func trimSuffixByte(b []byte, c byte) []byte {
 // to provide an end object delimiter when the encoder is finishing an array.
 // If the provided token is invalid, then it reports a SyntacticError and
 // the internal state remains unchanged.
+// The offset reported in SyntacticError will be relative to the OutputOffset.
 func (e *Encoder) WriteToken(t Token) error {
 	k := t.Kind()
 	b := e.buf // use local variable to avoid mutating e in case of error
@@ -400,6 +435,7 @@ func (e *Encoder) WriteToken(t Token) error {
 	if e.options.multiline {
 		b = e.appendWhitespace(b, k)
 	}
+	pos := len(b) // offset before the token
 
 	// Append the token to the output and to the state machine.
 	var err error
@@ -424,7 +460,7 @@ func (e *Encoder) WriteToken(t Token) error {
 				break
 			}
 			if e.tokens.last.isActiveNamespace() && !e.namespaces.last().insertQuoted(b[n0:], false) {
-				err = &SyntacticError{str: "duplicate name " + string(b[n0:]) + " in object"}
+				err = newDuplicateNameError(b[n0:])
 				break
 			}
 			e.names.replaceLastQuotedOffset(n0) // only replace if insertQuoted succeeds
@@ -460,10 +496,10 @@ func (e *Encoder) WriteToken(t Token) error {
 		b = append(b, ']')
 		err = e.tokens.popArray()
 	default:
-		return &SyntacticError{str: "invalid json.Token"}
+		err = &SyntacticError{str: "invalid json.Token"}
 	}
 	if err != nil {
-		return err
+		return e.injectSyntacticErrorWithPosition(err, pos)
 	}
 
 	// Finish off the buffer and store it back into e.
@@ -491,6 +527,7 @@ func (e *Encoder) writeNumber(v float64, bits int, quote bool) error {
 	if e.options.multiline {
 		b = e.appendWhitespace(b, '0')
 	}
+	pos := len(b) // offset before the token
 
 	if quote {
 		// Append the value to the output.
@@ -519,12 +556,13 @@ func (e *Encoder) writeNumber(v float64, bits int, quote bool) error {
 				return errInvalidNamespace
 			}
 			if e.tokens.last.isActiveNamespace() && !e.namespaces.last().insertQuoted(b[n0:], false) {
-				return &SyntacticError{str: "duplicate name " + string(b[n0:]) + " in object"}
+				err := newDuplicateNameError(b[n0:])
+				return e.injectSyntacticErrorWithPosition(err, pos)
 			}
 			e.names.replaceLastQuotedOffset(n0) // only replace if insertQuoted succeeds
 		}
 		if err := e.tokens.appendString(); err != nil {
-			return err
+			return e.injectSyntacticErrorWithPosition(err, pos)
 		}
 	} else {
 		switch bits {
@@ -536,7 +574,7 @@ func (e *Encoder) writeNumber(v float64, bits int, quote bool) error {
 			b = appendNumber(b, v, bits)
 		}
 		if err := e.tokens.appendNumber(); err != nil {
-			return err
+			return e.injectSyntacticErrorWithPosition(err, pos)
 		}
 	}
 
@@ -556,6 +594,8 @@ func (e *Encoder) writeNumber(v float64, bits int, quote bool) error {
 // The provided value kind must be consistent with the JSON grammar
 // (see examples on Encoder.WriteToken). If the provided value is invalid,
 // then it reports a SyntacticError and the internal state remains unchanged.
+// The offset reported in SyntacticError will be relative to the OutputOffset
+// plus the offset into v of any encountered syntax error.
 func (e *Encoder) WriteValue(v RawValue) error {
 	e.maxValue |= len(v) // bitwise OR is a fast approximation of max
 
@@ -567,18 +607,20 @@ func (e *Encoder) WriteValue(v RawValue) error {
 	if e.options.multiline {
 		b = e.appendWhitespace(b, k)
 	}
+	pos := len(b) // offset before the value
 
 	// Append the value the output.
-	var err error
-	v = v[consumeWhitespace(v):]
-	n0 := len(b) // offset before calling e.reformatValue
-	b, v, err = e.reformatValue(b, v, e.tokens.depth())
+	var n int
+	n += consumeWhitespace(v[n:])
+	b, m, err := e.reformatValue(b, v[n:], e.tokens.depth())
 	if err != nil {
-		return err
+		return e.injectSyntacticErrorWithPosition(err, pos+n+m)
 	}
-	v = v[consumeWhitespace(v):]
-	if len(v) > 0 {
-		return newInvalidCharacterError(v[0:], "after top-level value")
+	n += m
+	n += consumeWhitespace(v[n:])
+	if len(v) > n {
+		err = newInvalidCharacterError(v[n:], "after top-level value")
+		return e.injectSyntacticErrorWithPosition(err, pos+n)
 	}
 
 	// Append the kind to the state machine.
@@ -591,11 +633,11 @@ func (e *Encoder) WriteValue(v RawValue) error {
 				err = errInvalidNamespace
 				break
 			}
-			if e.tokens.last.isActiveNamespace() && !e.namespaces.last().insertQuoted(b[n0:], false) {
-				err = &SyntacticError{str: "duplicate name " + string(b[n0:]) + " in object"}
+			if e.tokens.last.isActiveNamespace() && !e.namespaces.last().insertQuoted(b[pos:], false) {
+				err = newDuplicateNameError(b[pos:])
 				break
 			}
-			e.names.replaceLastQuotedOffset(n0) // only replace if insertQuoted succeeds
+			e.names.replaceLastQuotedOffset(pos) // only replace if insertQuoted succeeds
 		}
 		err = e.tokens.appendString()
 	case '0':
@@ -616,7 +658,7 @@ func (e *Encoder) WriteValue(v RawValue) error {
 		}
 	}
 	if err != nil {
-		return err
+		return e.injectSyntacticErrorWithPosition(err, pos)
 	}
 
 	// Finish off the buffer and store it back into e.
@@ -652,37 +694,41 @@ func (e *Encoder) appendIndent(b []byte, n int) []byte {
 
 // reformatValue parses a JSON value from the start of src and
 // appends it to the end of dst, reformatting whitespace and strings as needed.
-// It returns the updated versions of dst and src.
-func (e *Encoder) reformatValue(dst []byte, src RawValue, depth int) ([]byte, RawValue, error) {
+// It returns the extended dst buffer and the number of consumed input bytes.
+func (e *Encoder) reformatValue(dst []byte, src RawValue, depth int) ([]byte, int, error) {
 	// TODO: Should this update valueFlags as input?
 	if len(src) == 0 {
-		return dst, src, io.ErrUnexpectedEOF
+		return dst, 0, io.ErrUnexpectedEOF
 	}
-	var n int
-	var err error
 	switch k := Kind(src[0]).normalize(); k {
 	case 'n':
-		if n = consumeNull(src); n == 0 {
-			n, err = consumeLiteral(src, "null")
+		if consumeNull(src) == 0 {
+			n, err := consumeLiteral(src, "null")
+			return dst, n, err
 		}
+		return append(dst, "null"...), len("null"), nil
 	case 'f':
-		if n = consumeFalse(src); n == 0 {
-			n, err = consumeLiteral(src, "false")
+		if consumeFalse(src) == 0 {
+			n, err := consumeLiteral(src, "false")
+			return dst, n, err
 		}
+		return append(dst, "false"...), len("false"), nil
 	case 't':
-		if n = consumeTrue(src); n == 0 {
-			n, err = consumeLiteral(src, "true")
+		if consumeTrue(src) == 0 {
+			n, err := consumeLiteral(src, "true")
+			return dst, n, err
 		}
+		return append(dst, "true"...), len("true"), nil
 	case '"':
 		if n := consumeSimpleString(src); n > 0 && e.options.EscapeRune == nil {
 			dst, src = append(dst, src[:n]...), src[n:] // copy simple strings verbatim
-			return dst, src, nil
+			return dst, n, nil
 		}
 		return reformatString(dst, src, !e.options.AllowInvalidUTF8, e.options.preserveRawStrings, e.options.EscapeRune)
 	case '0':
 		if n := consumeSimpleNumber(src); n > 0 && !e.options.canonicalizeNumbers {
 			dst, src = append(dst, src[:n]...), src[n:] // copy simple numbers verbatim
-			return dst, src, nil
+			return dst, n, nil
 		}
 		return reformatNumber(dst, src, e.options.canonicalizeNumbers)
 	case '{':
@@ -690,33 +736,32 @@ func (e *Encoder) reformatValue(dst []byte, src RawValue, depth int) ([]byte, Ra
 	case '[':
 		return e.reformatArray(dst, src, depth)
 	default:
-		return dst, src, newInvalidCharacterError(src, "at start of value")
+		return dst, 0, newInvalidCharacterError(src, "at start of value")
 	}
-	if err != nil {
-		return dst, src, err
-	}
-	dst, src = append(dst, src[:n]...), src[n:]
-	return dst, src, nil
 }
 
 // reformatObject parses a JSON object from the start of src and
 // appends it to the end of src, reformatting whitespace and strings as needed.
-// It returns the updated versions of dst and src.
-func (e *Encoder) reformatObject(dst []byte, src RawValue, depth int) ([]byte, RawValue, error) {
+// It returns the extended dst buffer and the number of consumed input bytes.
+func (e *Encoder) reformatObject(dst []byte, src RawValue, depth int) ([]byte, int, error) {
 	// Append object start.
-	if src[0] != '{' {
+	if len(src) == 0 || src[0] != '{' {
 		panic("BUG: reformatObject must be called with a buffer that starts with '{'")
+	} else if depth == maxNestingDepth+1 {
+		return dst, 0, errMaxDepth
 	}
-	dst, src = append(dst, '{'), src[1:]
+	dst = append(dst, '{')
+	n := len("{")
 
 	// Append (possible) object end.
-	src = src[consumeWhitespace(src):]
-	if len(src) == 0 {
-		return dst, src, io.ErrUnexpectedEOF
+	n += consumeWhitespace(src[n:])
+	if uint(len(src)) <= uint(n) {
+		return dst, n, io.ErrUnexpectedEOF
 	}
-	if src[0] == '}' {
-		dst, src = append(dst, '}'), src[1:]
-		return dst, src, nil
+	if src[n] == '}' {
+		dst = append(dst, '}')
+		n += len("}")
+		return dst, n, nil
 	}
 
 	var err error
@@ -734,86 +779,95 @@ func (e *Encoder) reformatObject(dst []byte, src RawValue, depth int) ([]byte, R
 		}
 
 		// Append object name.
-		src = src[consumeWhitespace(src):]
-		if len(src) == 0 {
-			return dst, src, io.ErrUnexpectedEOF
+		n += consumeWhitespace(src[n:])
+		if uint(len(src)) <= uint(n) {
+			return dst, n, io.ErrUnexpectedEOF
 		}
-		n0 := len(dst) // offset before calling reformatString
-		n := consumeSimpleString(src)
-		if n > 0 && e.options.EscapeRune == nil {
-			dst, src = append(dst, src[:n]...), src[n:] // copy simple strings verbatim
+		m := consumeSimpleString(src[n:])
+		if m > 0 && e.options.EscapeRune == nil {
+			dst = append(dst, src[n:n+m]...)
 		} else {
-			dst, src, err = reformatString(dst, src, !e.options.AllowInvalidUTF8, e.options.preserveRawStrings, e.options.EscapeRune)
+			dst, m, err = reformatString(dst, src[n:], !e.options.AllowInvalidUTF8, e.options.preserveRawStrings, e.options.EscapeRune)
+			if err != nil {
+				return dst, n + m, err
+			}
 		}
-		if err != nil {
-			return dst, src, err
+		// TODO: Specify whether the name is verbatim or not.
+		if !e.options.AllowDuplicateNames && !names.insertQuoted(src[n:n+m], false) {
+			return dst, n, newDuplicateNameError(src[n : n+m])
 		}
-		if !e.options.AllowDuplicateNames && !names.insertQuoted(dst[n0:], false) {
-			return dst, src, &SyntacticError{str: "duplicate name " + string(dst[n0:]) + " in object"}
-		}
+		n += m
 
 		// Append colon.
-		src = src[consumeWhitespace(src):]
-		if len(src) == 0 {
-			return dst, src, io.ErrUnexpectedEOF
+		n += consumeWhitespace(src[n:])
+		if uint(len(src)) <= uint(n) {
+			return dst, n, io.ErrUnexpectedEOF
 		}
-		if src[0] != ':' {
-			return dst, src, newInvalidCharacterError(src, "after object name (expecting ':')")
+		if src[n] != ':' {
+			return dst, n, newInvalidCharacterError(src[n:], "after object name (expecting ':')")
 		}
-		dst, src = append(dst, ':'), src[1:]
+		dst = append(dst, ':')
+		n += len(":")
 		if e.options.multiline {
 			dst = append(dst, ' ')
 		}
 
 		// Append object value.
-		src = src[consumeWhitespace(src):]
-		if len(src) == 0 {
-			return dst, src, io.ErrUnexpectedEOF
+		n += consumeWhitespace(src[n:])
+		if uint(len(src)) <= uint(n) {
+			return dst, n, io.ErrUnexpectedEOF
 		}
-		dst, src, err = e.reformatValue(dst, src, depth)
+		dst, m, err = e.reformatValue(dst, src[n:], depth)
 		if err != nil {
-			return dst, src, err
+			return dst, n + m, err
 		}
+		n += m
 
 		// Append comma or object end.
-		src = src[consumeWhitespace(src):]
-		if len(src) == 0 {
-			return dst, src, io.ErrUnexpectedEOF
+		n += consumeWhitespace(src[n:])
+		if uint(len(src)) <= uint(n) {
+			return dst, n, io.ErrUnexpectedEOF
 		}
-		switch src[0] {
+		switch src[n] {
 		case ',':
-			dst, src = append(dst, ','), src[1:]
+			dst = append(dst, ',')
+			n += len(",")
 			continue
 		case '}':
 			if e.options.multiline {
 				dst = e.appendIndent(dst, depth-1)
 			}
-			dst, src = append(dst, '}'), src[1:]
-			return dst, src, nil
+			dst = append(dst, '}')
+			n += len("}")
+			return dst, n, nil
 		default:
-			return dst, src, newInvalidCharacterError(src, "after object value (expecting ',' or '}')")
+			return dst, n, newInvalidCharacterError(src[n:], "after object value (expecting ',' or '}')")
 		}
 	}
 }
 
 // reformatArray parses a JSON array from the start of src and
 // appends it to the end of dst, reformatting whitespace and strings as needed.
-// It returns the updated versions of dst and src.
-func (e *Encoder) reformatArray(dst []byte, src RawValue, depth int) ([]byte, RawValue, error) {
+// It returns the extended dst buffer and the number of consumed input bytes.
+func (e *Encoder) reformatArray(dst []byte, src RawValue, depth int) ([]byte, int, error) {
 	// Append array start.
-	if src[0] != '[' {
+	if len(src) == 0 || src[0] != '[' {
 		panic("BUG: reformatArray must be called with a buffer that starts with '['")
+	} else if depth == maxNestingDepth+1 {
+		return dst, 0, errMaxDepth
 	}
-	dst, src = append(dst, '['), src[1:]
+	dst = append(dst, '[')
+	n := len("[")
 
 	// Append (possible) array end.
-	src = src[consumeWhitespace(src):]
-	if len(src) == 0 {
-		return dst, src, io.ErrUnexpectedEOF
+	n += consumeWhitespace(src[n:])
+	if uint(len(src)) <= uint(n) {
+		return dst, n, io.ErrUnexpectedEOF
 	}
-	if src[0] == ']' {
-		dst, src = append(dst, ']'), src[1:]
-		return dst, src, nil
+	if src[n] == ']' {
+		dst = append(dst, ']')
+		n += len("]")
+		return dst, n, nil
 	}
 
 	var err error
@@ -825,32 +879,36 @@ func (e *Encoder) reformatArray(dst []byte, src RawValue, depth int) ([]byte, Ra
 		}
 
 		// Append array value.
-		src = src[consumeWhitespace(src):]
-		if len(src) == 0 {
-			return dst, src, io.ErrUnexpectedEOF
+		n += consumeWhitespace(src[n:])
+		if uint(len(src)) <= uint(n) {
+			return dst, n, io.ErrUnexpectedEOF
 		}
-		dst, src, err = e.reformatValue(dst, src, depth)
+		var m int
+		dst, m, err = e.reformatValue(dst, src[n:], depth)
 		if err != nil {
-			return dst, src, err
+			return dst, n + m, err
 		}
+		n += m
 
 		// Append comma or array end.
-		src = src[consumeWhitespace(src):]
-		if len(src) == 0 {
-			return dst, src, io.ErrUnexpectedEOF
+		n += consumeWhitespace(src[n:])
+		if uint(len(src)) <= uint(n) {
+			return dst, n, io.ErrUnexpectedEOF
 		}
-		switch src[0] {
+		switch src[n] {
 		case ',':
-			dst, src = append(dst, ','), src[1:]
+			dst = append(dst, ',')
+			n += len(",")
 			continue
 		case ']':
 			if e.options.multiline {
 				dst = e.appendIndent(dst, depth-1)
 			}
-			dst, src = append(dst, ']'), src[1:]
-			return dst, src, nil
+			dst = append(dst, ']')
+			n += len("]")
+			return dst, n, nil
 		default:
-			return dst, src, newInvalidCharacterError(src, "after array value (expecting ',' or ']')")
+			return dst, n, newInvalidCharacterError(src[n:], "after array value (expecting ',' or ']')")
 		}
 	}
 }
@@ -943,44 +1001,17 @@ func (e *Encoder) StackPointer() string {
 // Note that this API allows full control over the formatting of strings
 // except for whether a forward solidus '/' may be formatted as '\/' and
 // the casing of hexadecimal Unicode escape sequences.
-func appendString(dst []byte, src string, validateUTF8 bool, escapeRune func(rune) bool) ([]byte, error) {
-	appendEscapedASCII := func(dst []byte, c byte) []byte {
-		switch c {
-		case '"', '\\':
-			dst = append(dst, '\\', c)
-		case '\b':
-			dst = append(dst, "\\b"...)
-		case '\f':
-			dst = append(dst, "\\f"...)
-		case '\n':
-			dst = append(dst, "\\n"...)
-		case '\r':
-			dst = append(dst, "\\r"...)
-		case '\t':
-			dst = append(dst, "\\t"...)
-		default:
-			dst = append(dst, "\\u"...)
-			dst = appendHexUint16(dst, uint16(c))
-		}
-		return dst
-	}
-	appendEscapedUnicode := func(dst []byte, r rune) []byte {
-		if r1, r2 := utf16.EncodeRune(r); r1 != '\ufffd' && r2 != '\ufffd' {
-			dst = append(dst, "\\u"...)
-			dst = appendHexUint16(dst, uint16(r1))
-			dst = append(dst, "\\u"...)
-			dst = appendHexUint16(dst, uint16(r2))
-		} else {
-			dst = append(dst, "\\u"...)
-			dst = appendHexUint16(dst, uint16(r))
-		}
-		return dst
+func appendString[Bytes ~[]byte | ~string](dst []byte, src Bytes, validateUTF8 bool, escapeRune func(rune) bool) ([]byte, error) {
+	// TODO(https://go.dev/issue/57433): Use slices.Grow.
+	if dst == nil {
+		dst = make([]byte, 0, len(`"`)+len(src)+len(`"`))
 	}
 
-	// Optimize for when escapeRune is nil.
+	var i, n int
+	var hasInvalidUTF8 bool
+	dst = append(dst, '"')
 	if escapeRune == nil {
-		var i, n int
-		dst = append(dst, '"')
+		// Optimize for when escapeRune is nil.
 		for uint(len(src)) > uint(n) {
 			// Handle single-byte ASCII.
 			if c := src[n]; c < utf8.RuneSelf {
@@ -994,80 +1025,109 @@ func appendString(dst []byte, src string, validateUTF8 bool, escapeRune func(run
 			}
 
 			// Handle multi-byte Unicode.
-			_, rn := utf8.DecodeRuneInString(src[n:])
+			_, rn := utf8.DecodeRuneInString(string(truncateMaxUTF8(src[n:])))
 			n += rn
 			if rn == 1 { // must be utf8.RuneError since we already checked for single-byte ASCII
+				hasInvalidUTF8 = true
 				dst = append(dst, src[i:n-rn]...)
-				if validateUTF8 {
-					return dst, &SyntacticError{str: "invalid UTF-8 within string"}
-				}
 				dst = append(dst, "\ufffd"...)
 				i = n
 			}
 		}
-		dst = append(dst, src[i:n]...)
-		dst = append(dst, '"')
-		return dst, nil
-	}
-
-	// Slower implementation for when escapeRune is non-nil.
-	var i, n int
-	dst = append(dst, '"')
-	for uint(len(src)) > uint(n) {
-		switch r, rn := utf8.DecodeRuneInString(src[n:]); {
-		case r == utf8.RuneError && rn == 1:
-			dst = append(dst, src[i:n]...)
-			if validateUTF8 {
-				return dst, &SyntacticError{str: "invalid UTF-8 within string"}
+	} else {
+		// Slower implementation for when escapeRune is non-nil.
+		for uint(len(src)) > uint(n) {
+			switch r, rn := utf8.DecodeRuneInString(string(truncateMaxUTF8(src[n:]))); {
+			case r == utf8.RuneError && rn == 1:
+				hasInvalidUTF8 = true
+				dst = append(dst, src[i:n]...)
+				if escapeRune('\ufffd') {
+					dst = append(dst, `\ufffd`...)
+				} else {
+					dst = append(dst, "\ufffd"...)
+				}
+				n += rn
+				i = n
+			case escapeRune(r):
+				dst = append(dst, src[i:n]...)
+				dst = appendEscapedUnicode(dst, r)
+				n += rn
+				i = n
+			case r < ' ' || r == '"' || r == '\\':
+				dst = append(dst, src[i:n]...)
+				dst = appendEscapedASCII(dst, byte(r))
+				n += rn
+				i = n
+			default:
+				n += rn
 			}
-			if escapeRune('\ufffd') {
-				dst = append(dst, `\ufffd`...)
-			} else {
-				dst = append(dst, "\ufffd"...)
-			}
-			n += rn
-			i = n
-		case escapeRune(r):
-			dst = append(dst, src[i:n]...)
-			dst = appendEscapedUnicode(dst, r)
-			n += rn
-			i = n
-		case r < ' ' || r == '"' || r == '\\':
-			dst = append(dst, src[i:n]...)
-			dst = appendEscapedASCII(dst, byte(r))
-			n += rn
-			i = n
-		default:
-			n += rn
 		}
 	}
 	dst = append(dst, src[i:n]...)
 	dst = append(dst, '"')
+	if validateUTF8 && hasInvalidUTF8 {
+		return dst, errInvalidUTF8
+	}
 	return dst, nil
+}
+
+func appendEscapedASCII(dst []byte, c byte) []byte {
+	switch c {
+	case '"', '\\':
+		dst = append(dst, '\\', c)
+	case '\b':
+		dst = append(dst, "\\b"...)
+	case '\f':
+		dst = append(dst, "\\f"...)
+	case '\n':
+		dst = append(dst, "\\n"...)
+	case '\r':
+		dst = append(dst, "\\r"...)
+	case '\t':
+		dst = append(dst, "\\t"...)
+	default:
+		dst = appendEscapedUTF16(dst, uint16(c))
+	}
+	return dst
+}
+
+func appendEscapedUnicode(dst []byte, r rune) []byte {
+	if r1, r2 := utf16.EncodeRune(r); r1 != '\ufffd' && r2 != '\ufffd' {
+		dst = appendEscapedUTF16(dst, uint16(r1))
+		dst = appendEscapedUTF16(dst, uint16(r2))
+	} else {
+		dst = appendEscapedUTF16(dst, uint16(r))
+	}
+	return dst
+}
+
+func appendEscapedUTF16(dst []byte, x uint16) []byte {
+	const hex = "0123456789abcdef"
+	return append(dst, '\\', 'u', hex[(x>>12)&0xf], hex[(x>>8)&0xf], hex[(x>>4)&0xf], hex[(x>>0)&0xf])
 }
 
 // reformatString consumes a JSON string from src and appends it to dst,
 // reformatting it if necessary for the given escapeRune parameter.
-// It returns the appended output and the remainder of the input.
-func reformatString(dst, src []byte, validateUTF8, preserveRaw bool, escapeRune func(rune) bool) ([]byte, []byte, error) {
+// It returns the appended output and the number of consumed input bytes.
+func reformatString(dst, src []byte, validateUTF8, preserveRaw bool, escapeRune func(rune) bool) ([]byte, int, error) {
 	// TODO: Should this update valueFlags as input?
 	var flags valueFlags
 	n, err := consumeString(&flags, src, validateUTF8)
 	if err != nil {
-		return dst, src[n:], err
+		return dst, n, err
 	}
 	if preserveRaw || (escapeRune == nil && flags.isCanonical()) {
 		dst = append(dst, src[:n]...) // copy the string verbatim
-		return dst, src[n:], nil
+		return dst, n, nil
 	}
 
 	// TODO: Implement a direct, raw-to-raw reformat for strings.
 	// If the escapeRune option would have resulted in no changes to the output,
 	// it would be faster to simply append src to dst without going through
 	// an intermediary representation in a separate buffer.
-	b, _ := unescapeString(make([]byte, 0, n), src[:n])
+	b, _ := unescapeString(nil, src[:n])
 	dst, _ = appendString(dst, string(b), validateUTF8, escapeRune)
-	return dst, src[n:], nil
+	return dst, n, nil
 }
 
 // appendNumber appends src to dst as a JSON number per RFC 7159, section 6.
@@ -1108,15 +1168,15 @@ func appendNumber(dst []byte, src float64, bits int) []byte {
 
 // reformatNumber consumes a JSON string from src and appends it to dst,
 // canonicalizing it if specified.
-// It returns the appended output and the remainder of the input.
-func reformatNumber(dst, src []byte, canonicalize bool) ([]byte, []byte, error) {
+// It returns the appended output and the number of consumed input bytes.
+func reformatNumber(dst, src []byte, canonicalize bool) ([]byte, int, error) {
 	n, err := consumeNumber(src)
 	if err != nil {
-		return dst, src[n:], err
+		return dst, n, err
 	}
 	if !canonicalize {
 		dst = append(dst, src[:n]...) // copy the number verbatim
-		return dst, src[n:], nil
+		return dst, n, nil
 	}
 
 	// Canonicalize the number per RFC 8785, section 3.2.2.3.
@@ -1124,7 +1184,7 @@ func reformatNumber(dst, src []byte, canonicalize bool) ([]byte, []byte, error) 
 	const maxExactIntegerDigits = 16 // len(strconv.AppendUint(nil, 1<<53, 10))
 	if n < maxExactIntegerDigits && consumeSimpleNumber(src[:n]) == n {
 		dst = append(dst, src[:n]...) // copy the number verbatim
-		return dst, src[n:], nil
+		return dst, n, nil
 	}
 	fv, _ := strconv.ParseFloat(string(src[:n]), 64)
 	switch {
@@ -1135,12 +1195,5 @@ func reformatNumber(dst, src []byte, canonicalize bool) ([]byte, []byte, error) 
 	case math.IsInf(fv, -1):
 		fv = -math.MaxFloat64
 	}
-	return appendNumber(dst, fv, 64), src[n:], nil
-}
-
-// appendHexUint16 appends src to dst as a 4-byte hexadecimal number.
-func appendHexUint16(dst []byte, src uint16) []byte {
-	dst = append(dst, "0000"[1+(bits.Len16(src)-1)/4:]...)
-	dst = strconv.AppendUint(dst, uint64(src), 16)
-	return dst
+	return appendNumber(dst, fv, 64), n, nil
 }

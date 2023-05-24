@@ -30,8 +30,8 @@ func (c *Client) SendAutomationSignal(ctx context.Context, params *SendAutomatio
 
 type SendAutomationSignalInput struct {
 
-	// The unique identifier for an existing Automation execution that you want to send
-	// the signal to.
+	// The unique identifier for an existing Automation execution that you want to
+	// send the signal to.
 	//
 	// This member is required.
 	AutomationExecutionId *string
@@ -110,6 +110,9 @@ func (c *Client) addOperationSendAutomationSignalMiddlewares(stack *middleware.S
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opSendAutomationSignal(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

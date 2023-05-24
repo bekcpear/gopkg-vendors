@@ -32,7 +32,8 @@ func (c *Client) GetParameter(ctx context.Context, params *GetParameterInput, op
 type GetParameterInput struct {
 
 	// The name of the parameter you want to query. To query by parameter label, use
-	// "Name": "name:label". To query by parameter version, use "Name": "name:version".
+	// "Name": "name:label" . To query by parameter version, use "Name": "name:version"
+	// .
 	//
 	// This member is required.
 	Name *string
@@ -104,6 +105,9 @@ func (c *Client) addOperationGetParameterMiddlewares(stack *middleware.Stack, op
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opGetParameter(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

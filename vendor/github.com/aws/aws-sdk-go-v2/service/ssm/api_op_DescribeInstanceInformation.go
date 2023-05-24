@@ -40,7 +40,7 @@ type DescribeInstanceInformationInput struct {
 
 	// One or more filters. Use a filter to return a more specific list of managed
 	// nodes. You can filter based on tags applied to your managed nodes. Use this
-	// Filters data type instead of InstanceInformationFilterList, which is deprecated.
+	// Filters data type instead of InstanceInformationFilterList , which is deprecated.
 	Filters []types.InstanceInformationStringFilter
 
 	// This is a legacy method. We recommend that you don't use this method. Instead,
@@ -124,6 +124,9 @@ func (c *Client) addOperationDescribeInstanceInformationMiddlewares(stack *middl
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeInstanceInformation(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

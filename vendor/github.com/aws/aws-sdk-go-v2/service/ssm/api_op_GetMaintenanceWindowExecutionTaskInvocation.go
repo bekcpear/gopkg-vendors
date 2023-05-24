@@ -74,8 +74,8 @@ type GetMaintenanceWindowExecutionTaskInvocationOutput struct {
 	// The task status for an invocation.
 	Status types.MaintenanceWindowExecutionStatus
 
-	// The details explaining the status. Details are only available for certain status
-	// values.
+	// The details explaining the status. Details are only available for certain
+	// status values.
 	StatusDetails *string
 
 	// The task execution ID.
@@ -145,6 +145,9 @@ func (c *Client) addOperationGetMaintenanceWindowExecutionTaskInvocationMiddlewa
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opGetMaintenanceWindowExecutionTaskInvocation(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

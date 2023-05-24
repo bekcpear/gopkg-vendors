@@ -45,11 +45,8 @@ type CreateOpsMetadataInput struct {
 	// might want to tag an OpsMetadata object to identify an environment or target
 	// Amazon Web Services Region. In this case, you could specify the following
 	// key-value pairs:
-	//
-	// * Key=Environment,Value=Production
-	//
-	// *
-	// Key=Region,Value=us-east-2
+	//   - Key=Environment,Value=Production
+	//   - Key=Region,Value=us-east-2
 	Tags []types.Tag
 
 	noSmithyDocumentSerde
@@ -116,6 +113,9 @@ func (c *Client) addOperationCreateOpsMetadataMiddlewares(stack *middleware.Stac
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateOpsMetadata(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

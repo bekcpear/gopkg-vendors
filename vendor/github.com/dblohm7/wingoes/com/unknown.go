@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build windows
+
 package com
 
 import (
@@ -17,8 +19,8 @@ type ObjectBase struct {
 	GenericObject[IUnknownABI]
 }
 
-// GetIID always returns IID_IUnknown.
-func (o ObjectBase) GetIID() *IID {
+// IID always returns IID_IUnknown.
+func (o ObjectBase) IID() *IID {
 	return IID_IUnknown
 }
 

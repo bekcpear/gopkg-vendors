@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build windows
+
 package com
 
 //go:generate go run golang.org/x/sys/windows/mkwinsyscall -output zsyscall_windows.go mksyscall.go
@@ -17,3 +19,7 @@ package com
 
 // Technically this proc is __cdecl, but since it has 0 args this doesn't matter
 //sys setOaNoCache() = oleaut32.SetOaNoCache
+
+// For the following two functions we use IUnknownABI instead of IStreamABI because it makes the callsites cleaner.
+//sys shCreateMemStream(pInit *byte, cbInit uint32) (stream *IUnknownABI) = shlwapi.SHCreateMemStream
+//sys createStreamOnHGlobal(hglobal internal.HGLOBAL, deleteOnRelease bool, stream **IUnknownABI) (hr wingoes.HRESULT) = ole32.CreateStreamOnHGlobal

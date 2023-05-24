@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sort"
 	"strconv"
 	"sync"
 )
@@ -62,6 +63,10 @@ func (m *seenPointers) leave(v reflect.Value) {
 	delete(*m, p)
 }
 
+func len64[Bytes ~[]byte | ~string](in Bytes) int64 {
+	return int64(len(in))
+}
+
 func makeDefaultArshaler(t reflect.Type) *arshaler {
 	switch t.Kind() {
 	case reflect.Bool:
@@ -70,7 +75,7 @@ func makeDefaultArshaler(t reflect.Type) *arshaler {
 		return makeStringArshaler(t)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return makeIntArshaler(t)
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		return makeUintArshaler(t)
 	case reflect.Float32, reflect.Float64:
 		return makeFloatArshaler(t)
@@ -271,7 +276,7 @@ func makeBytesArshaler(t reflect.Type, fncs *arshaler) *arshaler {
 		k := val.Kind()
 		switch k {
 		case 'n':
-			va.Set(reflect.Zero(t))
+			va.SetZero()
 			return nil
 		case '"':
 			val = unescapeStringMayCopy(val, flags.isVerbatim())
@@ -412,7 +417,7 @@ func makeUintArshaler(t reflect.Type) *arshaler {
 			return nil
 		}
 
-		x := math.Float64frombits(uint64(va.Uint()))
+		x := math.Float64frombits(va.Uint())
 		return enc.writeNumber(x, rawUintNumber, mo.StringifyNumbers)
 	}
 	fncs.unmarshal = func(uo UnmarshalOptions, dec *Decoder, va addressableValue) error {
@@ -450,7 +455,7 @@ func makeUintArshaler(t reflect.Type) *arshaler {
 				err := fmt.Errorf("cannot parse %q as unsigned integer: %w", val, strconv.ErrRange)
 				return &SemanticError{action: "unmarshal", JSONKind: k, GoType: t, Err: err}
 			}
-			va.SetUint(uint64(n))
+			va.SetUint(n)
 			return nil
 		}
 		return &SemanticError{action: "unmarshal", JSONKind: k, GoType: t}
@@ -627,19 +632,78 @@ func makeMapArshaler(t reflect.Type) *arshaler {
 				enc.tokens.last.disableNamespace()
 			}
 
-			// NOTE: Map entries are serialized in a non-deterministic order.
-			// Users that need stable output should call RawValue.Canonicalize.
-			for iter := va.Value.MapRange(); iter.Next(); {
-				k.SetIterKey(iter)
-				if err := marshalKey(mko, enc, k); err != nil {
-					// TODO: If err is errMissingName, then wrap it as a
-					// SemanticError since this key type cannot be serialized
-					// as a JSON string.
-					return err
+			switch {
+			case !mo.Deterministic || n <= 1:
+				for iter := va.Value.MapRange(); iter.Next(); {
+					k.SetIterKey(iter)
+					if err := marshalKey(mko, enc, k); err != nil {
+						// TODO: If err is errMissingName, then wrap it as a
+						// SemanticError since this key type cannot be serialized
+						// as a JSON string.
+						return err
+					}
+					v.SetIterValue(iter)
+					if err := marshalVal(mo, enc, v); err != nil {
+						return err
+					}
 				}
-				v.SetIterValue(iter)
-				if err := marshalVal(mo, enc, v); err != nil {
-					return err
+			case !nonDefaultKey && t.Key().Kind() == reflect.String:
+				names := getStrings(n)
+				for i, iter := 0, va.Value.MapRange(); i < n && iter.Next(); i++ {
+					k.SetIterKey(iter)
+					(*names)[i] = k.String()
+				}
+				names.Sort()
+				for _, name := range *names {
+					if err := enc.WriteToken(String(name)); err != nil {
+						return err
+					}
+					// TODO(https://go.dev/issue/57061): Use v.SetMapIndexOf.
+					k.SetString(name)
+					v.Set(va.MapIndex(k.Value))
+					if err := marshalVal(mo, enc, v); err != nil {
+						return err
+					}
+				}
+				putStrings(names)
+			default:
+				type member struct {
+					name string // unquoted name
+					key  addressableValue
+					val  addressableValue
+				}
+				members := make([]member, n)
+				keys := reflect.MakeSlice(reflect.SliceOf(t.Key()), n, n)
+				vals := reflect.MakeSlice(reflect.SliceOf(t.Elem()), n, n)
+				for i, iter := 0, va.Value.MapRange(); i < n && iter.Next(); i++ {
+					// Marshal the member name.
+					k := addressableValue{keys.Index(i)} // indexed slice element is always addressable
+					k.SetIterKey(iter)
+					v := addressableValue{vals.Index(i)} // indexed slice element is always addressable
+					v.SetIterValue(iter)
+					if err := marshalKey(mko, enc, k); err != nil {
+						// TODO: If err is errMissingName, then wrap it as a
+						// SemanticError since this key type cannot be serialized
+						// as a JSON string.
+						return err
+					}
+					name := enc.unwriteOnlyObjectMemberName()
+					members[i] = member{name, k, v}
+				}
+				// TODO: If AllowDuplicateNames is enabled, then sort according
+				// to reflect.Value as well if the names are equal.
+				// See internal/fmtsort.
+				// TODO(https://go.dev/issue/47619): Use slices.SortFunc instead.
+				sort.Slice(members, func(i, j int) bool {
+					return lessUTF16(members[i].name, members[j].name)
+				})
+				for _, member := range members {
+					if err := enc.WriteToken(String(member.name)); err != nil {
+						return err
+					}
+					if err := marshalVal(mo, enc, member.val); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -663,7 +727,7 @@ func makeMapArshaler(t reflect.Type) *arshaler {
 		k := tok.Kind()
 		switch k {
 		case 'n':
-			va.Set(reflect.Zero(t))
+			va.SetZero()
 			return nil
 		case '{':
 			once.Do(init)
@@ -707,7 +771,7 @@ func makeMapArshaler(t reflect.Type) *arshaler {
 			}
 
 			for dec.PeekKind() != '}' {
-				k.Set(reflect.Zero(t.Key()))
+				k.SetZero()
 				if err := unmarshalKey(uko, dec, k); err != nil {
 					return err
 				}
@@ -720,12 +784,12 @@ func makeMapArshaler(t reflect.Type) *arshaler {
 					if !dec.options.AllowDuplicateNames && (!seen.IsValid() || seen.MapIndex(k.Value).IsValid()) {
 						// TODO: Unread the object name.
 						name := dec.previousBuffer()
-						err := &SyntacticError{str: "duplicate name " + string(name) + " in object"}
-						return err.withOffset(dec.InputOffset() - int64(len(name)))
+						err := newDuplicateNameError(name)
+						return err.withOffset(dec.InputOffset() - len64(name))
 					}
 					v.Set(v2)
 				} else {
-					v.Set(reflect.Zero(v.Type()))
+					v.SetZero()
 				}
 				err := unmarshalVal(uo, dec, v)
 				va.SetMapIndex(k.Value, v.Value)
@@ -754,7 +818,7 @@ func mapKeyWithUniqueRepresentation(k reflect.Kind, allowInvalidUTF8 bool) bool 
 	switch k {
 	case reflect.Bool,
 		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		return true
 	case reflect.String:
 		// For strings, we have to be careful since names with invalid UTF-8
@@ -938,7 +1002,7 @@ func makeStructArshaler(t reflect.Type) *arshaler {
 		k := tok.Kind()
 		switch k {
 		case 'n':
-			va.Set(reflect.Zero(t))
+			va.SetZero()
 			return nil
 		case '{':
 			once.Do(init)
@@ -971,8 +1035,8 @@ func makeStructArshaler(t reflect.Type) *arshaler {
 						}
 						if !dec.options.AllowDuplicateNames && !dec.namespaces.last().insertUnquoted(name) {
 							// TODO: Unread the object name.
-							err := &SyntacticError{str: "duplicate name " + string(val) + " in object"}
-							return err.withOffset(dec.InputOffset() - int64(len(val)))
+							err := newDuplicateNameError(val)
+							return err.withOffset(dec.InputOffset() - len64(val))
 						}
 
 						if fields.inlinedFallback == nil {
@@ -991,8 +1055,8 @@ func makeStructArshaler(t reflect.Type) *arshaler {
 				}
 				if !dec.options.AllowDuplicateNames && !seenIdxs.insert(uint(f.id)) {
 					// TODO: Unread the object name.
-					err := &SyntacticError{str: "duplicate name " + string(val) + " in object"}
-					return err.withOffset(dec.InputOffset() - int64(len(val)))
+					err := newDuplicateNameError(val)
+					return err.withOffset(dec.InputOffset() - len64(val))
 				}
 
 				// Process the object member value.
@@ -1127,7 +1191,7 @@ func makeSliceArshaler(t reflect.Type) *arshaler {
 		k := tok.Kind()
 		switch k {
 		case 'n':
-			va.Set(reflect.Zero(t))
+			va.SetZero()
 			return nil
 		case '[':
 			once.Do(init)
@@ -1143,16 +1207,15 @@ func makeSliceArshaler(t reflect.Type) *arshaler {
 			var i int
 			for dec.PeekKind() != ']' {
 				if i == cap {
-					// TODO(https://go.dev/issue/48000): Use reflect.Value.Append.
-					va.Set(reflect.Append(va.Value, reflect.Zero(t.Elem())))
+					va.Value.Grow(1)
 					cap = va.Cap()
 					va.SetLen(cap)
-					mustZero = false // append guarantees that unused capacity is zero-initialized
+					mustZero = false // reflect.Value.Grow ensures new capacity is zero-initialized
 				}
 				v := addressableValue{va.Index(i)} // indexed slice element is always addressable
 				i++
 				if mustZero {
-					v.Set(reflect.Zero(t.Elem()))
+					v.SetZero()
 				}
 				if err := unmarshal(uo, dec, v); err != nil {
 					va.SetLen(i)
@@ -1218,7 +1281,7 @@ func makeArrayArshaler(t reflect.Type) *arshaler {
 		k := tok.Kind()
 		switch k {
 		case 'n':
-			va.Set(reflect.Zero(t))
+			va.SetZero()
 			return nil
 		case '[':
 			once.Do(init)
@@ -1233,7 +1296,7 @@ func makeArrayArshaler(t reflect.Type) *arshaler {
 					return &SemanticError{action: "unmarshal", GoType: t, Err: err}
 				}
 				v := addressableValue{va.Index(i)} // indexed array element is addressable if array is addressable
-				v.Set(reflect.Zero(v.Type()))
+				v.SetZero()
 				if err := unmarshal(uo, dec, v); err != nil {
 					return err
 				}
@@ -1289,7 +1352,7 @@ func makePointerArshaler(t reflect.Type) *arshaler {
 			if _, err := dec.ReadToken(); err != nil {
 				return err
 			}
-			va.Set(reflect.Zero(t))
+			va.SetZero()
 			return nil
 		}
 		once.Do(init)
@@ -1339,7 +1402,7 @@ func makeInterfaceArshaler(t reflect.Type) *arshaler {
 			if _, err := dec.ReadToken(); err != nil {
 				return err
 			}
-			va.Set(reflect.Zero(t))
+			va.SetZero()
 			return nil
 		}
 		var v addressableValue

@@ -12,8 +12,8 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Amazon Web Services Systems Manager calls this API operation when displaying all
-// Application Manager OpsMetadata objects or blobs.
+// Amazon Web Services Systems Manager calls this API operation when displaying
+// all Application Manager OpsMetadata objects or blobs.
 func (c *Client) ListOpsMetadata(ctx context.Context, params *ListOpsMetadataInput, optFns ...func(*Options)) (*ListOpsMetadataOutput, error) {
 	if params == nil {
 		params = &ListOpsMetadataInput{}
@@ -109,6 +109,9 @@ func (c *Client) addOperationListOpsMetadataMiddlewares(stack *middleware.Stack,
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opListOpsMetadata(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

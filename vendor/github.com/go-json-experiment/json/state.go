@@ -15,9 +15,14 @@ var (
 	errMissingValue  = &SyntacticError{str: "missing value after object name"}
 	errMissingComma  = &SyntacticError{str: "missing character ',' after object or array value"}
 	errMismatchDelim = &SyntacticError{str: "mismatching structural token for object or array"}
+	errMaxDepth      = &SyntacticError{str: "exceeded max depth"}
 )
 
 const errInvalidNamespace = jsonError("object namespace is in an invalid state")
+
+// Per RFC 8259, section 9, implementations may enforce a maximum depth.
+// Such a limit is necessary to prevent stack overflows.
+const maxNestingDepth = 10000
 
 type state struct {
 	// tokens validates whether the next token kind is valid.
@@ -92,7 +97,7 @@ func (s state) appendStackPointer(b []byte) []byte {
 // The top-level virtual JSON array is special in that it doesn't require commas
 // between each JSON value.
 //
-// For performance, most methods are carefully written to be inlineable.
+// For performance, most methods are carefully written to be inlinable.
 // The zero value is a valid state machine ready for use.
 type stateMachine struct {
 	stack []stateEntry
@@ -170,6 +175,8 @@ func (m *stateMachine) pushObject() error {
 		return errMissingName
 	case !m.last.isValidNamespace():
 		return errInvalidNamespace
+	case len(m.stack) == maxNestingDepth:
+		return errMaxDepth
 	default:
 		m.last.increment()
 		m.stack = append(m.stack, m.last)
@@ -203,6 +210,8 @@ func (m *stateMachine) pushArray() error {
 		return errMissingName
 	case !m.last.isValidNamespace():
 		return errInvalidNamespace
+	case len(m.stack) == maxNestingDepth:
+		return errMaxDepth
 	default:
 		m.last.increment()
 		m.stack = append(m.stack, m.last)
@@ -721,21 +730,21 @@ func (s *uintSet) has(i uint) bool {
 		return s.lo.has(i)
 	} else {
 		i -= 64
-		iHi, iLo := int(i/64), uint(i%64)
+		iHi, iLo := int(i/64), i%64
 		return iHi < len(s.hi) && s.hi[iHi].has(iLo)
 	}
 }
 
 // insert inserts i into the set and reports whether it was the first insertion.
 func (s *uintSet) insert(i uint) bool {
-	// TODO: Make this inlineable at least for the lower 64-bit case.
+	// TODO: Make this inlinable at least for the lower 64-bit case.
 	if i < 64 {
 		has := s.lo.has(i)
 		s.lo.set(i)
 		return !has
 	} else {
 		i -= 64
-		iHi, iLo := int(i/64), uint(i%64)
+		iHi, iLo := int(i/64), i%64
 		if iHi >= len(s.hi) {
 			s.hi = append(s.hi, make([]uintSet64, iHi+1-len(s.hi))...)
 			s.hi = s.hi[:cap(s.hi)]

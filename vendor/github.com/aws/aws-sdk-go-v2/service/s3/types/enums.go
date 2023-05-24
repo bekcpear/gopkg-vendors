@@ -88,6 +88,7 @@ const (
 	BucketLocationConstraintApSouth1     BucketLocationConstraint = "ap-south-1"
 	BucketLocationConstraintApSoutheast1 BucketLocationConstraint = "ap-southeast-1"
 	BucketLocationConstraintApSoutheast2 BucketLocationConstraint = "ap-southeast-2"
+	BucketLocationConstraintApSoutheast3 BucketLocationConstraint = "ap-southeast-3"
 	BucketLocationConstraintCaCentral1   BucketLocationConstraint = "ca-central-1"
 	BucketLocationConstraintCnNorth1     BucketLocationConstraint = "cn-north-1"
 	BucketLocationConstraintCnNorthwest1 BucketLocationConstraint = "cn-northwest-1"
@@ -107,9 +108,9 @@ const (
 	BucketLocationConstraintUsWest2      BucketLocationConstraint = "us-west-2"
 )
 
-// Values returns all known values for BucketLocationConstraint. Note that this can
-// be expanded in the future, and so it is only as up to date as the client. The
-// ordering of this slice is not guaranteed to be stable across updates.
+// Values returns all known values for BucketLocationConstraint. Note that this
+// can be expanded in the future, and so it is only as up to date as the client.
+// The ordering of this slice is not guaranteed to be stable across updates.
 func (BucketLocationConstraint) Values() []BucketLocationConstraint {
 	return []BucketLocationConstraint{
 		"af-south-1",
@@ -120,6 +121,7 @@ func (BucketLocationConstraint) Values() []BucketLocationConstraint {
 		"ap-south-1",
 		"ap-southeast-1",
 		"ap-southeast-2",
+		"ap-southeast-3",
 		"ca-central-1",
 		"cn-north-1",
 		"cn-northwest-1",
@@ -178,6 +180,44 @@ func (BucketVersioningStatus) Values() []BucketVersioningStatus {
 	}
 }
 
+type ChecksumAlgorithm string
+
+// Enum values for ChecksumAlgorithm
+const (
+	ChecksumAlgorithmCrc32  ChecksumAlgorithm = "CRC32"
+	ChecksumAlgorithmCrc32c ChecksumAlgorithm = "CRC32C"
+	ChecksumAlgorithmSha1   ChecksumAlgorithm = "SHA1"
+	ChecksumAlgorithmSha256 ChecksumAlgorithm = "SHA256"
+)
+
+// Values returns all known values for ChecksumAlgorithm. Note that this can be
+// expanded in the future, and so it is only as up to date as the client. The
+// ordering of this slice is not guaranteed to be stable across updates.
+func (ChecksumAlgorithm) Values() []ChecksumAlgorithm {
+	return []ChecksumAlgorithm{
+		"CRC32",
+		"CRC32C",
+		"SHA1",
+		"SHA256",
+	}
+}
+
+type ChecksumMode string
+
+// Enum values for ChecksumMode
+const (
+	ChecksumModeEnabled ChecksumMode = "ENABLED"
+)
+
+// Values returns all known values for ChecksumMode. Note that this can be
+// expanded in the future, and so it is only as up to date as the client. The
+// ordering of this slice is not guaranteed to be stable across updates.
+func (ChecksumMode) Values() []ChecksumMode {
+	return []ChecksumMode{
+		"ENABLED",
+	}
+}
+
 type CompressionType string
 
 // Enum values for CompressionType
@@ -224,9 +264,9 @@ const (
 	EncodingTypeUrl EncodingType = "url"
 )
 
-// Values returns all known values for EncodingType. Note that this can be expanded
-// in the future, and so it is only as up to date as the client. The ordering of
-// this slice is not guaranteed to be stable across updates.
+// Values returns all known values for EncodingType. Note that this can be
+// expanded in the future, and so it is only as up to date as the client. The
+// ordering of this slice is not guaranteed to be stable across updates.
 func (EncodingType) Values() []EncodingType {
 	return []EncodingType{
 		"url",
@@ -235,8 +275,39 @@ func (EncodingType) Values() []EncodingType {
 
 type Event string
 
-// Values returns all known values for Event. Note that this can be expanded in the
-// future, and so it is only as up to date as the client. The ordering of this
+// Enum values for Event
+const (
+	EventS3ReducedRedundancyLostObject                  Event = "s3:ReducedRedundancyLostObject"
+	EventS3ObjectCreated                                Event = "s3:ObjectCreated:*"
+	EventS3ObjectCreatedPut                             Event = "s3:ObjectCreated:Put"
+	EventS3ObjectCreatedPost                            Event = "s3:ObjectCreated:Post"
+	EventS3ObjectCreatedCopy                            Event = "s3:ObjectCreated:Copy"
+	EventS3ObjectCreatedCompleteMultipartUpload         Event = "s3:ObjectCreated:CompleteMultipartUpload"
+	EventS3ObjectRemoved                                Event = "s3:ObjectRemoved:*"
+	EventS3ObjectRemovedDelete                          Event = "s3:ObjectRemoved:Delete"
+	EventS3ObjectRemovedDeleteMarkerCreated             Event = "s3:ObjectRemoved:DeleteMarkerCreated"
+	EventS3ObjectRestore                                Event = "s3:ObjectRestore:*"
+	EventS3ObjectRestorePost                            Event = "s3:ObjectRestore:Post"
+	EventS3ObjectRestoreCompleted                       Event = "s3:ObjectRestore:Completed"
+	EventS3Replication                                  Event = "s3:Replication:*"
+	EventS3ReplicationOperationFailedReplication        Event = "s3:Replication:OperationFailedReplication"
+	EventS3ReplicationOperationNotTracked               Event = "s3:Replication:OperationNotTracked"
+	EventS3ReplicationOperationMissedThreshold          Event = "s3:Replication:OperationMissedThreshold"
+	EventS3ReplicationOperationReplicatedAfterThreshold Event = "s3:Replication:OperationReplicatedAfterThreshold"
+	EventS3ObjectRestoreDelete                          Event = "s3:ObjectRestore:Delete"
+	EventS3LifecycleTransition                          Event = "s3:LifecycleTransition"
+	EventS3IntelligentTiering                           Event = "s3:IntelligentTiering"
+	EventS3ObjectAclPut                                 Event = "s3:ObjectAcl:Put"
+	EventS3LifecycleExpiration                          Event = "s3:LifecycleExpiration:*"
+	EventS3LifecycleExpirationDelete                    Event = "s3:LifecycleExpiration:Delete"
+	EventS3LifecycleExpirationDeleteMarkerCreated       Event = "s3:LifecycleExpiration:DeleteMarkerCreated"
+	EventS3ObjectTagging                                Event = "s3:ObjectTagging:*"
+	EventS3ObjectTaggingPut                             Event = "s3:ObjectTagging:Put"
+	EventS3ObjectTaggingDelete                          Event = "s3:ObjectTagging:Delete"
+)
+
+// Values returns all known values for Event. Note that this can be expanded in
+// the future, and so it is only as up to date as the client. The ordering of this
 // slice is not guaranteed to be stable across updates.
 func (Event) Values() []Event {
 	return []Event{
@@ -369,9 +440,10 @@ const (
 	IntelligentTieringAccessTierDeepArchiveAccess IntelligentTieringAccessTier = "DEEP_ARCHIVE_ACCESS"
 )
 
-// Values returns all known values for IntelligentTieringAccessTier. Note that this
-// can be expanded in the future, and so it is only as up to date as the client.
-// The ordering of this slice is not guaranteed to be stable across updates.
+// Values returns all known values for IntelligentTieringAccessTier. Note that
+// this can be expanded in the future, and so it is only as up to date as the
+// client. The ordering of this slice is not guaranteed to be stable across
+// updates.
 func (IntelligentTieringAccessTier) Values() []IntelligentTieringAccessTier {
 	return []IntelligentTieringAccessTier{
 		"ARCHIVE_ACCESS",
@@ -387,9 +459,9 @@ const (
 	IntelligentTieringStatusDisabled IntelligentTieringStatus = "Disabled"
 )
 
-// Values returns all known values for IntelligentTieringStatus. Note that this can
-// be expanded in the future, and so it is only as up to date as the client. The
-// ordering of this slice is not guaranteed to be stable across updates.
+// Values returns all known values for IntelligentTieringStatus. Note that this
+// can be expanded in the future, and so it is only as up to date as the client.
+// The ordering of this slice is not guaranteed to be stable across updates.
 func (IntelligentTieringStatus) Values() []IntelligentTieringStatus {
 	return []IntelligentTieringStatus{
 		"Enabled",
@@ -470,6 +542,7 @@ const (
 	InventoryOptionalFieldObjectLockLegalHoldStatus    InventoryOptionalField = "ObjectLockLegalHoldStatus"
 	InventoryOptionalFieldIntelligentTieringAccessTier InventoryOptionalField = "IntelligentTieringAccessTier"
 	InventoryOptionalFieldBucketKeyStatus              InventoryOptionalField = "BucketKeyStatus"
+	InventoryOptionalFieldChecksumAlgorithm            InventoryOptionalField = "ChecksumAlgorithm"
 )
 
 // Values returns all known values for InventoryOptionalField. Note that this can
@@ -489,6 +562,7 @@ func (InventoryOptionalField) Values() []InventoryOptionalField {
 		"ObjectLockLegalHoldStatus",
 		"IntelligentTieringAccessTier",
 		"BucketKeyStatus",
+		"ChecksumAlgorithm",
 	}
 }
 
@@ -554,9 +628,9 @@ const (
 	MFADeleteDisabled MFADelete = "Disabled"
 )
 
-// Values returns all known values for MFADelete. Note that this can be expanded in
-// the future, and so it is only as up to date as the client. The ordering of this
-// slice is not guaranteed to be stable across updates.
+// Values returns all known values for MFADelete. Note that this can be expanded
+// in the future, and so it is only as up to date as the client. The ordering of
+// this slice is not guaranteed to be stable across updates.
 func (MFADelete) Values() []MFADelete {
 	return []MFADelete{
 		"Enabled",
@@ -579,6 +653,30 @@ func (MFADeleteStatus) Values() []MFADeleteStatus {
 	return []MFADeleteStatus{
 		"Enabled",
 		"Disabled",
+	}
+}
+
+type ObjectAttributes string
+
+// Enum values for ObjectAttributes
+const (
+	ObjectAttributesEtag         ObjectAttributes = "ETag"
+	ObjectAttributesChecksum     ObjectAttributes = "Checksum"
+	ObjectAttributesObjectParts  ObjectAttributes = "ObjectParts"
+	ObjectAttributesStorageClass ObjectAttributes = "StorageClass"
+	ObjectAttributesObjectSize   ObjectAttributes = "ObjectSize"
+)
+
+// Values returns all known values for ObjectAttributes. Note that this can be
+// expanded in the future, and so it is only as up to date as the client. The
+// ordering of this slice is not guaranteed to be stable across updates.
+func (ObjectAttributes) Values() []ObjectAttributes {
+	return []ObjectAttributes{
+		"ETag",
+		"Checksum",
+		"ObjectParts",
+		"StorageClass",
+		"ObjectSize",
 	}
 }
 
@@ -713,6 +811,7 @@ const (
 	ObjectStorageClassDeepArchive        ObjectStorageClass = "DEEP_ARCHIVE"
 	ObjectStorageClassOutposts           ObjectStorageClass = "OUTPOSTS"
 	ObjectStorageClassGlacierIr          ObjectStorageClass = "GLACIER_IR"
+	ObjectStorageClassSnow               ObjectStorageClass = "SNOW"
 )
 
 // Values returns all known values for ObjectStorageClass. Note that this can be
@@ -729,6 +828,7 @@ func (ObjectStorageClass) Values() []ObjectStorageClass {
 		"DEEP_ARCHIVE",
 		"OUTPOSTS",
 		"GLACIER_IR",
+		"SNOW",
 	}
 }
 
@@ -772,8 +872,8 @@ const (
 	PayerBucketOwner Payer = "BucketOwner"
 )
 
-// Values returns all known values for Payer. Note that this can be expanded in the
-// future, and so it is only as up to date as the client. The ordering of this
+// Values returns all known values for Payer. Note that this can be expanded in
+// the future, and so it is only as up to date as the client. The ordering of this
 // slice is not guaranteed to be stable across updates.
 func (Payer) Values() []Payer {
 	return []Payer{
@@ -868,8 +968,8 @@ const (
 	ReplicationRuleStatusDisabled ReplicationRuleStatus = "Disabled"
 )
 
-// Values returns all known values for ReplicationRuleStatus. Note that this can be
-// expanded in the future, and so it is only as up to date as the client. The
+// Values returns all known values for ReplicationRuleStatus. Note that this can
+// be expanded in the future, and so it is only as up to date as the client. The
 // ordering of this slice is not guaranteed to be stable across updates.
 func (ReplicationRuleStatus) Values() []ReplicationRuleStatus {
 	return []ReplicationRuleStatus{
@@ -908,8 +1008,8 @@ const (
 	ReplicationTimeStatusDisabled ReplicationTimeStatus = "Disabled"
 )
 
-// Values returns all known values for ReplicationTimeStatus. Note that this can be
-// expanded in the future, and so it is only as up to date as the client. The
+// Values returns all known values for ReplicationTimeStatus. Note that this can
+// be expanded in the future, and so it is only as up to date as the client. The
 // ordering of this slice is not guaranteed to be stable across updates.
 func (ReplicationTimeStatus) Values() []ReplicationTimeStatus {
 	return []ReplicationTimeStatus{
@@ -941,9 +1041,9 @@ const (
 	RequestPayerRequester RequestPayer = "requester"
 )
 
-// Values returns all known values for RequestPayer. Note that this can be expanded
-// in the future, and so it is only as up to date as the client. The ordering of
-// this slice is not guaranteed to be stable across updates.
+// Values returns all known values for RequestPayer. Note that this can be
+// expanded in the future, and so it is only as up to date as the client. The
+// ordering of this slice is not guaranteed to be stable across updates.
 func (RequestPayer) Values() []RequestPayer {
 	return []RequestPayer{
 		"requester",
@@ -992,9 +1092,10 @@ const (
 	SseKmsEncryptedObjectsStatusDisabled SseKmsEncryptedObjectsStatus = "Disabled"
 )
 
-// Values returns all known values for SseKmsEncryptedObjectsStatus. Note that this
-// can be expanded in the future, and so it is only as up to date as the client.
-// The ordering of this slice is not guaranteed to be stable across updates.
+// Values returns all known values for SseKmsEncryptedObjectsStatus. Note that
+// this can be expanded in the future, and so it is only as up to date as the
+// client. The ordering of this slice is not guaranteed to be stable across
+// updates.
 func (SseKmsEncryptedObjectsStatus) Values() []SseKmsEncryptedObjectsStatus {
 	return []SseKmsEncryptedObjectsStatus{
 		"Enabled",
@@ -1015,11 +1116,12 @@ const (
 	StorageClassDeepArchive        StorageClass = "DEEP_ARCHIVE"
 	StorageClassOutposts           StorageClass = "OUTPOSTS"
 	StorageClassGlacierIr          StorageClass = "GLACIER_IR"
+	StorageClassSnow               StorageClass = "SNOW"
 )
 
-// Values returns all known values for StorageClass. Note that this can be expanded
-// in the future, and so it is only as up to date as the client. The ordering of
-// this slice is not guaranteed to be stable across updates.
+// Values returns all known values for StorageClass. Note that this can be
+// expanded in the future, and so it is only as up to date as the client. The
+// ordering of this slice is not guaranteed to be stable across updates.
 func (StorageClass) Values() []StorageClass {
 	return []StorageClass{
 		"STANDARD",
@@ -1031,6 +1133,7 @@ func (StorageClass) Values() []StorageClass {
 		"DEEP_ARCHIVE",
 		"OUTPOSTS",
 		"GLACIER_IR",
+		"SNOW",
 	}
 }
 
@@ -1041,8 +1144,8 @@ const (
 	StorageClassAnalysisSchemaVersionV1 StorageClassAnalysisSchemaVersion = "V_1"
 )
 
-// Values returns all known values for StorageClassAnalysisSchemaVersion. Note that
-// this can be expanded in the future, and so it is only as up to date as the
+// Values returns all known values for StorageClassAnalysisSchemaVersion. Note
+// that this can be expanded in the future, and so it is only as up to date as the
 // client. The ordering of this slice is not guaranteed to be stable across
 // updates.
 func (StorageClassAnalysisSchemaVersion) Values() []StorageClassAnalysisSchemaVersion {

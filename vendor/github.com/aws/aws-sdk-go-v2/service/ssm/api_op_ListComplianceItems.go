@@ -49,7 +49,7 @@ type ListComplianceItemsInput struct {
 	ResourceIds []string
 
 	// The type of resource from which to get compliance information. Currently, the
-	// only supported resource type is ManagedInstance.
+	// only supported resource type is ManagedInstance .
 	ResourceTypes []string
 
 	noSmithyDocumentSerde
@@ -118,6 +118,9 @@ func (c *Client) addOperationListComplianceItemsMiddlewares(stack *middleware.St
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opListComplianceItems(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -130,8 +133,8 @@ func (c *Client) addOperationListComplianceItemsMiddlewares(stack *middleware.St
 	return nil
 }
 
-// ListComplianceItemsAPIClient is a client that implements the ListComplianceItems
-// operation.
+// ListComplianceItemsAPIClient is a client that implements the
+// ListComplianceItems operation.
 type ListComplianceItemsAPIClient interface {
 	ListComplianceItems(context.Context, *ListComplianceItemsInput, ...func(*Options)) (*ListComplianceItemsOutput, error)
 }

@@ -38,7 +38,7 @@ type ListCommandInvocationsInput struct {
 	CommandId *string
 
 	// (Optional) If set this returns the response of the command executions and any
-	// command output. The default value is false.
+	// command output. The default value is false .
 	Details bool
 
 	// (Optional) One or more filters. Use a filter to return a more specific list of
@@ -124,6 +124,9 @@ func (c *Client) addOperationListCommandInvocationsMiddlewares(stack *middleware
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opListCommandInvocations(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

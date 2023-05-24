@@ -15,7 +15,7 @@ import (
 // full patch baseline Amazon Resource Name (ARN) as the baseline ID value. For
 // example, for CentOS, specify
 // arn:aws:ssm:us-east-2:733109147000:patchbaseline/pb-0574b43a65ea646ed instead of
-// pb-0574b43a65ea646ed.
+// pb-0574b43a65ea646ed .
 func (c *Client) RegisterDefaultPatchBaseline(ctx context.Context, params *RegisterDefaultPatchBaselineInput, optFns ...func(*Options)) (*RegisterDefaultPatchBaselineOutput, error) {
 	if params == nil {
 		params = &RegisterDefaultPatchBaselineInput{}
@@ -101,6 +101,9 @@ func (c *Client) addOperationRegisterDefaultPatchBaselineMiddlewares(stack *midd
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opRegisterDefaultPatchBaseline(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

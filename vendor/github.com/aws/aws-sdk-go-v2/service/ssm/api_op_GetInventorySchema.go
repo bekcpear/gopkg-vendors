@@ -33,7 +33,7 @@ type GetInventorySchemaInput struct {
 
 	// Returns inventory schemas that support aggregation. For example, this call
 	// returns the AWS:InstanceInformation type, because it supports aggregation based
-	// on the PlatformName, PlatformType, and PlatformVersion attributes.
+	// on the PlatformName , PlatformType , and PlatformVersion attributes.
 	Aggregator bool
 
 	// The maximum number of items to return for this call. The call also returns a
@@ -114,6 +114,9 @@ func (c *Client) addOperationGetInventorySchemaMiddlewares(stack *middleware.Sta
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opGetInventorySchema(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

@@ -59,7 +59,7 @@ type PutResourcePolicyOutput struct {
 	// ID of the current policy version.
 	PolicyHash *string
 
-	// The policy ID. To update a policy, you must specify PolicyId and PolicyHash.
+	// The policy ID. To update a policy, you must specify PolicyId and PolicyHash .
 	PolicyId *string
 
 	// Metadata pertaining to the operation's result.
@@ -117,6 +117,9 @@ func (c *Client) addOperationPutResourcePolicyMiddlewares(stack *middleware.Stac
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opPutResourcePolicy(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

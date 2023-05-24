@@ -119,6 +119,9 @@ func (c *Client) addOperationGetParameterHistoryMiddlewares(stack *middleware.St
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opGetParameterHistory(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -131,8 +134,8 @@ func (c *Client) addOperationGetParameterHistoryMiddlewares(stack *middleware.St
 	return nil
 }
 
-// GetParameterHistoryAPIClient is a client that implements the GetParameterHistory
-// operation.
+// GetParameterHistoryAPIClient is a client that implements the
+// GetParameterHistory operation.
 type GetParameterHistoryAPIClient interface {
 	GetParameterHistory(context.Context, *GetParameterHistoryInput, ...func(*Options)) (*GetParameterHistoryOutput, error)
 }

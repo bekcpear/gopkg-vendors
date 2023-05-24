@@ -2,18 +2,15 @@ package chglog
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 // Parse parse a changelog.yml into ChangeLogEntries.
 func Parse(file string) (entries ChangeLogEntries, err error) {
-	var (
-		body []byte
-	)
-	body, err = ioutil.ReadFile(file) // nolint: gosec,gocritic
+	var body []byte
+	body, err = os.ReadFile(file) // nolint: gosec,gocritic
 	switch {
 	case os.IsNotExist(err):
 		return make(ChangeLogEntries, 0), nil
@@ -32,5 +29,5 @@ func Parse(file string) (entries ChangeLogEntries, err error) {
 func (c *ChangeLogEntries) Save(file string) (err error) {
 	data, _ := yaml.Marshal(c)
 	// nolint: gosec,gocritic
-	return ioutil.WriteFile(file, data, 0644)
+	return os.WriteFile(file, data, 0o644)
 }

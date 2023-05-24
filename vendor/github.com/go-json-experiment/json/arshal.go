@@ -5,6 +5,7 @@
 package json
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"reflect"
@@ -34,6 +35,13 @@ type MarshalOptions struct {
 	// unknown JSON object members.
 	DiscardUnknownMembers bool
 
+	// Deterministic specifies that the same input value will be serialized
+	// as the exact same output bytes. Different processes of
+	// the same program will serialize equal values to the same bytes,
+	// but different versions of the same program are not guaranteed
+	// to produce the exact same sequence of bytes.
+	Deterministic bool
+
 	// formatDepth is the depth at which we respect the format flag.
 	formatDepth int
 	// format is custom formatting for the value at the specified depth.
@@ -60,8 +68,7 @@ func (mo MarshalOptions) Marshal(eo EncodeOptions, in any) (out []byte, err erro
 	defer putBufferedEncoder(enc)
 	enc.options.omitTopLevelNewline = true
 	err = mo.MarshalNext(enc, in)
-	// TODO(https://go.dev/issue/45038): Use bytes.Clone.
-	return append([]byte(nil), enc.buf...), err
+	return bytes.Clone(enc.buf), err
 }
 
 // MarshalFull serializes a Go value into an io.Writer according to the provided

@@ -12,10 +12,10 @@ import (
 )
 
 // Updates the status of the Amazon Web Services Systems Manager document (SSM
-// document) associated with the specified managed node. UpdateAssociationStatus is
-// primarily used by the Amazon Web Services Systems Manager Agent (SSM Agent) to
-// report status updates about your associations and is only used for associations
-// created with the InstanceId legacy parameter.
+// document) associated with the specified managed node. UpdateAssociationStatus
+// is primarily used by the Amazon Web Services Systems Manager Agent (SSM Agent)
+// to report status updates about your associations and is only used for
+// associations created with the InstanceId legacy parameter.
 func (c *Client) UpdateAssociationStatus(ctx context.Context, params *UpdateAssociationStatusInput, optFns ...func(*Options)) (*UpdateAssociationStatusOutput, error) {
 	if params == nil {
 		params = &UpdateAssociationStatusInput{}
@@ -111,6 +111,9 @@ func (c *Client) addOperationUpdateAssociationStatusMiddlewares(stack *middlewar
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opUpdateAssociationStatus(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

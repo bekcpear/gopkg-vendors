@@ -121,6 +121,9 @@ func (c *Client) addOperationDescribeAssociationExecutionTargetsMiddlewares(stac
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeAssociationExecutionTargets(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -141,8 +144,8 @@ type DescribeAssociationExecutionTargetsAPIClient interface {
 
 var _ DescribeAssociationExecutionTargetsAPIClient = (*Client)(nil)
 
-// DescribeAssociationExecutionTargetsPaginatorOptions is the paginator options for
-// DescribeAssociationExecutionTargets
+// DescribeAssociationExecutionTargetsPaginatorOptions is the paginator options
+// for DescribeAssociationExecutionTargets
 type DescribeAssociationExecutionTargetsPaginatorOptions struct {
 	// The maximum number of items to return for this call. The call also returns a
 	// token that you can specify in a subsequent call to get the next set of results.

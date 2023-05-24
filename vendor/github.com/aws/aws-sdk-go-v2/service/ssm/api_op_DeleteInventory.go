@@ -70,8 +70,7 @@ type DeleteInventoryOutput struct {
 	DeletionId *string
 
 	// A summary of the delete operation. For more information about this summary, see
-	// Deleting custom inventory
-	// (https://docs.aws.amazon.com/systems-manager/latest/userguide/sysman-inventory-custom.html#sysman-inventory-delete-summary)
+	// Deleting custom inventory (https://docs.aws.amazon.com/systems-manager/latest/userguide/sysman-inventory-custom.html#sysman-inventory-delete-summary)
 	// in the Amazon Web Services Systems Manager User Guide.
 	DeletionSummary *types.InventoryDeletionSummary
 
@@ -136,6 +135,9 @@ func (c *Client) addOperationDeleteInventoryMiddlewares(stack *middleware.Stack,
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDeleteInventory(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

@@ -37,9 +37,9 @@ type ListCommandsInput struct {
 	// results.
 	Filters []types.CommandFilter
 
-	// (Optional) Lists commands issued against this managed node ID. You can't specify
-	// a managed node ID in the same command that you specify Status = Pending. This is
-	// because the command hasn't reached the managed node yet.
+	// (Optional) Lists commands issued against this managed node ID. You can't
+	// specify a managed node ID in the same command that you specify Status = Pending
+	// . This is because the command hasn't reached the managed node yet.
 	InstanceId *string
 
 	// (Optional) The maximum number of items to return for this call. The call also
@@ -118,6 +118,9 @@ func (c *Client) addOperationListCommandsMiddlewares(stack *middleware.Stack, op
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opListCommands(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

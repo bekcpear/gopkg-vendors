@@ -10,8 +10,8 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Runs an association immediately and only one time. This operation can be helpful
-// when troubleshooting associations.
+// Runs an association immediately and only one time. This operation can be
+// helpful when troubleshooting associations.
 func (c *Client) StartAssociationsOnce(ctx context.Context, params *StartAssociationsOnceInput, optFns ...func(*Options)) (*StartAssociationsOnceOutput, error) {
 	if params == nil {
 		params = &StartAssociationsOnceInput{}
@@ -93,6 +93,9 @@ func (c *Client) addOperationStartAssociationsOnceMiddlewares(stack *middleware.
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opStartAssociationsOnce(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

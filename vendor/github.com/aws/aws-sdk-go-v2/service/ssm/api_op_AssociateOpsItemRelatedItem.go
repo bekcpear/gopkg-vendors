@@ -44,14 +44,14 @@ type AssociateOpsItemRelatedItemInput struct {
 	OpsItemId *string
 
 	// The type of resource that you want to associate with an OpsItem. OpsCenter
-	// supports the following types: AWS::SSMIncidents::IncidentRecord: an Incident
-	// Manager incident. AWS::SSM::Document: a Systems Manager (SSM) document.
+	// supports the following types: AWS::SSMIncidents::IncidentRecord : an Incident
+	// Manager incident. AWS::SSM::Document : a Systems Manager (SSM) document.
 	//
 	// This member is required.
 	ResourceType *string
 
-	// The Amazon Resource Name (ARN) of the Amazon Web Services resource that you want
-	// to associate with the OpsItem.
+	// The Amazon Resource Name (ARN) of the Amazon Web Services resource that you
+	// want to associate with the OpsItem.
 	//
 	// This member is required.
 	ResourceUri *string
@@ -119,6 +119,9 @@ func (c *Client) addOperationAssociateOpsItemRelatedItemMiddlewares(stack *middl
 		return err
 	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opAssociateOpsItemRelatedItem(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {

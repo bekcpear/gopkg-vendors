@@ -111,6 +111,9 @@ func (c *Client) addOperationGetResourcePoliciesMiddlewares(stack *middleware.St
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opGetResourcePolicies(options.Region), middleware.Before); err != nil {
 		return err
 	}
+	if err = awsmiddleware.AddRecursionDetection(stack); err != nil {
+		return err
+	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
 		return err
 	}
@@ -123,8 +126,8 @@ func (c *Client) addOperationGetResourcePoliciesMiddlewares(stack *middleware.St
 	return nil
 }
 
-// GetResourcePoliciesAPIClient is a client that implements the GetResourcePolicies
-// operation.
+// GetResourcePoliciesAPIClient is a client that implements the
+// GetResourcePolicies operation.
 type GetResourcePoliciesAPIClient interface {
 	GetResourcePolicies(context.Context, *GetResourcePoliciesInput, ...func(*Options)) (*GetResourcePoliciesOutput, error)
 }
