@@ -508,6 +508,77 @@ func utlsIdToSpec(id ClientHelloID) (ClientHelloSpec, error) {
 				&UtlsPaddingExtension{GetPaddingLen: BoringPaddingStyle},
 			},
 		}, nil
+	case HelloChrome_100_PSK:
+		return ClientHelloSpec{
+			CipherSuites: []uint16{
+				GREASE_PLACEHOLDER,
+				TLS_AES_128_GCM_SHA256,
+				TLS_AES_256_GCM_SHA384,
+				TLS_CHACHA20_POLY1305_SHA256,
+				TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+				TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+				TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+				TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+				TLS_RSA_WITH_AES_128_GCM_SHA256,
+				TLS_RSA_WITH_AES_256_GCM_SHA384,
+				TLS_RSA_WITH_AES_128_CBC_SHA,
+				TLS_RSA_WITH_AES_256_CBC_SHA,
+			},
+			CompressionMethods: []byte{
+				0x00, // compressionNone
+			},
+			Extensions: []TLSExtension{
+				&UtlsGREASEExtension{},
+				&SNIExtension{},
+				&UtlsExtendedMasterSecretExtension{},
+				&RenegotiationInfoExtension{Renegotiation: RenegotiateOnceAsClient},
+				&SupportedCurvesExtension{[]CurveID{
+					GREASE_PLACEHOLDER,
+					X25519,
+					CurveP256,
+					CurveP384,
+				}},
+				&SupportedPointsExtension{SupportedPoints: []byte{
+					0x00, // pointFormatUncompressed
+				}},
+				&SessionTicketExtension{},
+				&ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
+				&StatusRequestExtension{},
+				&SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []SignatureScheme{
+					ECDSAWithP256AndSHA256,
+					PSSWithSHA256,
+					PKCS1WithSHA256,
+					ECDSAWithP384AndSHA384,
+					PSSWithSHA384,
+					PKCS1WithSHA384,
+					PSSWithSHA512,
+					PKCS1WithSHA512,
+				}},
+				&SCTExtension{},
+				&KeyShareExtension{[]KeyShare{
+					{Group: CurveID(GREASE_PLACEHOLDER), Data: []byte{0}},
+					{Group: X25519},
+				}},
+				&PSKKeyExchangeModesExtension{[]uint8{
+					PskModeDHE,
+				}},
+				&SupportedVersionsExtension{[]uint16{
+					GREASE_PLACEHOLDER,
+					VersionTLS13,
+					VersionTLS12,
+				}},
+				&UtlsCompressCertExtension{[]CertCompressionAlgo{
+					CertCompressionBrotli,
+				}},
+				&ApplicationSettingsExtension{SupportedProtocols: []string{"h2"}},
+				&UtlsGREASEExtension{},
+				&FakePreSharedKeyExtension{},
+			},
+		}, nil
 	case HelloChrome_106_Shuffle:
 		chs, err := utlsIdToSpec(HelloChrome_102)
 		if err != nil {
@@ -515,7 +586,17 @@ func utlsIdToSpec(id ClientHelloID) (ClientHelloSpec, error) {
 		}
 
 		// Chrome 107 started shuffling the order of extensions
-		return shuffleExtensions(chs)
+		shuffleExtensions(&chs)
+		return chs, err
+	case HelloChrome_112_PSK_Shuf:
+		chs, err := utlsIdToSpec(HelloChrome_100_PSK)
+		if err != nil {
+			return chs, err
+		}
+
+		// Chrome 112 started shuffling the order of extensions
+		shuffleExtensions(&chs)
+		return chs, err
 	case HelloFirefox_55, HelloFirefox_56:
 		return ClientHelloSpec{
 			TLSVersMax: VersionTLS12,
@@ -680,8 +761,8 @@ func utlsIdToSpec(id ClientHelloID) (ClientHelloSpec, error) {
 				&SessionTicketExtension{},
 				&ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}}, //application_layer_protocol_negotiation
 				&StatusRequestExtension{},
-				&DelegatedCredentialsExtension{
-					AlgorithmsSignature: []SignatureScheme{ //signature_algorithms
+				&FakeDelegatedCredentialsExtension{
+					SupportedSignatureAlgorithms: []SignatureScheme{ //signature_algorithms
 						ECDSAWithP256AndSHA256,
 						ECDSAWithP384AndSHA384,
 						ECDSAWithP521AndSHA512,
@@ -761,8 +842,8 @@ func utlsIdToSpec(id ClientHelloID) (ClientHelloSpec, error) {
 				&SessionTicketExtension{},
 				&ALPNExtension{AlpnProtocols: []string{"h2"}}, //application_layer_protocol_negotiation
 				&StatusRequestExtension{},
-				&DelegatedCredentialsExtension{
-					AlgorithmsSignature: []SignatureScheme{ //signature_algorithms
+				&FakeDelegatedCredentialsExtension{
+					SupportedSignatureAlgorithms: []SignatureScheme{ //signature_algorithms
 						ECDSAWithP256AndSHA256,
 						ECDSAWithP384AndSHA384,
 						ECDSAWithP521AndSHA512,
@@ -1853,59 +1934,49 @@ func utlsIdToSpec(id ClientHelloID) (ClientHelloSpec, error) {
 	}
 }
 
-func shuffleExtensions(chs ClientHelloSpec) (ClientHelloSpec, error) {
+func shuffleExtensions(chs *ClientHelloSpec) error {
 	// Shuffle extensions to avoid fingerprinting -- introduced in Chrome 106
-	// GREASE, padding will remain in place (if present)
+	var err error = nil
 
-	// Find indexes of GREASE and padding extensions
-	var greaseIdx []int
-	var paddingIdx []int
-	var otherExtensions []TLSExtension
-
-	for i, ext := range chs.Extensions {
-		switch ext.(type) {
+	// unshufCheck checks:
+	// - if the exts[idx] is a GREASE extension, then it should not be shuffled
+	// - if the exts[idx] is a padding/pre_shared_key extension, then it should be the
+	//  last extension in the list and should not be shuffled
+	var unshufCheck = func(idx int, exts []TLSExtension) (donotshuf bool, userErr error) {
+		switch exts[idx].(type) {
 		case *UtlsGREASEExtension:
-			greaseIdx = append(greaseIdx, i)
-		case *UtlsPaddingExtension:
-			paddingIdx = append(paddingIdx, i)
+			donotshuf = true
+		case *UtlsPaddingExtension, *FakePreSharedKeyExtension:
+			donotshuf = true
+			if idx != len(chs.Extensions)-1 {
+				userErr = errors.New("UtlsPaddingExtension or FakePreSharedKeyExtension must be the last extension")
+			}
 		default:
-			otherExtensions = append(otherExtensions, ext)
+			donotshuf = false
 		}
+		return
 	}
 
 	// Shuffle other extensions
-	rand.Shuffle(len(otherExtensions), func(i, j int) {
-		otherExtensions[i], otherExtensions[j] = otherExtensions[j], otherExtensions[i]
+	rand.Shuffle(len(chs.Extensions), func(i, j int) {
+		if unshuf, shuferr := unshufCheck(i, chs.Extensions); unshuf {
+			if shuferr != nil {
+				err = shuferr
+			}
+			return
+		}
+
+		if unshuf, shuferr := unshufCheck(j, chs.Extensions); unshuf {
+			if shuferr != nil {
+				err = shuferr
+			}
+			return
+		}
+
+		chs.Extensions[i], chs.Extensions[j] = chs.Extensions[j], chs.Extensions[i]
 	})
 
-	// Rebuild extensions slice
-	otherExtIdx := 0
-SHUF_EXTENSIONS:
-	for i := 0; i < len(chs.Extensions); i++ {
-		// if current index is in greaseIdx or paddingIdx, add GREASE or padding extension
-		for _, idx := range greaseIdx {
-			if i == idx {
-				chs.Extensions[i] = &UtlsGREASEExtension{}
-				continue SHUF_EXTENSIONS
-			}
-		}
-		for _, idx := range paddingIdx {
-			if i == idx {
-				chs.Extensions[i] = &UtlsPaddingExtension{
-					GetPaddingLen: BoringPaddingStyle,
-				}
-				break SHUF_EXTENSIONS
-			}
-		}
-
-		// otherwise add other extension
-		chs.Extensions[i] = otherExtensions[otherExtIdx]
-		otherExtIdx++
-	}
-	if otherExtIdx != len(otherExtensions) {
-		return ClientHelloSpec{}, errors.New("shuffleExtensions: otherExtIdx != len(otherExtensions)")
-	}
-	return chs, nil
+	return err
 }
 
 func (uconn *UConn) applyPresetByID(id ClientHelloID) (err error) {
@@ -1948,6 +2019,7 @@ func (uconn *UConn) ApplyPreset(p *ClientHelloSpec) error {
 	}
 	uconn.HandshakeState.Hello = privateHello.getPublicPtr()
 	uconn.HandshakeState.State13.EcdheParams = ecdheParams
+	uconn.HandshakeState.State13.KeySharesEcdheParams = make(KeySharesEcdheParameters, 2)
 	hello := uconn.HandshakeState.Hello
 	session := uconn.HandshakeState.Session
 
@@ -2050,6 +2122,7 @@ func (uconn *UConn) ApplyPreset(p *ClientHelloSpec) error {
 					return fmt.Errorf("unsupported Curve in KeyShareExtension: %v."+
 						"To mimic it, fill the Data(key) field manually", curveID)
 				}
+				uconn.HandshakeState.State13.KeySharesEcdheParams.AddEcdheParams(curveID, ecdheParams)
 				ext.KeyShares[i].Data = ecdheParams.PublicKey()
 				if !preferredCurveIsSet {
 					// only do this once for the first non-grease curve

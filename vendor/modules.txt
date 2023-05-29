@@ -28,6 +28,9 @@ github.com/dgryski/go-metro
 ## explicit
 github.com/ebfe/bcrypt_pbkdf
 github.com/ebfe/bcrypt_pbkdf/blowfish
+# github.com/gaukas/godicttls v0.0.3
+## explicit; go 1.19
+github.com/gaukas/godicttls
 # github.com/go-chi/chi/v5 v5.0.8
 ## explicit; go 1.14
 github.com/go-chi/chi/v5
@@ -208,7 +211,7 @@ github.com/quic-go/quic-go/internal/utils/linkedlist
 github.com/quic-go/quic-go/internal/wire
 github.com/quic-go/quic-go/logging
 github.com/quic-go/quic-go/quicvarint
-# github.com/refraction-networking/utls v1.3.1
+# github.com/refraction-networking/utls v1.3.2
 ## explicit; go 1.19
 github.com/refraction-networking/utls
 github.com/refraction-networking/utls/cpu
