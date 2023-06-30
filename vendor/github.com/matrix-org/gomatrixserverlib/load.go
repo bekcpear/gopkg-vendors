@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/matrix-org/gomatrixserverlib/spec"
 )
 
 // EventLoadResult is the result of loading and verifying an event in the EventsLoader.
 type EventLoadResult struct {
-	Event    *HeaderedEvent
+	Event    PDU
 	Error    error
 	SoftFail bool
 }
@@ -18,7 +20,7 @@ type EventLoadResult struct {
 type EventsLoader struct {
 	roomVer       RoomVersion
 	keyRing       JSONVerifier
-	provider      AuthChainProvider
+	provider      EventProvider
 	stateProvider StateProvider
 	// Set to true to do:
 	// 6. Passes authorization rules based on the current state of the room, otherwise it is "soft failed".
@@ -27,7 +29,7 @@ type EventsLoader struct {
 }
 
 // NewEventsLoader returns a new events loader
-func NewEventsLoader(roomVer RoomVersion, keyRing JSONVerifier, stateProvider StateProvider, provider AuthChainProvider, performSoftFailCheck bool) *EventsLoader {
+func NewEventsLoader(roomVer RoomVersion, keyRing JSONVerifier, stateProvider StateProvider, provider EventProvider, performSoftFailCheck bool) *EventsLoader {
 	return &EventsLoader{
 		roomVer:              roomVer,
 		keyRing:              keyRing,
@@ -43,15 +45,20 @@ func NewEventsLoader(roomVer RoomVersion, keyRing JSONVerifier, stateProvider St
 // The order of the returned events depends on `sortOrder`. The events are reverse topologically sorted by the ordering specified. However,
 // in order to sort the events must be loaded which could fail. For those events which fail to be loaded, they will
 // be put at the end of the returned slice.
-func (l *EventsLoader) LoadAndVerify(ctx context.Context, rawEvents []json.RawMessage, sortOrder TopologicalOrder) ([]EventLoadResult, error) {
+func (l *EventsLoader) LoadAndVerify(ctx context.Context, rawEvents []json.RawMessage, sortOrder TopologicalOrder, userIDForSender spec.UserIDForSender) ([]EventLoadResult, error) {
 	results := make([]EventLoadResult, len(rawEvents))
+
+	verImpl, err := GetRoomVersion(l.roomVer)
+	if err != nil {
+		return nil, err
+	}
 
 	// 1. Is a valid event, otherwise it is dropped.
 	// 3. Passes hash checks, otherwise it is redacted before being processed further.
-	events := make([]*Event, 0, len(rawEvents))
+	events := make([]PDU, 0, len(rawEvents))
 	errs := make([]error, 0, len(rawEvents))
 	for _, rawEv := range rawEvents {
-		event, err := NewEventFromUntrustedJSON(rawEv, l.roomVer)
+		event, err := verImpl.NewEventFromUntrustedJSON(rawEv)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -73,12 +80,12 @@ func (l *EventsLoader) LoadAndVerify(ctx context.Context, rawEvents []json.RawMe
 	// so we can directly index from events into results from now on.
 
 	// 2. Passes signature checks, otherwise it is dropped.
-	failures := VerifyAllEventSignatures(ctx, events, l.keyRing)
+	failures := VerifyAllEventSignatures(ctx, events, l.keyRing, userIDForSender)
 	if len(failures) != len(events) {
 		return nil, fmt.Errorf("gomatrixserverlib: bulk event signature verification length mismatch: %d != %d", len(failures), len(events))
 	}
 	for i := range events {
-		h := events[i].Headered(l.roomVer)
+		h := events[i]
 		results[i] = EventLoadResult{
 			Event: h,
 		}
@@ -89,7 +96,7 @@ func (l *EventsLoader) LoadAndVerify(ctx context.Context, rawEvents []json.RawMe
 			}
 		}
 		// 4. Passes authorization rules based on the event's auth events, otherwise it is rejected.
-		if err := VerifyEventAuthChain(ctx, h, l.provider); err != nil {
+		if err := VerifyEventAuthChain(ctx, h, l.provider, userIDForSender); err != nil {
 			if results[i].Error == nil { // could have failed earlier
 				results[i].Error = AuthChainErr{err}
 				continue
@@ -97,7 +104,7 @@ func (l *EventsLoader) LoadAndVerify(ctx context.Context, rawEvents []json.RawMe
 		}
 
 		// 5. Passes authorization rules based on the state at the event, otherwise it is rejected.
-		if err := VerifyAuthRulesAtState(ctx, l.stateProvider, h, true); err != nil {
+		if err := VerifyAuthRulesAtState(ctx, l.stateProvider, h, true, userIDForSender); err != nil {
 			if results[i].Error == nil { // could have failed earlier
 				results[i].Error = AuthRulesErr{err}
 				continue

@@ -21,6 +21,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/matrix-org/gomatrixserverlib/spec"
+	"golang.org/x/crypto/ed25519"
 )
 
 // CreateContent is the JSON content of a m.room.create event along with
@@ -40,7 +43,7 @@ type CreateContent struct {
 	// The version of the room. Should be treated as "1" when the key doesn't exist.
 	RoomVersion *RoomVersion `json:"room_version,omitempty"`
 	// The predecessor of the room.
-	Predecessor PreviousRoom `json:"predecessor,omitempty"`
+	Predecessor *PreviousRoom `json:"predecessor,omitempty"`
 }
 
 // PreviousRoom is the "Previous Room" structure defined at https://matrix.org/docs/spec/client_server/r0.5.0#m-room-create
@@ -51,8 +54,8 @@ type PreviousRoom struct {
 
 // NewCreateContentFromAuthEvents loads the create event content from the create event in the
 // auth events.
-func NewCreateContentFromAuthEvents(authEvents AuthEventProvider) (c CreateContent, err error) {
-	var createEvent *Event
+func NewCreateContentFromAuthEvents(authEvents AuthEventProvider, userIDForSender spec.UserIDForSender) (c CreateContent, err error) {
+	var createEvent PDU
 	if createEvent, err = authEvents.Create(); err != nil {
 		return
 	}
@@ -61,14 +64,22 @@ func NewCreateContentFromAuthEvents(authEvents AuthEventProvider) (c CreateConte
 		return
 	}
 	if err = json.Unmarshal(createEvent.Content(), &c); err != nil {
-		err = errorf("unparsable create event content: %s", err.Error())
+		err = errorf("unparseable create event content: %s", err.Error())
 		return
 	}
 	c.roomID = createEvent.RoomID()
 	c.eventID = createEvent.EventID()
-	if c.senderDomain, err = domainFromID(createEvent.Sender()); err != nil {
+	validRoomID, err := spec.NewRoomID(createEvent.RoomID())
+	if err != nil {
+		err = errorf("roomID is invalid: %s", err.Error())
 		return
 	}
+	sender, err := userIDForSender(*validRoomID, createEvent.SenderID())
+	if err != nil {
+		err = errorf("invalid sender userID: %s", err.Error())
+		return
+	}
+	c.senderDomain = string(sender.Domain())
 	return
 }
 
@@ -91,12 +102,8 @@ func (c *CreateContent) DomainAllowed(domain string) error {
 
 // UserIDAllowed checks whether the domain part of the user ID is allowed in
 // the room by the "m.federate" flag.
-func (c *CreateContent) UserIDAllowed(id string) error {
-	domain, err := domainFromID(id)
-	if err != nil {
-		return err
-	}
-	return c.DomainAllowed(domain)
+func (c *CreateContent) UserIDAllowed(id spec.UserID) error {
+	return c.DomainAllowed(string(id.Domain()))
 }
 
 // domainFromID returns everything after the first ":" character to extract
@@ -128,6 +135,40 @@ type MemberContent struct {
 	// Restricted join rules require a user with invite permission to be nominated,
 	// so that their membership can be included in the auth events.
 	AuthorisedVia string `json:"join_authorised_via_users_server,omitempty"`
+
+	// The MXIDMapping used in pseudo ID rooms
+	MXIDMapping *MXIDMapping `json:"mxid_mapping,omitempty"`
+}
+
+type MXIDMapping struct {
+	UserRoomKey spec.SenderID                                  `json:"user_room_key"`
+	UserID      string                                         `json:"user_id"`
+	Signatures  map[spec.ServerName]map[KeyID]spec.Base64Bytes `json:"signatures,omitempty"`
+}
+
+// Sign signs the MXIDMapping with the signing key of the server.
+// Sets the Signatures field on success.
+func (m *MXIDMapping) Sign(serverName spec.ServerName, keyID KeyID, privateKey ed25519.PrivateKey) error {
+	m.Signatures = nil // ensure we don't marshal/sign existing signatures
+	unsorted, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+
+	canonical, err := CanonicalJSON(unsorted)
+	if err != nil {
+		return err
+	}
+
+	signature := spec.Base64Bytes(ed25519.Sign(privateKey, canonical))
+	if m.Signatures == nil {
+		m.Signatures = make(map[spec.ServerName]map[KeyID]spec.Base64Bytes)
+	}
+	if m.Signatures[serverName] == nil {
+		m.Signatures[serverName] = make(map[KeyID]spec.Base64Bytes)
+	}
+	m.Signatures[serverName][keyID] = signature
+	return nil
 }
 
 // MemberThirdPartyInvite is the "Invite" structure defined at http://matrix.org/docs/spec/client_server/r0.2.0.html#m-room-member
@@ -143,17 +184,17 @@ type MemberThirdPartyInviteSigned struct {
 	Token      string                       `json:"token"`
 }
 
-// NewMemberContentFromAuthEvents loads the member content from the member event for the user ID in the auth events.
+// NewMemberContentFromAuthEvents loads the member content from the member event for the senderID in the auth events.
 // Returns an error if there was an error loading the member event or parsing the event content.
-func NewMemberContentFromAuthEvents(authEvents AuthEventProvider, userID string) (c MemberContent, err error) {
-	var memberEvent *Event
-	if memberEvent, err = authEvents.Member(userID); err != nil {
+func NewMemberContentFromAuthEvents(authEvents AuthEventProvider, senderID spec.SenderID) (c MemberContent, err error) {
+	var memberEvent PDU
+	if memberEvent, err = authEvents.Member(senderID); err != nil {
 		return
 	}
 	if memberEvent == nil {
 		// If there isn't a member event then the membership for the user
 		// defaults to leave.
-		c.Membership = Leave
+		c.Membership = spec.Leave
 		return
 	}
 	return NewMemberContentFromEvent(memberEvent)
@@ -161,11 +202,11 @@ func NewMemberContentFromAuthEvents(authEvents AuthEventProvider, userID string)
 
 // NewMemberContentFromEvent parse the member content from an event.
 // Returns an error if the content couldn't be parsed.
-func NewMemberContentFromEvent(event *Event) (c MemberContent, err error) {
+func NewMemberContentFromEvent(event PDU) (c MemberContent, err error) {
 	if err = json.Unmarshal(event.Content(), &c); err != nil {
 		var partial membershipContent
 		if err = json.Unmarshal(event.Content(), &partial); err != nil {
-			err = errorf("unparsable member event content: %s", err.Error())
+			err = errorf("unparseable member event content: %s", err.Error())
 			return
 		}
 		c.Membership = partial.Membership
@@ -188,14 +229,14 @@ type ThirdPartyInviteContent struct {
 
 // PublicKey is the "PublicKeys" structure defined at https://matrix.org/docs/spec/client_server/r0.5.0#m-room-third-party-invite
 type PublicKey struct {
-	PublicKey      Base64Bytes `json:"public_key"`
-	KeyValidityURL string      `json:"key_validity_url"`
+	PublicKey      spec.Base64Bytes `json:"public_key"`
+	KeyValidityURL string           `json:"key_validity_url"`
 }
 
 // NewThirdPartyInviteContentFromAuthEvents loads the third party invite content from the third party invite event for the state key (token) in the auth events.
 // Returns an error if there was an error loading the third party invite event or parsing the event content.
 func NewThirdPartyInviteContentFromAuthEvents(authEvents AuthEventProvider, token string) (t ThirdPartyInviteContent, err error) {
-	var thirdPartyInviteEvent *Event
+	var thirdPartyInviteEvent PDU
 	if thirdPartyInviteEvent, err = authEvents.ThirdPartyInvite(token); err != nil {
 		return
 	}
@@ -205,7 +246,7 @@ func NewThirdPartyInviteContentFromAuthEvents(authEvents AuthEventProvider, toke
 		return
 	}
 	if err = json.Unmarshal(thirdPartyInviteEvent.Content(), &t); err != nil {
-		err = errorf("unparsable third party invite event content: %s", err.Error())
+		err = errorf("unparseable third party invite event content: %s", err.Error())
 	}
 	return
 }
@@ -290,7 +331,7 @@ type JoinRuleContentAllowRule struct {
 func NewJoinRuleContentFromAuthEvents(authEvents AuthEventProvider) (c JoinRuleContent, err error) {
 	// Start off with "invite" as the default. Hopefully the unmarshal
 	// step later will replace it with a better value.
-	c.JoinRule = Invite
+	c.JoinRule = spec.Invite
 	// Then see if the specified join event contains something better.
 	joinRulesEvent, err := authEvents.JoinRules()
 	if err != nil {
@@ -300,7 +341,7 @@ func NewJoinRuleContentFromAuthEvents(authEvents AuthEventProvider) (c JoinRuleC
 		return
 	}
 	if err = json.Unmarshal(joinRulesEvent.Content(), &c); err != nil {
-		err = errorf("unparsable join_rules event content: %s", err.Error())
+		err = errorf("unparseable join_rules event content: %s", err.Error())
 		return
 	}
 	return
@@ -326,8 +367,8 @@ type PowerLevelContent struct {
 }
 
 // UserLevel returns the power level a user has in the room.
-func (c *PowerLevelContent) UserLevel(userID string) int64 {
-	level, ok := c.Users[userID]
+func (c *PowerLevelContent) UserLevel(senderID spec.SenderID) int64 {
+	level, ok := c.Users[string(senderID)]
 	if ok {
 		return level
 	}
@@ -336,7 +377,7 @@ func (c *PowerLevelContent) UserLevel(userID string) int64 {
 
 // EventLevel returns the power level needed to send an event in the room.
 func (c *PowerLevelContent) EventLevel(eventType string, isState bool) int64 {
-	if eventType == MRoomThirdPartyInvite {
+	if eventType == spec.MRoomThirdPartyInvite {
 		// Special case third_party_invite events to have the same level as
 		// m.room.member invite events.
 		// https://github.com/matrix-org/synapse/blob/v0.18.5/synapse/api/auth.py#L182
@@ -406,72 +447,77 @@ func (c *PowerLevelContent) Defaults() {
 }
 
 // NewPowerLevelContentFromEvent loads the power level content from an event.
-func NewPowerLevelContentFromEvent(event *Event) (c PowerLevelContent, err error) {
+func NewPowerLevelContentFromEvent(event PDU) (c PowerLevelContent, err error) {
 	// Set the levels to their default values.
 	c.Defaults()
 
-	var strict bool
-	if strict, err = event.roomVersion.RequireIntegerPowerLevels(); err != nil {
-		return
-	} else if strict {
-		// Unmarshal directly to PowerLevelContent, since that will kick up an
-		// error if one of the power levels isn't an int64.
-		if err = json.Unmarshal(event.Content(), &c); err != nil {
-			err = errorf("unparsable power_levels event content: %s", err.Error())
-			return
-		}
-	} else {
-		// We can't extract the JSON directly to the powerLevelContent because we
-		// need to convert string values to int values.
-		var content struct {
-			InviteLevel        levelJSONValue            `json:"invite"`
-			BanLevel           levelJSONValue            `json:"ban"`
-			KickLevel          levelJSONValue            `json:"kick"`
-			RedactLevel        levelJSONValue            `json:"redact"`
-			UserLevels         map[string]levelJSONValue `json:"users"`
-			UsersDefaultLevel  levelJSONValue            `json:"users_default"`
-			EventLevels        map[string]levelJSONValue `json:"events"`
-			StateDefaultLevel  levelJSONValue            `json:"state_default"`
-			EventDefaultLevel  levelJSONValue            `json:"events_default"`
-			NotificationLevels map[string]levelJSONValue `json:"notifications"`
-		}
-		if err = json.Unmarshal(event.Content(), &content); err != nil {
-			err = errorf("unparsable power_levels event content: %s", err.Error())
-			return
-		}
-
-		// Update the levels with the values that are present in the event content.
-		content.InviteLevel.assignIfExists(&c.Invite)
-		content.BanLevel.assignIfExists(&c.Ban)
-		content.KickLevel.assignIfExists(&c.Kick)
-		content.RedactLevel.assignIfExists(&c.Redact)
-		content.UsersDefaultLevel.assignIfExists(&c.UsersDefault)
-		content.StateDefaultLevel.assignIfExists(&c.StateDefault)
-		content.EventDefaultLevel.assignIfExists(&c.EventsDefault)
-
-		for k, v := range content.UserLevels {
-			if c.Users == nil {
-				c.Users = make(map[string]int64)
-			}
-			c.Users[k] = v.value
-		}
-
-		for k, v := range content.EventLevels {
-			if c.Events == nil {
-				c.Events = make(map[string]int64)
-			}
-			c.Events[k] = v.value
-		}
-
-		for k, v := range content.NotificationLevels {
-			if c.Notifications == nil {
-				c.Notifications = make(map[string]int64)
-			}
-			c.Notifications[k] = v.value
-		}
+	verImpl, err := GetRoomVersion(event.Version())
+	if err != nil {
+		return c, err
 	}
 
+	if err = verImpl.ParsePowerLevels(event.Content(), &c); err != nil {
+		err = errorf("unparseable power_levels event content: %s", err.Error())
+		return
+	}
 	return
+}
+
+// parseIntegerPowerLevels unmarshals directly to PowerLevelContent, since that will kick up an
+// error if one of the power levels isn't an int64.
+func parseIntegerPowerLevels(contentBytes []byte, c *PowerLevelContent) error {
+	return json.Unmarshal(contentBytes, c)
+}
+
+func parsePowerLevels(contentBytes []byte, c *PowerLevelContent) error {
+	// We can't extract the JSON directly to the powerLevelContent because we
+	// need to convert string values to int values.
+	var content struct {
+		InviteLevel        levelJSONValue            `json:"invite"`
+		BanLevel           levelJSONValue            `json:"ban"`
+		KickLevel          levelJSONValue            `json:"kick"`
+		RedactLevel        levelJSONValue            `json:"redact"`
+		UserLevels         map[string]levelJSONValue `json:"users"`
+		UsersDefaultLevel  levelJSONValue            `json:"users_default"`
+		EventLevels        map[string]levelJSONValue `json:"events"`
+		StateDefaultLevel  levelJSONValue            `json:"state_default"`
+		EventDefaultLevel  levelJSONValue            `json:"events_default"`
+		NotificationLevels map[string]levelJSONValue `json:"notifications"`
+	}
+	if err := json.Unmarshal(contentBytes, &content); err != nil {
+		return errorf("unparseable power_levels event content: %s", err.Error())
+	}
+
+	// Update the levels with the values that are present in the event content.
+	content.InviteLevel.assignIfExists(&c.Invite)
+	content.BanLevel.assignIfExists(&c.Ban)
+	content.KickLevel.assignIfExists(&c.Kick)
+	content.RedactLevel.assignIfExists(&c.Redact)
+	content.UsersDefaultLevel.assignIfExists(&c.UsersDefault)
+	content.StateDefaultLevel.assignIfExists(&c.StateDefault)
+	content.EventDefaultLevel.assignIfExists(&c.EventsDefault)
+
+	for k, v := range content.UserLevels {
+		if c.Users == nil {
+			c.Users = make(map[string]int64)
+		}
+		c.Users[k] = v.value
+	}
+
+	for k, v := range content.EventLevels {
+		if c.Events == nil {
+			c.Events = make(map[string]int64)
+		}
+		c.Events[k] = v.value
+	}
+
+	for k, v := range content.NotificationLevels {
+		if c.Notifications == nil {
+			c.Notifications = make(map[string]int64)
+		}
+		c.Notifications[k] = v.value
+	}
+	return nil
 }
 
 // A levelJSONValue is used for unmarshalling power levels from JSON.

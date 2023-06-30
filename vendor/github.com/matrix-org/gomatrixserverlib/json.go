@@ -23,23 +23,20 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/matrix-org/gomatrixserverlib/spec"
 	"github.com/tidwall/gjson"
 )
 
-type EventJSONs []RawJSON
+type EventJSONs []spec.RawJSON
 
-func (e RawJSON) TrustedEvent(roomVersion RoomVersion, redacted bool) (*Event, error) {
-	return NewEventFromTrustedJSON(e, redacted, roomVersion)
-}
-
-func (e RawJSON) UntrustedEvent(roomVersion RoomVersion) (*Event, error) {
-	return NewEventFromUntrustedJSON(e, roomVersion)
-}
-
-func (e EventJSONs) TrustedEvents(roomVersion RoomVersion, redacted bool) []*Event {
-	events := make([]*Event, 0, len(e))
+func (e EventJSONs) TrustedEvents(roomVersion RoomVersion, redacted bool) []PDU {
+	verImpl, err := GetRoomVersion(roomVersion)
+	if err != nil {
+		return nil
+	}
+	events := make([]PDU, 0, len(e))
 	for _, js := range e {
-		event, err := NewEventFromTrustedJSON(js, redacted, roomVersion)
+		event, err := verImpl.NewEventFromTrustedJSON(js, redacted)
 		if err != nil {
 			continue
 		}
@@ -48,10 +45,14 @@ func (e EventJSONs) TrustedEvents(roomVersion RoomVersion, redacted bool) []*Eve
 	return events
 }
 
-func (e EventJSONs) UntrustedEvents(roomVersion RoomVersion) []*Event {
-	events := make([]*Event, 0, len(e))
+func (e EventJSONs) UntrustedEvents(roomVersion RoomVersion) []PDU {
+	verImpl, err := GetRoomVersion(roomVersion)
+	if err != nil {
+		return nil
+	}
+	events := make([]PDU, 0, len(e))
 	for _, js := range e {
-		event, err := NewEventFromUntrustedJSON(js, roomVersion)
+		event, err := verImpl.NewEventFromUntrustedJSON(js)
 		if err != nil {
 			continue
 		}
@@ -60,15 +61,7 @@ func (e EventJSONs) UntrustedEvents(roomVersion RoomVersion) []*Event {
 	return events
 }
 
-func NewEventJSONsFromHeaderedEvents(he []*HeaderedEvent) EventJSONs {
-	events := make(EventJSONs, len(he))
-	for i := range he {
-		events[i] = he[i].JSON()
-	}
-	return events
-}
-
-func NewEventJSONsFromEvents(he []*Event) EventJSONs {
+func NewEventJSONsFromEvents(he []PDU) EventJSONs {
 	events := make(EventJSONs, len(he))
 	for i := range he {
 		events[i] = he[i].JSON()
@@ -100,16 +93,20 @@ func CanonicalJSON(input []byte) ([]byte, error) {
 //
 // Returns a gomatrixserverlib.BadJSONError if JSON validation fails.
 func EnforcedCanonicalJSON(input []byte, roomVersion RoomVersion) ([]byte, error) {
-	if enforce, err := roomVersion.EnforceCanonicalJSON(); err == nil && enforce {
-		if err = verifyEnforcedCanonicalJSON(input); err != nil {
-			return nil, BadJSONError{err}
-		}
+	roomVersionImpl, err := GetRoomVersion(roomVersion)
+	if err != nil {
+		return nil, err
+	}
+	if err := roomVersionImpl.CheckCanonicalJSON(input); err != nil {
+		return nil, BadJSONError{err}
 	}
 
 	return CanonicalJSON(input)
 }
 
 var ErrCanonicalJSON = errors.New("value is outside of safe range")
+
+func noVerifyCanonicalJSON(input []byte) error { return nil }
 
 func verifyEnforcedCanonicalJSON(input []byte) error {
 	valid := true

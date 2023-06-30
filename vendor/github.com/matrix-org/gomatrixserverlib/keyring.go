@@ -2,12 +2,14 @@ package gomatrixserverlib
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/matrix-org/gomatrixserverlib/spec"
 	"github.com/matrix-org/util"
 	"golang.org/x/crypto/ed25519"
 )
@@ -15,7 +17,7 @@ import (
 // A PublicKeyLookupRequest is a request for a public key with a particular key ID.
 type PublicKeyLookupRequest struct {
 	// The server to fetch a key for.
-	ServerName ServerName `json:"server_name"`
+	ServerName spec.ServerName `json:"server_name"`
 	// The ID of the key to fetch.
 	KeyID KeyID `json:"key_id"`
 }
@@ -33,61 +35,70 @@ func (r *PublicKeyLookupRequest) UnmarshalText(text []byte) error {
 	if len(parts) < 2 {
 		return errors.New("expected at least one / separator in " + string(text))
 	}
-	r.ServerName, r.KeyID = ServerName(parts[0]), KeyID(parts[1])
+	r.ServerName, r.KeyID = spec.ServerName(parts[0]), KeyID(parts[1])
 	return nil
 }
 
 // PublicKeyNotExpired is a magic value for PublicKeyLookupResult.ExpiredTS:
 // it indicates that this is an active key which has not yet expired
-const PublicKeyNotExpired = Timestamp(0)
+const PublicKeyNotExpired = spec.Timestamp(0)
 
 // PublicKeyNotValid is a magic value for PublicKeyLookupResult.ValidUntilTS:
 // it is used when we don't have a validity period for this key. Most likely
 // it is an old key with an expiry date.
-const PublicKeyNotValid = Timestamp(0)
+const PublicKeyNotValid = spec.Timestamp(0)
 
 // A PublicKeyLookupResult is the result of looking up a server signing key.
 type PublicKeyLookupResult struct {
 	VerifyKey
 	// if this key has expired, the time it stopped being valid for event signing in milliseconds.
 	// if the key has not expired, the magic value PublicKeyNotExpired.
-	ExpiredTS Timestamp `json:"expired_ts"`
+	ExpiredTS spec.Timestamp `json:"expired_ts"`
 	// When this result is valid until in milliseconds.
 	// if the key has expired, the magic value PublicKeyNotValid.
-	ValidUntilTS Timestamp `json:"valid_until_ts"`
+	ValidUntilTS spec.Timestamp `json:"valid_until_ts"`
 }
 
-// WasValidAt checks if this signing key is valid for an event signed at the
-// given timestamp.
-func (r PublicKeyLookupResult) WasValidAt(atTs Timestamp, strictValidityChecking bool) bool {
-	if r.ExpiredTS != PublicKeyNotExpired {
-		return atTs < r.ExpiredTS
+// SignatureValidityCheckFunc is a function used to validate signing keys
+type SignatureValidityCheckFunc func(atTS, validUntil spec.Timestamp) bool
+
+// StrictValiditySignatureCheck performs validation of potentially expired signing keys
+func StrictValiditySignatureCheck(atTs, validUntil spec.Timestamp) bool {
+	if validUntil == PublicKeyNotValid {
+		return false
 	}
-	if strictValidityChecking {
-		if r.ValidUntilTS == PublicKeyNotValid {
-			return false
-		}
-		// Servers MUST use the lesser of valid_until_ts and 7 days into the
-		// future when determining if a key is valid.
-		// https://matrix.org/docs/spec/rooms/v5#signing-key-validity-period
-		sevenDaysFuture := time.Now().Add(time.Hour * 24 * 7)
-		validUntilTS := r.ValidUntilTS.Time()
-		if validUntilTS.After(sevenDaysFuture) {
-			validUntilTS = sevenDaysFuture
-		}
-		if atTs.Time().After(validUntilTS) {
-			return false
-		}
+	// Servers MUST use the lesser of valid_until_ts and 7 days into the
+	// future when determining if a key is valid.
+	// https://matrix.org/docs/spec/rooms/v5#signing-key-validity-period
+	sevenDaysFuture := time.Now().Add(time.Hour * 24 * 7)
+	validUntilTS := validUntil.Time()
+	if validUntilTS.After(sevenDaysFuture) {
+		validUntilTS = sevenDaysFuture
+	}
+	if atTs.Time().After(validUntilTS) {
+		return false
 	}
 	return true
 }
 
+// NoStrictValidityCheck doesn't perform any validation of potentially expired signing keys.
+func NoStrictValidityCheck(_, _ spec.Timestamp) bool { return true }
+
+// WasValidAt checks if this signing key is valid for an event signed at the
+// given timestamp.
+func (r PublicKeyLookupResult) WasValidAt(atTs spec.Timestamp, signatureValidityCheck SignatureValidityCheckFunc) bool {
+	if r.ExpiredTS != PublicKeyNotExpired {
+		return atTs < r.ExpiredTS
+	}
+	return signatureValidityCheck(atTs, r.ValidUntilTS)
+}
+
 type PublicKeyNotaryLookupRequest struct {
-	ServerKeys map[ServerName]map[KeyID]PublicKeyNotaryQueryCriteria `json:"server_keys"`
+	ServerKeys map[spec.ServerName]map[KeyID]PublicKeyNotaryQueryCriteria `json:"server_keys"`
 }
 
 type PublicKeyNotaryQueryCriteria struct {
-	MinimumValidUntilTS Timestamp `json:"minimum_valid_until_ts"`
+	MinimumValidUntilTS spec.Timestamp `json:"minimum_valid_until_ts"`
 }
 
 // A KeyFetcher is a way of fetching public keys in bulk.
@@ -100,7 +111,7 @@ type KeyFetcher interface {
 	// The result may have fewer (server name, key ID) pairs than were in the request.
 	// The result may have more (server name, key ID) pairs than were in the request.
 	// Returns an error if there was a problem fetching the keys.
-	FetchKeys(ctx context.Context, requests map[PublicKeyLookupRequest]Timestamp) (map[PublicKeyLookupRequest]PublicKeyLookupResult, error)
+	FetchKeys(ctx context.Context, requests map[PublicKeyLookupRequest]spec.Timestamp) (map[PublicKeyLookupRequest]PublicKeyLookupResult, error)
 
 	// FetcherName returns the name of this fetcher, which can then be used for
 	// logging errors etc.
@@ -131,13 +142,14 @@ type KeyRing struct {
 // signature from that server.
 type VerifyJSONRequest struct {
 	// The name of the matrix server to check for a signature for.
-	ServerName ServerName
+	ServerName spec.ServerName
 	// The millisecond posix timestamp the message needs to be valid at.
-	AtTS Timestamp
+	AtTS spec.Timestamp
 	// The JSON bytes.
 	Message []byte
-	// Should validity signature checking be enabled? (Room version >= 5)
-	StrictValidityChecking bool
+	// ValidityCheckingFunc is used to validate signatures. This can be used
+	// to enforce strict validation of signatures.
+	ValidityCheckingFunc SignatureValidityCheckFunc
 }
 
 // A VerifyJSONResult is the result of checking the signature of a JSON message.
@@ -207,7 +219,7 @@ func (k KeyRing) VerifyJSONs(ctx context.Context, requests []VerifyJSONRequest) 
 	}
 
 	keysFetched := map[PublicKeyLookupRequest]PublicKeyLookupResult{}
-	now := AsTimestamp(time.Now())
+	now := spec.AsTimestamp(time.Now())
 	for req, res := range keysFromDatabase {
 		if res.ExpiredTS != PublicKeyNotExpired {
 			// The key is expired - it's not going to change so just return
@@ -297,8 +309,8 @@ func (k *KeyRing) isAlgorithmSupported(keyID KeyID) bool {
 
 func (k *KeyRing) publicKeyRequests(
 	requests []VerifyJSONRequest, results []VerifyJSONResult, keyIDs [][]KeyID,
-) map[PublicKeyLookupRequest]Timestamp {
-	keyRequests := map[PublicKeyLookupRequest]Timestamp{}
+) map[PublicKeyLookupRequest]spec.Timestamp {
+	keyRequests := map[PublicKeyLookupRequest]spec.Timestamp{}
 	for i := range requests {
 		if results[i].Error == nil {
 			// We've already verified this message, we don't need to refetch the keys for it.
@@ -337,7 +349,7 @@ func (k *KeyRing) checkUsingKeys(
 				// No key for this key ID so we continue onto the next key ID.
 				continue
 			}
-			if !serverKey.WasValidAt(requests[i].AtTS, requests[i].StrictValidityChecking) {
+			if !serverKey.WasValidAt(requests[i].AtTS, requests[i].ValidityCheckingFunc) {
 				// The key wasn't valid at the timestamp we needed it to be valid at.
 				// So skip onto the next key.
 				results[i].Error = fmt.Errorf(
@@ -360,15 +372,57 @@ func (k *KeyRing) checkUsingKeys(
 	}
 }
 
+// JSONVerifierSelf provides methods to validate signatures signed by pseudo identities.
+type JSONVerifierSelf struct{}
+
+type senderIDObj struct {
+	SenderID spec.SenderID `json:"sender"`
+}
+
+// VerifyJSONs implements JSONVerifier.
+func (v JSONVerifierSelf) VerifyJSONs(ctx context.Context, requests []VerifyJSONRequest) ([]VerifyJSONResult, error) {
+	results := make([]VerifyJSONResult, len(requests))
+
+	for i := range requests {
+		// first of all, extract the sender key
+		var obj senderIDObj
+
+		err := json.Unmarshal(requests[i].Message, &obj)
+		if err != nil {
+			results[i].Error = fmt.Errorf("unable to get senderID from event: %w", err)
+			continue
+		}
+
+		if len(obj.SenderID) == 0 {
+			results[i].Error = fmt.Errorf("unable to get senderID from event: empty sender")
+			continue
+		}
+		// convert to public key
+		key, err := obj.SenderID.RawBytes()
+		if err != nil {
+			results[i].Error = fmt.Errorf("unable to get key from senderID: %w", err)
+			continue
+		}
+
+		// verify the JSON is valid
+		if err = VerifyJSON("self", "ed25519:1", ed25519.PublicKey(key), requests[i].Message); err != nil {
+			// The signature wasn't valid, record the error and try the next key ID.
+			results[i].Error = err
+			continue
+		}
+	}
+	return results, nil
+}
+
 type KeyClient interface {
-	GetServerKeys(ctx context.Context, matrixServer ServerName) (ServerKeys, error)
-	LookupServerKeys(ctx context.Context, matrixServer ServerName, keyRequests map[PublicKeyLookupRequest]Timestamp) ([]ServerKeys, error)
+	GetServerKeys(ctx context.Context, matrixServer spec.ServerName) (ServerKeys, error)
+	LookupServerKeys(ctx context.Context, matrixServer spec.ServerName, keyRequests map[PublicKeyLookupRequest]spec.Timestamp) ([]ServerKeys, error)
 }
 
 // A PerspectiveKeyFetcher fetches server keys from a single perspective server.
 type PerspectiveKeyFetcher struct {
 	// The name of the perspective server to fetch keys from.
-	PerspectiveServerName ServerName
+	PerspectiveServerName spec.ServerName
 	// The ed25519 public keys the perspective server must sign responses with.
 	PerspectiveServerKeys map[KeyID]ed25519.PublicKey
 	// The federation client to use to fetch keys with.
@@ -382,7 +436,7 @@ func (p PerspectiveKeyFetcher) FetcherName() string {
 
 // FetchKeys implements KeyFetcher
 func (p *PerspectiveKeyFetcher) FetchKeys(
-	ctx context.Context, requests map[PublicKeyLookupRequest]Timestamp,
+	ctx context.Context, requests map[PublicKeyLookupRequest]spec.Timestamp,
 ) (map[PublicKeyLookupRequest]PublicKeyLookupResult, error) {
 	serverKeys, err := p.Client.LookupServerKeys(ctx, p.PerspectiveServerName, requests)
 	if err != nil {
@@ -447,15 +501,15 @@ func (d DirectKeyFetcher) FetcherName() string {
 
 // FetchKeys implements KeyFetcher
 func (d *DirectKeyFetcher) FetchKeys(
-	ctx context.Context, requests map[PublicKeyLookupRequest]Timestamp,
+	ctx context.Context, requests map[PublicKeyLookupRequest]spec.Timestamp,
 ) (map[PublicKeyLookupRequest]PublicKeyLookupResult, error) {
 	fetcherLogger := util.GetLogger(ctx).WithField("fetcher", d.FetcherName())
 
-	byServer := map[ServerName]map[PublicKeyLookupRequest]Timestamp{}
+	byServer := map[spec.ServerName]map[PublicKeyLookupRequest]spec.Timestamp{}
 	for req, ts := range requests {
 		server := byServer[req.ServerName]
 		if server == nil {
-			server = map[PublicKeyLookupRequest]Timestamp{}
+			server = map[PublicKeyLookupRequest]spec.Timestamp{}
 			byServer[req.ServerName] = server
 		}
 		server[req] = ts
@@ -479,14 +533,14 @@ func (d *DirectKeyFetcher) FetchKeys(
 	wait.Add(numWorkers)
 
 	// Populate the jobs queue.
-	pending := make(chan ServerName, len(byServer))
+	pending := make(chan spec.ServerName, len(byServer))
 	for serverName := range byServer {
 		pending <- serverName
 	}
 	close(pending)
 
 	// Define our worker.
-	worker := func(ch <-chan ServerName) {
+	worker := func(ch <-chan spec.ServerName) {
 		defer wait.Done()
 		for server := range ch {
 			serverResults, err := d.fetchKeysForServer(ctx, server)
@@ -518,7 +572,7 @@ func (d *DirectKeyFetcher) FetchKeys(
 }
 
 func (d *DirectKeyFetcher) fetchKeysForServer(
-	ctx context.Context, serverName ServerName,
+	ctx context.Context, serverName spec.ServerName,
 ) (map[PublicKeyLookupRequest]PublicKeyLookupResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Second*15)
 	defer cancel()
@@ -545,14 +599,14 @@ func (d *DirectKeyFetcher) fetchKeysForServer(
 }
 
 func (d *DirectKeyFetcher) fetchNotaryKeysForServer(
-	ctx context.Context, serverName ServerName,
+	ctx context.Context, serverName spec.ServerName,
 ) (map[PublicKeyLookupRequest]PublicKeyLookupResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Second*15)
 	defer cancel()
 
 	var keys ServerKeys
-	allKeys, err := d.Client.LookupServerKeys(ctx, serverName, map[PublicKeyLookupRequest]Timestamp{
-		{serverName, ""}: AsTimestamp(time.Now()),
+	allKeys, err := d.Client.LookupServerKeys(ctx, serverName, map[PublicKeyLookupRequest]spec.Timestamp{
+		{serverName, ""}: spec.AsTimestamp(time.Now()),
 	})
 	if err != nil {
 		return nil, err

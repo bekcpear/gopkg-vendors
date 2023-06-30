@@ -1,9 +1,39 @@
 package gomatrixserverlib
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+
+	"github.com/matrix-org/gomatrixserverlib/spec"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
+)
 
 // RoomVersion refers to the room version for a specific room.
 type RoomVersion string
+
+type IRoomVersion interface {
+	Version() RoomVersion
+	Stable() bool
+	StateResAlgorithm() StateResAlgorithm
+	EventFormat() EventFormat
+	EventIDFormat() EventIDFormat
+	RedactEventJSON(eventJSON []byte) ([]byte, error)
+	SignatureValidityCheck(atTS, validUntil spec.Timestamp) bool
+	NewEventFromTrustedJSON(eventJSON []byte, redacted bool) (result PDU, err error)
+	NewEventFromTrustedJSONWithEventID(eventID string, eventJSON []byte, redacted bool) (result PDU, err error)
+	NewEventFromUntrustedJSON(eventJSON []byte) (result PDU, err error)
+	NewEventBuilder() *EventBuilder
+	NewEventBuilderFromProtoEvent(pe *ProtoEvent) *EventBuilder
+	CheckRestrictedJoin(ctx context.Context, localServerName spec.ServerName, roomQuerier RestrictedRoomJoinQuerier, roomID spec.RoomID, senderID spec.SenderID) (string, error)
+
+	RestrictedJoinServername(content []byte) (spec.ServerName, error)
+	CheckRestrictedJoinsAllowed() error
+	CheckKnockingAllowed(m *membershipAllower) error
+	CheckNotificationLevels(senderLevel int64, oldPowerLevels, newPowerLevels PowerLevelContent) error
+	CheckCanonicalJSON(input []byte) error
+	ParsePowerLevels(contentBytes []byte, c *PowerLevelContent) error
+}
 
 // StateResAlgorithm refers to a version of the state resolution algorithm.
 type StateResAlgorithm int
@@ -14,31 +44,21 @@ type EventFormat int
 // EventIDFormat refers to the formatting used to generate new event IDs.
 type EventIDFormat int
 
-// RedactionAlgorithm refers to the redaction algorithm used in a room version.
-type RedactionAlgorithm int
-
-// JoinRulesPermittingKnockInEventAuth specifies which kinds of join_rule allow
-// a room to be knocked upon.
-type JoinRulesPermittingKnockInEventAuth int
-
-// JoinRulesPermittingRestrictedJoinInEventAuth specifies which kinds of join_rule allow
-// a room to be joined via a space.
-type JoinRulesPermittingRestrictedJoinInEventAuth int
-
 // Room version constants. These are strings because the version grammar
 // allows for future expansion.
 // https://matrix.org/docs/spec/#room-version-grammar
 const (
-	RoomVersionV1  RoomVersion = "1"
-	RoomVersionV2  RoomVersion = "2"
-	RoomVersionV3  RoomVersion = "3"
-	RoomVersionV4  RoomVersion = "4"
-	RoomVersionV5  RoomVersion = "5"
-	RoomVersionV6  RoomVersion = "6"
-	RoomVersionV7  RoomVersion = "7"
-	RoomVersionV8  RoomVersion = "8"
-	RoomVersionV9  RoomVersion = "9"
-	RoomVersionV10 RoomVersion = "10"
+	RoomVersionV1        RoomVersion = "1"
+	RoomVersionV2        RoomVersion = "2"
+	RoomVersionV3        RoomVersion = "3"
+	RoomVersionV4        RoomVersion = "4"
+	RoomVersionV5        RoomVersion = "5"
+	RoomVersionV6        RoomVersion = "6"
+	RoomVersionV7        RoomVersion = "7"
+	RoomVersionV8        RoomVersion = "8"
+	RoomVersionV9        RoomVersion = "9"
+	RoomVersionV10       RoomVersion = "10"
+	RoomVersionPseudoIDs RoomVersion = "org.matrix.msc4014"
 )
 
 // Event format constants.
@@ -60,231 +80,297 @@ const (
 	StateResV2                              // state resolution v2
 )
 
-// Redaction algorithm.
-const (
-	RedactionAlgorithmV1 RedactionAlgorithm = iota + 1 // default algorithm
-	RedactionAlgorithmV2                               // no special meaning for m.room.aliases
-	RedactionAlgorithmV3                               // protects join rules 'allow' key
-	RedactionAlgorithmV4                               // protects membership 'join_authorised_via_users_server' key
-)
-
-// Which join_rules permit knocking?
-const (
-	KnocksForbidden        JoinRulesPermittingKnockInEventAuth = iota + 1 // no rooms can be knocked upon
-	KnockOnly                                                             // rooms with join_rule "knock" can be knocked upon
-	KnockOrKnockRestricted                                                // rooms with join_rule "knock" or "knock_restricted" can be knocked upon
-)
-
-// Which join_rules permit restricted joins?
-const (
-	NoRestrictedJoins           JoinRulesPermittingRestrictedJoinInEventAuth = iota + 1 // no rooms can be joined via a space
-	RestrictedOnly                                                                      // rooms with join_rule "restricted" can be joined via a space
-	RestrictedOrKnockRestricted                                                         // rooms with join_rule "restricted" or "knock_restricted" can be joined via a space
-)
-
-var roomVersionMeta = map[RoomVersion]RoomVersionDescription{
-	RoomVersionV1: {
-		Supported:                       true,
-		Stable:                          true,
-		stateResAlgorithm:               StateResV1,
-		eventFormat:                     EventFormatV1,
-		eventIDFormat:                   EventIDFormatV1,
-		redactionAlgorithm:              RedactionAlgorithmV1,
-		enforceSignatureChecks:          false,
-		enforceCanonicalJSON:            false,
-		powerLevelsIncludeNotifications: false,
-		allowKnockingInEventAuth:        KnocksForbidden,
-		allowRestrictedJoinsInEventAuth: NoRestrictedJoins,
-		requireIntegerPowerLevels:       false,
+var roomVersionMeta = map[RoomVersion]IRoomVersion{
+	RoomVersionV1: RoomVersionImpl{
+		ver:                                    RoomVersionV1,
+		stable:                                 true,
+		stateResAlgorithm:                      StateResV1,
+		eventFormat:                            EventFormatV1,
+		eventIDFormat:                          EventIDFormatV1,
+		redactionAlgorithm:                     redactEventJSONV1,
+		signatureValidityCheckFunc:             NoStrictValidityCheck,
+		canonicalJSONCheck:                     noVerifyCanonicalJSON,
+		notificationLevelCheck:                 noCheckLevels,
+		restrictedJoinServernameFunc:           emptyAuthorisedViaServerName,
+		checkRestrictedJoin:                    noCheckRestrictedJoin,
+		parsePowerLevelsFunc:                   parsePowerLevels,
+		checkKnockingAllowedFunc:               disallowKnocking,
+		checkRestrictedJoinAllowedFunc:         disallowRestrictedJoins,
+		newEventFromUntrustedJSONFunc:          newEventFromUntrustedJSONV1,
+		newEventFromTrustedJSONFunc:            newEventFromTrustedJSONV1,
+		newEventFromTrustedJSONWithEventIDFunc: newEventFromTrustedJSONWithEventIDV1,
 	},
-	RoomVersionV2: {
-		Supported:                       true,
-		Stable:                          true,
-		stateResAlgorithm:               StateResV2,
-		eventFormat:                     EventFormatV1,
-		eventIDFormat:                   EventIDFormatV1,
-		redactionAlgorithm:              RedactionAlgorithmV1,
-		enforceSignatureChecks:          false,
-		enforceCanonicalJSON:            false,
-		powerLevelsIncludeNotifications: false,
-		allowKnockingInEventAuth:        KnocksForbidden,
-		allowRestrictedJoinsInEventAuth: NoRestrictedJoins,
-		requireIntegerPowerLevels:       false,
+	RoomVersionV2: RoomVersionImpl{
+		ver:                                    RoomVersionV2,
+		stable:                                 true,
+		stateResAlgorithm:                      StateResV2,
+		eventFormat:                            EventFormatV1,
+		eventIDFormat:                          EventIDFormatV1,
+		redactionAlgorithm:                     redactEventJSONV1,
+		signatureValidityCheckFunc:             NoStrictValidityCheck,
+		canonicalJSONCheck:                     noVerifyCanonicalJSON,
+		notificationLevelCheck:                 noCheckLevels,
+		restrictedJoinServernameFunc:           emptyAuthorisedViaServerName,
+		checkRestrictedJoin:                    noCheckRestrictedJoin,
+		parsePowerLevelsFunc:                   parsePowerLevels,
+		checkKnockingAllowedFunc:               disallowKnocking,
+		checkRestrictedJoinAllowedFunc:         disallowRestrictedJoins,
+		newEventFromUntrustedJSONFunc:          newEventFromUntrustedJSONV1,
+		newEventFromTrustedJSONFunc:            newEventFromTrustedJSONV1,
+		newEventFromTrustedJSONWithEventIDFunc: newEventFromTrustedJSONWithEventIDV1,
 	},
-	RoomVersionV3: {
-		Supported:                       true,
-		Stable:                          true,
-		stateResAlgorithm:               StateResV2,
-		eventFormat:                     EventFormatV2,
-		eventIDFormat:                   EventIDFormatV2,
-		redactionAlgorithm:              RedactionAlgorithmV1,
-		enforceSignatureChecks:          false,
-		enforceCanonicalJSON:            false,
-		powerLevelsIncludeNotifications: false,
-		allowKnockingInEventAuth:        KnocksForbidden,
-		allowRestrictedJoinsInEventAuth: NoRestrictedJoins,
-		requireIntegerPowerLevels:       false,
+	RoomVersionV3: RoomVersionImpl{
+		ver:                                    RoomVersionV3,
+		stable:                                 true,
+		stateResAlgorithm:                      StateResV2,
+		eventFormat:                            EventFormatV2,
+		eventIDFormat:                          EventIDFormatV2,
+		redactionAlgorithm:                     redactEventJSONV1,
+		signatureValidityCheckFunc:             NoStrictValidityCheck,
+		canonicalJSONCheck:                     noVerifyCanonicalJSON,
+		notificationLevelCheck:                 noCheckLevels,
+		restrictedJoinServernameFunc:           emptyAuthorisedViaServerName,
+		checkRestrictedJoin:                    noCheckRestrictedJoin,
+		parsePowerLevelsFunc:                   parsePowerLevels,
+		checkKnockingAllowedFunc:               disallowKnocking,
+		checkRestrictedJoinAllowedFunc:         disallowRestrictedJoins,
+		newEventFromUntrustedJSONFunc:          newEventFromUntrustedJSONV2,
+		newEventFromTrustedJSONFunc:            newEventFromTrustedJSONV2,
+		newEventFromTrustedJSONWithEventIDFunc: newEventFromTrustedJSONWithEventIDV2,
 	},
-	RoomVersionV4: {
-		Supported:                       true,
-		Stable:                          true,
-		stateResAlgorithm:               StateResV2,
-		eventFormat:                     EventFormatV2,
-		eventIDFormat:                   EventIDFormatV3,
-		redactionAlgorithm:              RedactionAlgorithmV1,
-		enforceSignatureChecks:          false,
-		enforceCanonicalJSON:            false,
-		powerLevelsIncludeNotifications: false,
-		allowKnockingInEventAuth:        KnocksForbidden,
-		allowRestrictedJoinsInEventAuth: NoRestrictedJoins,
-		requireIntegerPowerLevels:       false,
+	RoomVersionV4: RoomVersionImpl{
+		ver:                                    RoomVersionV4,
+		stable:                                 true,
+		stateResAlgorithm:                      StateResV2,
+		eventFormat:                            EventFormatV2,
+		eventIDFormat:                          EventIDFormatV3,
+		redactionAlgorithm:                     redactEventJSONV1,
+		signatureValidityCheckFunc:             NoStrictValidityCheck,
+		canonicalJSONCheck:                     noVerifyCanonicalJSON,
+		notificationLevelCheck:                 noCheckLevels,
+		restrictedJoinServernameFunc:           emptyAuthorisedViaServerName,
+		checkRestrictedJoin:                    noCheckRestrictedJoin,
+		parsePowerLevelsFunc:                   parsePowerLevels,
+		checkKnockingAllowedFunc:               disallowKnocking,
+		checkRestrictedJoinAllowedFunc:         disallowRestrictedJoins,
+		newEventFromUntrustedJSONFunc:          newEventFromUntrustedJSONV2,
+		newEventFromTrustedJSONFunc:            newEventFromTrustedJSONV2,
+		newEventFromTrustedJSONWithEventIDFunc: newEventFromTrustedJSONWithEventIDV2,
 	},
-	RoomVersionV5: {
-		Supported:                       true,
-		Stable:                          true,
-		stateResAlgorithm:               StateResV2,
-		eventFormat:                     EventFormatV2,
-		eventIDFormat:                   EventIDFormatV3,
-		redactionAlgorithm:              RedactionAlgorithmV1,
-		enforceSignatureChecks:          true,
-		enforceCanonicalJSON:            false,
-		powerLevelsIncludeNotifications: false,
-		allowKnockingInEventAuth:        KnocksForbidden,
-		allowRestrictedJoinsInEventAuth: NoRestrictedJoins,
-		requireIntegerPowerLevels:       false,
+	RoomVersionV5: RoomVersionImpl{
+		ver:                                    RoomVersionV5,
+		stable:                                 true,
+		stateResAlgorithm:                      StateResV2,
+		eventFormat:                            EventFormatV2,
+		eventIDFormat:                          EventIDFormatV3,
+		redactionAlgorithm:                     redactEventJSONV1,
+		signatureValidityCheckFunc:             StrictValiditySignatureCheck,
+		canonicalJSONCheck:                     noVerifyCanonicalJSON,
+		notificationLevelCheck:                 noCheckLevels,
+		restrictedJoinServernameFunc:           emptyAuthorisedViaServerName,
+		checkRestrictedJoin:                    noCheckRestrictedJoin,
+		parsePowerLevelsFunc:                   parsePowerLevels,
+		checkKnockingAllowedFunc:               disallowKnocking,
+		checkRestrictedJoinAllowedFunc:         disallowRestrictedJoins,
+		newEventFromUntrustedJSONFunc:          newEventFromUntrustedJSONV2,
+		newEventFromTrustedJSONFunc:            newEventFromTrustedJSONV2,
+		newEventFromTrustedJSONWithEventIDFunc: newEventFromTrustedJSONWithEventIDV2,
 	},
-	RoomVersionV6: {
-		Supported:                       true,
-		Stable:                          true,
-		stateResAlgorithm:               StateResV2,
-		eventFormat:                     EventFormatV2,
-		eventIDFormat:                   EventIDFormatV3,
-		redactionAlgorithm:              RedactionAlgorithmV2,
-		enforceSignatureChecks:          true,
-		enforceCanonicalJSON:            true,
-		powerLevelsIncludeNotifications: true,
-		allowKnockingInEventAuth:        KnocksForbidden,
-		allowRestrictedJoinsInEventAuth: NoRestrictedJoins,
-		requireIntegerPowerLevels:       false,
+	RoomVersionV6: RoomVersionImpl{
+		ver:                                    RoomVersionV6,
+		stable:                                 true,
+		stateResAlgorithm:                      StateResV2,
+		eventFormat:                            EventFormatV2,
+		eventIDFormat:                          EventIDFormatV3,
+		redactionAlgorithm:                     redactEventJSONV2,
+		signatureValidityCheckFunc:             StrictValiditySignatureCheck,
+		canonicalJSONCheck:                     verifyEnforcedCanonicalJSON,
+		notificationLevelCheck:                 checkNotificationLevels,
+		restrictedJoinServernameFunc:           emptyAuthorisedViaServerName,
+		checkRestrictedJoin:                    noCheckRestrictedJoin,
+		parsePowerLevelsFunc:                   parsePowerLevels,
+		checkKnockingAllowedFunc:               disallowKnocking,
+		checkRestrictedJoinAllowedFunc:         disallowRestrictedJoins,
+		newEventFromUntrustedJSONFunc:          newEventFromUntrustedJSONV2,
+		newEventFromTrustedJSONFunc:            newEventFromTrustedJSONV2,
+		newEventFromTrustedJSONWithEventIDFunc: newEventFromTrustedJSONWithEventIDV2,
 	},
-	RoomVersionV7: {
-		Supported:                       true,
-		Stable:                          true,
-		stateResAlgorithm:               StateResV2,
-		eventFormat:                     EventFormatV2,
-		eventIDFormat:                   EventIDFormatV3,
-		redactionAlgorithm:              RedactionAlgorithmV2,
-		enforceSignatureChecks:          true,
-		enforceCanonicalJSON:            true,
-		powerLevelsIncludeNotifications: true,
-		allowKnockingInEventAuth:        KnockOnly,
-		allowRestrictedJoinsInEventAuth: NoRestrictedJoins,
-		requireIntegerPowerLevels:       false,
+	RoomVersionV7: RoomVersionImpl{
+		ver:                                    RoomVersionV7,
+		stable:                                 true,
+		stateResAlgorithm:                      StateResV2,
+		eventFormat:                            EventFormatV2,
+		eventIDFormat:                          EventIDFormatV3,
+		redactionAlgorithm:                     redactEventJSONV2,
+		signatureValidityCheckFunc:             StrictValiditySignatureCheck,
+		canonicalJSONCheck:                     verifyEnforcedCanonicalJSON,
+		notificationLevelCheck:                 checkNotificationLevels,
+		restrictedJoinServernameFunc:           emptyAuthorisedViaServerName,
+		checkRestrictedJoin:                    noCheckRestrictedJoin,
+		parsePowerLevelsFunc:                   parsePowerLevels,
+		checkKnockingAllowedFunc:               checkKnocking,
+		checkRestrictedJoinAllowedFunc:         disallowRestrictedJoins,
+		newEventFromUntrustedJSONFunc:          newEventFromUntrustedJSONV2,
+		newEventFromTrustedJSONFunc:            newEventFromTrustedJSONV2,
+		newEventFromTrustedJSONWithEventIDFunc: newEventFromTrustedJSONWithEventIDV2,
 	},
-	RoomVersionV8: {
-		Supported:                       true,
-		Stable:                          true,
-		stateResAlgorithm:               StateResV2,
-		eventFormat:                     EventFormatV2,
-		eventIDFormat:                   EventIDFormatV3,
-		redactionAlgorithm:              RedactionAlgorithmV3,
-		enforceSignatureChecks:          true,
-		enforceCanonicalJSON:            true,
-		powerLevelsIncludeNotifications: true,
-		allowKnockingInEventAuth:        KnockOnly,
-		allowRestrictedJoinsInEventAuth: RestrictedOnly,
-		requireIntegerPowerLevels:       false,
+	RoomVersionV8: RoomVersionImpl{
+		ver:                                    RoomVersionV8,
+		stable:                                 true,
+		stateResAlgorithm:                      StateResV2,
+		eventFormat:                            EventFormatV2,
+		eventIDFormat:                          EventIDFormatV3,
+		redactionAlgorithm:                     redactEventJSONV3,
+		signatureValidityCheckFunc:             StrictValiditySignatureCheck,
+		canonicalJSONCheck:                     verifyEnforcedCanonicalJSON,
+		notificationLevelCheck:                 checkNotificationLevels,
+		restrictedJoinServernameFunc:           extractAuthorisedViaServerName,
+		checkRestrictedJoin:                    checkRestrictedJoin,
+		parsePowerLevelsFunc:                   parsePowerLevels,
+		checkKnockingAllowedFunc:               checkKnocking,
+		checkRestrictedJoinAllowedFunc:         allowRestrictedJoins,
+		newEventFromUntrustedJSONFunc:          newEventFromUntrustedJSONV2,
+		newEventFromTrustedJSONFunc:            newEventFromTrustedJSONV2,
+		newEventFromTrustedJSONWithEventIDFunc: newEventFromTrustedJSONWithEventIDV2,
 	},
-	RoomVersionV9: {
-		Supported:                       true,
-		Stable:                          true,
-		stateResAlgorithm:               StateResV2,
-		eventFormat:                     EventFormatV2,
-		eventIDFormat:                   EventIDFormatV3,
-		redactionAlgorithm:              RedactionAlgorithmV4,
-		enforceSignatureChecks:          true,
-		enforceCanonicalJSON:            true,
-		powerLevelsIncludeNotifications: true,
-		allowKnockingInEventAuth:        KnockOnly,
-		allowRestrictedJoinsInEventAuth: RestrictedOnly,
-		requireIntegerPowerLevels:       false,
+	RoomVersionV9: RoomVersionImpl{
+		ver:                                    RoomVersionV9,
+		stable:                                 true,
+		stateResAlgorithm:                      StateResV2,
+		eventFormat:                            EventFormatV2,
+		eventIDFormat:                          EventIDFormatV3,
+		redactionAlgorithm:                     redactEventJSONV4,
+		signatureValidityCheckFunc:             StrictValiditySignatureCheck,
+		canonicalJSONCheck:                     verifyEnforcedCanonicalJSON,
+		notificationLevelCheck:                 checkNotificationLevels,
+		restrictedJoinServernameFunc:           extractAuthorisedViaServerName,
+		checkRestrictedJoin:                    checkRestrictedJoin,
+		parsePowerLevelsFunc:                   parsePowerLevels,
+		checkKnockingAllowedFunc:               checkKnocking,
+		checkRestrictedJoinAllowedFunc:         allowRestrictedJoins,
+		newEventFromUntrustedJSONFunc:          newEventFromUntrustedJSONV2,
+		newEventFromTrustedJSONFunc:            newEventFromTrustedJSONV2,
+		newEventFromTrustedJSONWithEventIDFunc: newEventFromTrustedJSONWithEventIDV2,
 	},
-	RoomVersionV10: {
-		Supported:                       true,
-		Stable:                          true,
-		stateResAlgorithm:               StateResV2,
-		eventFormat:                     EventFormatV2,
-		eventIDFormat:                   EventIDFormatV3,
-		redactionAlgorithm:              RedactionAlgorithmV4,
-		enforceSignatureChecks:          true,
-		enforceCanonicalJSON:            true,
-		powerLevelsIncludeNotifications: true,
-		allowKnockingInEventAuth:        KnockOrKnockRestricted,
-		allowRestrictedJoinsInEventAuth: RestrictedOrKnockRestricted,
-		requireIntegerPowerLevels:       true,
+	RoomVersionV10: RoomVersionImpl{
+		ver:                                    RoomVersionV10,
+		stable:                                 true,
+		stateResAlgorithm:                      StateResV2,
+		eventFormat:                            EventFormatV2,
+		eventIDFormat:                          EventIDFormatV3,
+		redactionAlgorithm:                     redactEventJSONV4,
+		signatureValidityCheckFunc:             StrictValiditySignatureCheck,
+		canonicalJSONCheck:                     verifyEnforcedCanonicalJSON,
+		notificationLevelCheck:                 checkNotificationLevels,
+		restrictedJoinServernameFunc:           extractAuthorisedViaServerName,
+		checkRestrictedJoin:                    checkRestrictedJoin,
+		parsePowerLevelsFunc:                   parseIntegerPowerLevels,
+		checkKnockingAllowedFunc:               checkKnocking,
+		checkRestrictedJoinAllowedFunc:         allowRestrictedJoins,
+		newEventFromUntrustedJSONFunc:          newEventFromUntrustedJSONV2,
+		newEventFromTrustedJSONFunc:            newEventFromTrustedJSONV2,
+		newEventFromTrustedJSONWithEventIDFunc: newEventFromTrustedJSONWithEventIDV2,
 	},
-	"org.matrix.msc3667": { // based on room version 7
-		Supported:                       true,
-		Stable:                          false,
-		stateResAlgorithm:               StateResV2,
-		eventFormat:                     EventFormatV2,
-		eventIDFormat:                   EventIDFormatV3,
-		redactionAlgorithm:              RedactionAlgorithmV2,
-		enforceSignatureChecks:          true,
-		enforceCanonicalJSON:            true,
-		powerLevelsIncludeNotifications: true,
-		allowKnockingInEventAuth:        KnockOnly,
-		allowRestrictedJoinsInEventAuth: NoRestrictedJoins,
-		requireIntegerPowerLevels:       true,
+	RoomVersionPseudoIDs: RoomVersionImpl{ // currently, just a copy of V10
+		ver:                                    RoomVersionPseudoIDs,
+		stable:                                 false,
+		stateResAlgorithm:                      StateResV2,
+		eventFormat:                            EventFormatV2,
+		eventIDFormat:                          EventIDFormatV3,
+		redactionAlgorithm:                     redactEventJSONV4,
+		signatureValidityCheckFunc:             StrictValiditySignatureCheck,
+		canonicalJSONCheck:                     verifyEnforcedCanonicalJSON,
+		notificationLevelCheck:                 checkNotificationLevels,
+		restrictedJoinServernameFunc:           extractAuthorisedViaServerName,
+		checkRestrictedJoin:                    checkRestrictedJoin,
+		parsePowerLevelsFunc:                   parseIntegerPowerLevels,
+		checkKnockingAllowedFunc:               checkKnocking,
+		checkRestrictedJoinAllowedFunc:         allowRestrictedJoins,
+		newEventFromUntrustedJSONFunc:          newEventFromUntrustedJSONV2,
+		newEventFromTrustedJSONFunc:            newEventFromTrustedJSONV2,
+		newEventFromTrustedJSONWithEventIDFunc: newEventFromTrustedJSONWithEventIDV2,
 	},
-	"org.matrix.msc3787": { // roughly, the union of v7 and v9
-		Supported:                       true,
-		Stable:                          false,
-		stateResAlgorithm:               StateResV2,
-		eventFormat:                     EventFormatV2,
-		eventIDFormat:                   EventIDFormatV3,
-		redactionAlgorithm:              RedactionAlgorithmV4,
-		enforceSignatureChecks:          true,
-		enforceCanonicalJSON:            true,
-		powerLevelsIncludeNotifications: true,
-		allowKnockingInEventAuth:        KnockOrKnockRestricted,
-		allowRestrictedJoinsInEventAuth: RestrictedOrKnockRestricted,
-		requireIntegerPowerLevels:       false,
+	"org.matrix.msc3667": RoomVersionImpl{ // based on room version 7
+		ver:                                    RoomVersion("org.matrix.msc3667"),
+		stable:                                 false,
+		stateResAlgorithm:                      StateResV2,
+		eventFormat:                            EventFormatV2,
+		eventIDFormat:                          EventIDFormatV3,
+		redactionAlgorithm:                     redactEventJSONV2,
+		signatureValidityCheckFunc:             StrictValiditySignatureCheck,
+		canonicalJSONCheck:                     verifyEnforcedCanonicalJSON,
+		notificationLevelCheck:                 checkNotificationLevels,
+		restrictedJoinServernameFunc:           emptyAuthorisedViaServerName,
+		checkRestrictedJoin:                    noCheckRestrictedJoin,
+		parsePowerLevelsFunc:                   parseIntegerPowerLevels,
+		checkKnockingAllowedFunc:               checkKnocking,
+		checkRestrictedJoinAllowedFunc:         disallowRestrictedJoins,
+		newEventFromUntrustedJSONFunc:          newEventFromUntrustedJSONV2,
+		newEventFromTrustedJSONFunc:            newEventFromTrustedJSONV2,
+		newEventFromTrustedJSONWithEventIDFunc: newEventFromTrustedJSONWithEventIDV2,
+	},
+	"org.matrix.msc3787": RoomVersionImpl{ // roughly, the union of v7 and v9
+		ver:                                    RoomVersion("org.matrix.msc3787"),
+		stable:                                 false,
+		stateResAlgorithm:                      StateResV2,
+		eventFormat:                            EventFormatV2,
+		eventIDFormat:                          EventIDFormatV3,
+		redactionAlgorithm:                     redactEventJSONV4,
+		signatureValidityCheckFunc:             StrictValiditySignatureCheck,
+		canonicalJSONCheck:                     verifyEnforcedCanonicalJSON,
+		notificationLevelCheck:                 checkNotificationLevels,
+		restrictedJoinServernameFunc:           extractAuthorisedViaServerName,
+		checkRestrictedJoin:                    checkRestrictedJoin,
+		parsePowerLevelsFunc:                   parsePowerLevels,
+		checkKnockingAllowedFunc:               checkKnocking,
+		newEventFromUntrustedJSONFunc:          newEventFromUntrustedJSONV2,
+		newEventFromTrustedJSONFunc:            newEventFromTrustedJSONV2,
+		newEventFromTrustedJSONWithEventIDFunc: newEventFromTrustedJSONWithEventIDV2,
 	},
 }
 
 // RoomVersions returns information about room versions currently
 // implemented by this commit of gomatrixserverlib.
-func RoomVersions() map[RoomVersion]RoomVersionDescription {
+func RoomVersions() map[RoomVersion]IRoomVersion {
 	return roomVersionMeta
 }
 
-// SupportedRoomVersions returns a map of descriptions for room
-// versions that are marked as supported.
-func SupportedRoomVersions() map[RoomVersion]RoomVersionDescription {
-	versions := make(map[RoomVersion]RoomVersionDescription)
-	for id, version := range RoomVersions() {
-		if version.Supported {
-			versions[id] = version
+func KnownRoomVersion(verStr RoomVersion) bool {
+	_, ok := roomVersionMeta[verStr]
+	return ok
+}
+
+// MustGetRoomVersion is GetRoomVersion but panics if the version doesn't exist. Useful for tests.
+func MustGetRoomVersion(verStr RoomVersion) IRoomVersion {
+	impl, err := GetRoomVersion(verStr)
+	if err != nil {
+		panic(fmt.Sprintf("MustGetRoomVersion: %s", verStr))
+	}
+	return impl
+}
+
+func GetRoomVersion(verStr RoomVersion) (impl IRoomVersion, err error) {
+	v, ok := roomVersionMeta[verStr]
+	if !ok {
+		return impl, UnsupportedRoomVersionError{
+			Version: verStr,
 		}
 	}
-	return versions
+	return v, nil
 }
 
 // StableRoomVersions returns a map of descriptions for room
 // versions that are marked as stable.
-func StableRoomVersions() map[RoomVersion]RoomVersionDescription {
-	versions := make(map[RoomVersion]RoomVersionDescription)
+func StableRoomVersions() map[RoomVersion]IRoomVersion {
+	versions := make(map[RoomVersion]IRoomVersion)
 	for id, version := range RoomVersions() {
-		if version.Supported && version.Stable {
+		if version.Stable() {
 			versions[id] = version
 		}
 	}
 	return versions
 }
 
-// RoomVersionDescription contains information about a given room version, e.g. which
-// state resolution algorithm or event ID format to use.
 // RoomVersionDescription contains information about a room version,
 // namely whether it is marked as supported or stable in this server
 // version, along with the state resolution algorithm, event ID etc
@@ -295,135 +381,149 @@ func StableRoomVersions() map[RoomVersion]RoomVersionDescription {
 // in order to hint whether the version should be used to clients
 // calling the /capabilities endpoint.
 // https://matrix.org/docs/spec/client_server/r0.6.0#get-matrix-client-r0-capabilities
-type RoomVersionDescription struct {
-	stateResAlgorithm               StateResAlgorithm
-	eventFormat                     EventFormat
-	eventIDFormat                   EventIDFormat
-	redactionAlgorithm              RedactionAlgorithm
-	allowKnockingInEventAuth        JoinRulesPermittingKnockInEventAuth
-	allowRestrictedJoinsInEventAuth JoinRulesPermittingRestrictedJoinInEventAuth
-	enforceSignatureChecks          bool
-	enforceCanonicalJSON            bool
-	powerLevelsIncludeNotifications bool
-	requireIntegerPowerLevels       bool
-	Supported                       bool
-	Stable                          bool
+type RoomVersionImpl struct {
+	ver                                    RoomVersion
+	stateResAlgorithm                      StateResAlgorithm
+	eventFormat                            EventFormat
+	eventIDFormat                          EventIDFormat
+	redactionAlgorithm                     func(eventJSON []byte) ([]byte, error)
+	signatureValidityCheckFunc             SignatureValidityCheckFunc
+	canonicalJSONCheck                     func(eventJSON []byte) error
+	notificationLevelCheck                 func(senderLevel int64, oldPowerLevels, newPowerLevels PowerLevelContent) error
+	parsePowerLevelsFunc                   func(contentBytes []byte, c *PowerLevelContent) error
+	stable                                 bool
+	checkRestrictedJoin                    restrictedJoinCheckFunc
+	restrictedJoinServernameFunc           func(content []byte) (spec.ServerName, error)
+	checkRestrictedJoinAllowedFunc         func() error
+	checkKnockingAllowedFunc               func(m *membershipAllower) error
+	newEventFromUntrustedJSONFunc          func(eventJSON []byte, roomVersion IRoomVersion) (result PDU, err error)
+	newEventFromTrustedJSONFunc            func(eventJSON []byte, redacted bool, roomVersion IRoomVersion) (result PDU, err error)
+	newEventFromTrustedJSONWithEventIDFunc func(eventID string, eventJSON []byte, redacted bool, roomVersion IRoomVersion) (result PDU, err error)
+}
+
+type restrictedJoinCheckFunc func(ctx context.Context, localServerName spec.ServerName, roomQuerier RestrictedRoomJoinQuerier, roomID spec.RoomID, senderID spec.SenderID) (string, error)
+
+func (v RoomVersionImpl) Version() RoomVersion {
+	return v.ver
+}
+
+func (v RoomVersionImpl) Stable() bool {
+	return v.stable
 }
 
 // StateResAlgorithm returns the state resolution for the given room version.
-func (v RoomVersion) StateResAlgorithm() (StateResAlgorithm, error) {
-	if r, ok := roomVersionMeta[v]; ok {
-		return r.stateResAlgorithm, nil
-	}
-	return 0, UnsupportedRoomVersionError{v}
+func (v RoomVersionImpl) StateResAlgorithm() StateResAlgorithm {
+	return v.stateResAlgorithm
 }
 
 // EventFormat returns the event format for the given room version.
-func (v RoomVersion) EventFormat() (EventFormat, error) {
-	if r, ok := roomVersionMeta[v]; ok {
-		return r.eventFormat, nil
-	}
-	return 0, UnsupportedRoomVersionError{v}
+func (v RoomVersionImpl) EventFormat() EventFormat {
+	return v.eventFormat
 }
 
 // EventIDFormat returns the event ID format for the given room version.
-func (v RoomVersion) EventIDFormat() (EventIDFormat, error) {
-	if r, ok := roomVersionMeta[v]; ok {
-		return r.eventIDFormat, nil
-	}
-	return 0, UnsupportedRoomVersionError{v}
+func (v RoomVersionImpl) EventIDFormat() EventIDFormat {
+	return v.eventIDFormat
 }
 
-// RedactionAlgorithm returns the redaction algorithm for the given room version.
-func (v RoomVersion) RedactionAlgorithm() (RedactionAlgorithm, error) {
-	if r, ok := roomVersionMeta[v]; ok {
-		return r.redactionAlgorithm, nil
-	}
-	return 0, UnsupportedRoomVersionError{v}
+// SignatureValidityCheck returns true if the signature check are passing.
+func (v RoomVersionImpl) SignatureValidityCheck(atTS, validUntilTS spec.Timestamp) bool {
+	return v.signatureValidityCheckFunc(atTS, validUntilTS)
 }
 
-// StrictValidityChecking returns true if the given room version calls for
-// strict signature checking (room version 5 and onward) or false otherwise.
-func (v RoomVersion) StrictValidityChecking() (bool, error) {
-	if r, ok := roomVersionMeta[v]; ok {
-		return r.enforceSignatureChecks, nil
-	}
-	return false, UnsupportedRoomVersionError{v}
+// CheckNotificationLevels checks that the changes in notification levels are allowed.
+func (v RoomVersionImpl) CheckNotificationLevels(senderLevel int64, oldPowerLevels, newPowerLevels PowerLevelContent) error {
+	return v.notificationLevelCheck(senderLevel, oldPowerLevels, newPowerLevels)
 }
 
-// PowerLevelsIncludeNotifications returns true if the given room version calls
-// for the power level checks to cover the `notifications` key or false otherwise.
-func (v RoomVersion) PowerLevelsIncludeNotifications() (bool, error) {
-	if r, ok := roomVersionMeta[v]; ok {
-		return r.powerLevelsIncludeNotifications, nil
-	}
-	return false, UnsupportedRoomVersionError{v}
+// CheckKnockingAllowed checks if this room version supports knocking on rooms.
+func (v RoomVersionImpl) CheckKnockingAllowed(m *membershipAllower) error {
+	return v.checkKnockingAllowedFunc(m)
 }
 
-// AllowKnockingInEventAuth returns true if the given room version and given
-// join rule allows for the `knock` membership state or false otherwise.
-func (v RoomVersion) AllowKnockingInEventAuth(joinRule string) (bool, error) {
-	if r, ok := roomVersionMeta[v]; ok {
-		switch r.allowKnockingInEventAuth {
-		case KnockOnly:
-			return joinRule == Knock, nil
-		case KnockOrKnockRestricted:
-			return (joinRule == Knock || joinRule == KnockRestricted), nil
-		case KnocksForbidden:
-			return false, nil
-		}
-	}
-	return false, UnsupportedRoomVersionError{v}
+// CheckRestrictedJoinsAllowed checks if this room version allows restricted joins.
+func (v RoomVersionImpl) CheckRestrictedJoinsAllowed() error {
+	return v.checkRestrictedJoinAllowedFunc()
 }
 
-// AllowRestrictedJoinsInEventAuth returns true if the given room version and
-// join rule allows for memberships signed by servers in the restricted join rules.
-func (v RoomVersion) AllowRestrictedJoinsInEventAuth(joinRule string) (bool, error) {
-	if r, ok := roomVersionMeta[v]; ok {
-		switch r.allowRestrictedJoinsInEventAuth {
-		case NoRestrictedJoins:
-			return false, nil
-		case RestrictedOnly:
-			return joinRule == Restricted, nil
-		case RestrictedOrKnockRestricted:
-			return (joinRule == Restricted || joinRule == KnockRestricted), nil
-		}
-	}
-	return false, UnsupportedRoomVersionError{v}
+// RestrictedJoinServername returns the severName from a potentially existing
+// join_authorised_via_users_server content field. Used to verify event signatures.
+func (v RoomVersionImpl) RestrictedJoinServername(content []byte) (spec.ServerName, error) {
+	return v.restrictedJoinServernameFunc(content)
 }
 
-// MayAllowRestrictedJoinsInEventAuth returns true if the given room version
-// might allow for memberships signed by servers in the restricted join rules.
-// (For an authoritative answer, the room's join rules must be known. If they
-// are, use AllowRestrictedJoinsInEventAuth.)
-func (v RoomVersion) MayAllowRestrictedJoinsInEventAuth() (bool, error) {
-	if r, ok := roomVersionMeta[v]; ok {
-		switch r.allowRestrictedJoinsInEventAuth {
-		case NoRestrictedJoins:
-			return false, nil
-		case RestrictedOnly, RestrictedOrKnockRestricted:
-			return true, nil
-		}
-	}
-	return false, UnsupportedRoomVersionError{v}
+// CheckCanonicalJSON returns an error if the eventJSON is not canonical JSON.
+func (v RoomVersionImpl) CheckCanonicalJSON(eventJSON []byte) error {
+	return v.canonicalJSONCheck(eventJSON)
 }
 
-// PowerLevelsIncludeNotifications returns true if the given room version calls
-// for the power level checks to cover the `notifications` key or false otherwise.
-func (v RoomVersion) EnforceCanonicalJSON() (bool, error) {
-	if r, ok := roomVersionMeta[v]; ok {
-		return r.enforceCanonicalJSON, nil
-	}
-	return false, UnsupportedRoomVersionError{v}
+// ParsePowerLevels parses the power_level directly into the passed PowerLevelContent.
+func (v RoomVersionImpl) ParsePowerLevels(contentBytes []byte, c *PowerLevelContent) error {
+	return v.parsePowerLevelsFunc(contentBytes, c)
 }
 
-// RequireIntegerPowerLevels returns true if the given room version calls for
-// power levels as integers only, false otherwise.
-func (v RoomVersion) RequireIntegerPowerLevels() (bool, error) {
-	if r, ok := roomVersionMeta[v]; ok {
-		return r.requireIntegerPowerLevels, nil
+func (v RoomVersionImpl) CheckRestrictedJoin(
+	ctx context.Context,
+	localServerName spec.ServerName,
+	roomQuerier RestrictedRoomJoinQuerier,
+	roomID spec.RoomID, senderID spec.SenderID,
+) (string, error) {
+	return v.checkRestrictedJoin(ctx, localServerName, roomQuerier, roomID, senderID)
+}
+
+// RedactEventJSON strips the user controlled fields from an event, but leaves the
+// fields necessary for authenticating the event.
+func (v RoomVersionImpl) RedactEventJSON(eventJSON []byte) ([]byte, error) {
+	return v.redactionAlgorithm(eventJSON)
+}
+
+func (v RoomVersionImpl) NewEventFromTrustedJSON(eventJSON []byte, redacted bool) (result PDU, err error) {
+	return v.newEventFromTrustedJSONFunc(eventJSON, redacted, v)
+}
+
+func (v RoomVersionImpl) NewEventFromTrustedJSONWithEventID(eventID string, eventJSON []byte, redacted bool) (result PDU, err error) {
+	return v.newEventFromTrustedJSONWithEventIDFunc(eventID, eventJSON, redacted, v)
+}
+
+func (v RoomVersionImpl) NewEventFromUntrustedJSON(eventJSON []byte) (result PDU, err error) {
+	return v.newEventFromUntrustedJSONFunc(eventJSON, v)
+}
+
+func (v RoomVersionImpl) NewEventBuilder() *EventBuilder {
+	return &EventBuilder{
+		version: v,
 	}
-	return false, UnsupportedRoomVersionError{v}
+}
+func (v RoomVersionImpl) NewEventBuilderFromProtoEvent(pe *ProtoEvent) *EventBuilder {
+	eb := v.NewEventBuilder()
+	// for now copies all fields, but we should be specific depending on the room version
+	eb.AuthEvents = pe.AuthEvents
+	eb.Content = pe.Content
+	eb.Depth = pe.Depth
+	eb.PrevEvents = pe.PrevEvents
+	eb.Redacts = pe.Redacts
+	eb.RoomID = pe.RoomID
+	eb.SenderID = pe.SenderID
+	eb.Signature = pe.Signature
+	eb.StateKey = pe.StateKey
+	eb.Type = pe.Type
+	eb.Unsigned = pe.Unsigned
+	return eb
+}
+
+// NewEventFromHeaderedJSON creates a new event where the room version is embedded in the JSON bytes.
+// The version is contained in the top level "_room_version" key.
+func NewEventFromHeaderedJSON(headeredEventJSON []byte, redacted bool) (PDU, error) {
+	eventID := gjson.GetBytes(headeredEventJSON, "_event_id").String()
+	roomVer := RoomVersion(gjson.GetBytes(headeredEventJSON, "_room_version").String())
+	verImpl, err := GetRoomVersion(roomVer)
+	if err != nil {
+		return nil, err
+	}
+	headeredEventJSON, _ = sjson.DeleteBytes(headeredEventJSON, "_event_id")
+	headeredEventJSON, _ = sjson.DeleteBytes(headeredEventJSON, "_room_version")
+
+	return verImpl.NewEventFromTrustedJSONWithEventID(eventID, headeredEventJSON, redacted)
 }
 
 // UnsupportedRoomVersionError occurs when a call has been made with a room
