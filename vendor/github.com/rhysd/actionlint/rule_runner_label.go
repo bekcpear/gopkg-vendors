@@ -14,6 +14,9 @@ const (
 	compatMacOS1015
 	compatMacOS110
 	compatMacOS120
+	compatMacOS120XL
+	compatMacOS130
+	compatMacOS130XL
 	compatWindows2016
 	compatWindows2019
 	compatWindows2022
@@ -30,6 +33,11 @@ var allGitHubHostedRunnerLabels = []string{
 	"ubuntu-20.04",
 	"ubuntu-18.04",
 	"macos-latest",
+	"macos-latest-xl",
+	"macos-13-xl",
+	"macos-13",
+	"macos-13.0",
+	"macos-12-xl",
 	"macos-12",
 	"macos-12.0",
 	"macos-11",
@@ -53,23 +61,28 @@ var selfHostedRunnerPresetOtherLabels = []string{
 }
 
 var defaultRunnerOSCompats = map[string]runnerOSCompat{
-	"ubuntu-latest":  compatUbuntu2004,
-	"ubuntu-22.04":   compatUbuntu2204,
-	"ubuntu-20.04":   compatUbuntu2004,
-	"ubuntu-18.04":   compatUbuntu1804,
-	"macos-latest":   compatMacOS110,
-	"macos-12":       compatMacOS120,
-	"macos-12.0":     compatMacOS120,
-	"macos-11":       compatMacOS110,
-	"macos-11.0":     compatMacOS110,
-	"macos-10.15":    compatMacOS1015,
-	"windows-latest": compatWindows2022,
-	"windows-2022":   compatWindows2022,
-	"windows-2019":   compatWindows2019,
-	"windows-2016":   compatWindows2016,
-	"linux":          compatUbuntu2204 | compatUbuntu2004 | compatUbuntu1804, // Note: "linux" does not always indicate Ubuntu. It might be Fedora or Arch or ...
-	"macos":          compatMacOS110 | compatMacOS1015,
-	"windows":        compatWindows2022 | compatWindows2019 | compatWindows2016,
+	"ubuntu-latest":   compatUbuntu2204,
+	"ubuntu-22.04":    compatUbuntu2204,
+	"ubuntu-20.04":    compatUbuntu2004,
+	"ubuntu-18.04":    compatUbuntu1804,
+	"macos-13-xl":     compatMacOS130XL,
+	"macos-13":        compatMacOS130,
+	"macos-13.0":      compatMacOS130,
+	"macos-latest-xl": compatMacOS120XL,
+	"macos-latest":    compatMacOS120,
+	"macos-12-xl":     compatMacOS120XL,
+	"macos-12":        compatMacOS120,
+	"macos-12.0":      compatMacOS120,
+	"macos-11":        compatMacOS110,
+	"macos-11.0":      compatMacOS110,
+	"macos-10.15":     compatMacOS1015,
+	"windows-latest":  compatWindows2022,
+	"windows-2022":    compatWindows2022,
+	"windows-2019":    compatWindows2019,
+	"windows-2016":    compatWindows2016,
+	"linux":           compatUbuntu2204 | compatUbuntu2004 | compatUbuntu1804, // Note: "linux" does not always indicate Ubuntu. It might be Fedora or Arch or ...
+	"macos":           compatMacOS130 | compatMacOS130XL | compatMacOS120 | compatMacOS120XL | compatMacOS110 | compatMacOS1015,
+	"windows":         compatWindows2022 | compatWindows2019 | compatWindows2016,
 }
 
 // RuleRunnerLabel is a rule to check runner label like "ubuntu-latest". There are two types of
@@ -110,8 +123,8 @@ func (rule *RuleRunnerLabel) VisitJobPre(n *Job) error {
 	}
 
 	rule.compats = map[runnerOSCompat]*String{}
-	if n.RunsOn.Expression != nil {
-		rule.checkLabelAndConflict(n.RunsOn.Expression, m)
+	if n.RunsOn.LabelsExpr != nil {
+		rule.checkLabelAndConflict(n.RunsOn.LabelsExpr, m)
 	} else {
 		for _, label := range n.RunsOn.Labels {
 			rule.checkLabelAndConflict(label, m)
