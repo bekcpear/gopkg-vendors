@@ -94,36 +94,76 @@ func getRequestBodyFromEvent(event *Event) []byte {
 	return nil
 }
 
-func transactionEnvelopeFromBody(eventID EventID, sentAt time.Time, body json.RawMessage) (*bytes.Buffer, error) {
-	var b bytes.Buffer
-	enc := json.NewEncoder(&b)
-	// envelope header
+func encodeEnvelopeItem(enc *json.Encoder, itemType string, body json.RawMessage) error {
+	// Item header
 	err := enc.Encode(struct {
-		EventID EventID   `json:"event_id"`
-		SentAt  time.Time `json:"sent_at"`
-	}{
-		EventID: eventID,
-		SentAt:  sentAt,
-	})
-	if err != nil {
-		return nil, err
-	}
-	// item header
-	err = enc.Encode(struct {
 		Type   string `json:"type"`
 		Length int    `json:"length"`
 	}{
-		Type:   transactionType,
+		Type:   itemType,
 		Length: len(body),
+	})
+	if err == nil {
+		// payload
+		err = enc.Encode(body)
+	}
+	return err
+}
+
+func envelopeFromBody(event *Event, dsn *Dsn, sentAt time.Time, body json.RawMessage) (*bytes.Buffer, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+
+	// Construct the trace envelope header
+	var trace = map[string]string{}
+	if dsc := event.sdkMetaData.dsc; dsc.HasEntries() {
+		for k, v := range dsc.Entries {
+			trace[k] = v
+		}
+	}
+
+	// Envelope header
+	err := enc.Encode(struct {
+		EventID EventID           `json:"event_id"`
+		SentAt  time.Time         `json:"sent_at"`
+		Dsn     string            `json:"dsn"`
+		Sdk     map[string]string `json:"sdk"`
+		Trace   map[string]string `json:"trace,omitempty"`
+	}{
+		EventID: event.EventID,
+		SentAt:  sentAt,
+		Trace:   trace,
+		Dsn:     dsn.String(),
+		Sdk: map[string]string{
+			"name":    event.Sdk.Name,
+			"version": event.Sdk.Version,
+		},
 	})
 	if err != nil {
 		return nil, err
 	}
-	// payload
-	err = enc.Encode(body)
+
+	if event.Type == transactionType {
+		err = encodeEnvelopeItem(enc, transactionType, body)
+	} else {
+		err = encodeEnvelopeItem(enc, eventType, body)
+	}
 	if err != nil {
 		return nil, err
 	}
+
+	// Profile data
+	if event.sdkMetaData.transactionProfile != nil {
+		body, err = json.Marshal(event.sdkMetaData.transactionProfile)
+		if err != nil {
+			return nil, err
+		}
+		err = encodeEnvelopeItem(enc, profileType, body)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &b, nil
 }
 
@@ -137,21 +177,14 @@ func getRequestFromEvent(event *Event, dsn *Dsn) (r *http.Request, err error) {
 	if body == nil {
 		return nil, errors.New("event could not be marshaled")
 	}
-	if event.Type == transactionType {
-		b, err := transactionEnvelopeFromBody(event.EventID, time.Now(), body)
-		if err != nil {
-			return nil, err
-		}
-		return http.NewRequest(
-			http.MethodPost,
-			dsn.EnvelopeAPIURL().String(),
-			b,
-		)
+	envelope, err := envelopeFromBody(event, dsn, time.Now(), body)
+	if err != nil {
+		return nil, err
 	}
 	return http.NewRequest(
 		http.MethodPost,
-		dsn.StoreAPIURL().String(),
-		bytes.NewReader(body),
+		dsn.GetAPIURL().String(),
+		envelope,
 	)
 }
 
