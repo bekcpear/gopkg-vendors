@@ -54,7 +54,7 @@ github.com/cloudflare/circl/math/mlsbset
 github.com/cloudflare/circl/sign
 github.com/cloudflare/circl/sign/ed25519
 github.com/cloudflare/circl/sign/ed448
-# github.com/containerd/containerd v1.6.19
+# github.com/containerd/containerd v1.6.20
 ## explicit; go 1.17
 github.com/containerd/containerd/pkg/userns
 # github.com/creack/pty v1.1.18
@@ -254,7 +254,7 @@ github.com/mgutz/ansi
 # github.com/mitchellh/mapstructure v1.1.2
 ## explicit
 github.com/mitchellh/mapstructure
-# github.com/moby/buildkit v0.11.5
+# github.com/moby/buildkit v0.11.6
 ## explicit; go 1.18
 github.com/moby/buildkit/frontend/dockerfile/dockerignore
 # github.com/moby/patternmatcher v0.5.0
@@ -268,7 +268,7 @@ github.com/moby/sys/sequential
 # github.com/opencontainers/go-digest v1.0.0
 ## explicit; go 1.13
 github.com/opencontainers/go-digest
-# github.com/opencontainers/image-spec v1.1.0-rc.3
+# github.com/opencontainers/image-spec v1.1.0-rc4
 ## explicit; go 1.18
 github.com/opencontainers/image-spec/specs-go
 github.com/opencontainers/image-spec/specs-go/v1
