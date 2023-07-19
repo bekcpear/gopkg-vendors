@@ -323,7 +323,7 @@ github.com/docker/cli/cli/config
 github.com/docker/cli/cli/config/configfile
 github.com/docker/cli/cli/config/credentials
 github.com/docker/cli/cli/config/types
-# github.com/docker/distribution v2.8.1+incompatible
+# github.com/docker/distribution v2.8.2+incompatible
 ## explicit
 github.com/docker/distribution/registry/client/auth/challenge
 # github.com/docker/docker v23.0.5+incompatible
@@ -1201,8 +1201,9 @@ github.com/tailscale/depaware/depaware
 # github.com/tailscale/goexpect v0.0.0-20210902213824-6e8c725cea41
 ## explicit; go 1.17
 github.com/tailscale/goexpect
-# github.com/tailscale/golang-x-crypto v0.0.0-20221115211329-17a3db2c30d2
+# github.com/tailscale/golang-x-crypto v0.0.0-20230713185742-f0b76a10a08e
 ## explicit; go 1.17
+github.com/tailscale/golang-x-crypto/acme
 github.com/tailscale/golang-x-crypto/chacha20
 github.com/tailscale/golang-x-crypto/internal/alias
 github.com/tailscale/golang-x-crypto/ssh
@@ -1224,7 +1225,7 @@ github.com/tailscale/mkctr
 # github.com/tailscale/netlink v1.1.1-0.20211101221916-cabfb018fe85
 ## explicit; go 1.12
 github.com/tailscale/netlink
-# github.com/tailscale/wireguard-go v0.0.0-20230410165232-af172621b4dd
+# github.com/tailscale/wireguard-go v0.0.0-20230710185534-bb2c8f22eccf
 ## explicit; go 1.20
 github.com/tailscale/wireguard-go/conn
 github.com/tailscale/wireguard-go/conn/winrio
@@ -1346,7 +1347,7 @@ go4.org/mem
 # go4.org/netipx v0.0.0-20230303233057-f1b76eb4bb35
 ## explicit; go 1.18
 go4.org/netipx
-# golang.org/x/crypto v0.8.0
+# golang.org/x/crypto v0.11.0
 ## explicit; go 1.17
 golang.org/x/crypto/acme
 golang.org/x/crypto/acme/autocert
@@ -1427,7 +1428,7 @@ golang.org/x/oauth2/internal
 ## explicit
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
-# golang.org/x/sys v0.8.1-0.20230609144347-5059a07aa46a
+# golang.org/x/sys v0.10.0
 ## explicit; go 1.17
 golang.org/x/sys/cpu
 golang.org/x/sys/execabs
@@ -1439,10 +1440,10 @@ golang.org/x/sys/windows/registry
 golang.org/x/sys/windows/svc
 golang.org/x/sys/windows/svc/eventlog
 golang.org/x/sys/windows/svc/mgr
-# golang.org/x/term v0.8.0
+# golang.org/x/term v0.10.0
 ## explicit; go 1.17
 golang.org/x/term
-# golang.org/x/text v0.9.0
+# golang.org/x/text v0.11.0
 ## explicit; go 1.17
 golang.org/x/text/runes
 golang.org/x/text/secure/bidirule
