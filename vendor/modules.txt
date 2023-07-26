@@ -1596,8 +1596,6 @@ gopkg.in/yaml.v2
 gopkg.in/yaml.v3
 # gvisor.dev/gvisor v0.0.0-20230504175454-7b0a1988a28f
 ## explicit; go 1.20
-gvisor.dev/gvisor/pkg/abi
-gvisor.dev/gvisor/pkg/abi/linux
 gvisor.dev/gvisor/pkg/atomicbitops
 gvisor.dev/gvisor/pkg/bits
 gvisor.dev/gvisor/pkg/bufferv2
@@ -1605,11 +1603,8 @@ gvisor.dev/gvisor/pkg/context
 gvisor.dev/gvisor/pkg/cpuid
 gvisor.dev/gvisor/pkg/gohacks
 gvisor.dev/gvisor/pkg/goid
-gvisor.dev/gvisor/pkg/hostarch
 gvisor.dev/gvisor/pkg/linewriter
 gvisor.dev/gvisor/pkg/log
-gvisor.dev/gvisor/pkg/marshal
-gvisor.dev/gvisor/pkg/marshal/primitive
 gvisor.dev/gvisor/pkg/rand
 gvisor.dev/gvisor/pkg/refs
 gvisor.dev/gvisor/pkg/sleep
