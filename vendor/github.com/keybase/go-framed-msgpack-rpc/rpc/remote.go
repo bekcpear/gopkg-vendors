@@ -53,9 +53,9 @@ func (r fixedRemote) String() string {
 }
 
 type prioritizedRoundRobinRemote struct {
+	sync.Mutex
 	addresses [][]string
 
-	lock      sync.Mutex
 	toIterate [][]string
 }
 
@@ -108,16 +108,16 @@ func (r *prioritizedRoundRobinRemote) resetLocked() {
 
 // Reset implements the Remote interface.
 func (r *prioritizedRoundRobinRemote) Reset() {
-	r.lock.Lock()
-	defer r.lock.Unlock()
+	r.Lock()
+	defer r.Unlock()
 
 	r.resetLocked()
 }
 
 // GetAddress implements the Remote interface.
 func (r *prioritizedRoundRobinRemote) GetAddress() string {
-	r.lock.Lock()
-	defer r.lock.Unlock()
+	r.Lock()
+	defer r.Unlock()
 
 	// If we have run out of addresses, reset to include all addresses and
 	// start over on next call.
@@ -138,6 +138,8 @@ func (r *prioritizedRoundRobinRemote) GetAddress() string {
 
 // Peek implements the Remote interface.
 func (r *prioritizedRoundRobinRemote) Peek() string {
+	r.Lock()
+	defer r.Unlock()
 	// If we have run out of addresses, reset to include all addresses and
 	// start over on next call.
 	if len(r.toIterate) == 0 {
@@ -160,8 +162,9 @@ func (r *prioritizedRoundRobinRemote) String() string {
 // on the returned Remote.
 //
 // Example:
-//   "example0.com,example1.com;example0.net,example1.net" produces a
-//   prioritized round robin remote with two groups, first .com then .net.
+//
+//	"example0.com,example1.com;example0.net,example1.net" produces a
+//	prioritized round robin remote with two groups, first .com then .net.
 func ParsePrioritizedRoundRobinRemote(str string) (Remote, error) {
 	groups := strings.Split(str, ";")
 	addressGroups := make([][]string, 0, len(groups))

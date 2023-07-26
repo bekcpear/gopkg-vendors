@@ -1,6 +1,6 @@
 # Go Keychain
 
-[![Travis CI](https://travis-ci.org/keybase/go-keychain.svg?branch=master)](https://travis-ci.org/keybase/go-keychain)
+[![Build Status](https://github.com/keybase/go-keychain/actions/workflows/ci.yml/badge.svg)](https://github.com/keybase/go-keychain/actions)
 
 A library for accessing the Keychain for macOS, iOS, and Linux in Go (golang).
 
@@ -10,7 +10,6 @@ a provider of the DBUS SecretService spec like gnome-keyring or ksecretservice.
 ```go
 import "github.com/keybase/go-keychain"
 ```
-
 
 ## Mac/iOS Usage
 
@@ -109,7 +108,7 @@ accounts, err := keychain.GetGenericPasswordAccounts("MyService")
 // Should have 1 account == "gabriel"
 
 err := keychain.DeleteGenericPasswordItem("MyService", "gabriel")
-if err == keychain.ErrorNotFound {
+if err == keychain.ErrorItemNotFound {
   // Not found
 }
 ```

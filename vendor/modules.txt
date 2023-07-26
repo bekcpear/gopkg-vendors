@@ -22,7 +22,7 @@ github.com/Antonboom/errname/pkg/analyzer
 # github.com/Antonboom/nilnil v0.1.1
 ## explicit; go 1.18
 github.com/Antonboom/nilnil/pkg/analyzer
-# github.com/BurntSushi/toml v1.2.0
+# github.com/BurntSushi/toml v1.2.1
 ## explicit; go 1.16
 github.com/BurntSushi/toml
 github.com/BurntSushi/toml/internal
@@ -218,8 +218,8 @@ github.com/breml/errchkjson
 # github.com/btcsuite/btcutil v0.0.0-20180706230648-ab6388e0c60a
 ## explicit
 github.com/btcsuite/btcutil/bech32
-# github.com/buger/jsonparser v0.0.0-20180131123142-4be68c93a244
-## explicit
+# github.com/buger/jsonparser v1.1.1
+## explicit; go 1.13
 github.com/buger/jsonparser
 # github.com/butuzov/ireturn v0.1.1
 ## explicit; go 1.15
@@ -343,8 +343,8 @@ github.com/go-critic/go-critic/checkers/internal/astwalk
 github.com/go-critic/go-critic/checkers/internal/lintutil
 github.com/go-critic/go-critic/checkers/rulesdata
 github.com/go-critic/go-critic/framework/linter
-# github.com/go-errors/errors v1.0.1
-## explicit
+# github.com/go-errors/errors v1.4.2
+## explicit; go 1.14
 github.com/go-errors/errors
 # github.com/go-ole/go-ole v1.2.6
 ## explicit; go 1.12
@@ -598,25 +598,25 @@ github.com/keybase/go-crypto/openpgp/s2k
 github.com/keybase/go-crypto/rsa
 github.com/keybase/go-crypto/sha3
 github.com/keybase/go-crypto/ssh/terminal
-# github.com/keybase/go-framed-msgpack-rpc v0.0.0-20211118173254-f892386581e8
-## explicit; go 1.17
+# github.com/keybase/go-framed-msgpack-rpc v0.0.0-20230103225103-1f052922b096
+## explicit; go 1.19
 github.com/keybase/go-framed-msgpack-rpc/rpc
 github.com/keybase/go-framed-msgpack-rpc/rpc/resinit
 # github.com/keybase/go-jsonw v0.0.0-20200325173637-df90f282c233
 ## explicit
 github.com/keybase/go-jsonw
-# github.com/keybase/go-kext v0.0.0-20211119181951-8d5d2e919472
-## explicit; go 1.17
+# github.com/keybase/go-kext v0.0.0-20221220214016-0b515ccced3b
+## explicit; go 1.19
 github.com/keybase/go-kext
-# github.com/keybase/go-keychain v0.0.0-20220610143837-c2ce06069005
-## explicit; go 1.17
+# github.com/keybase/go-keychain v0.0.0-20221221221913-9be78f6c498b
+## explicit; go 1.19
 github.com/keybase/go-keychain
 github.com/keybase/go-keychain/secretservice
-# github.com/keybase/go-logging v0.0.0-20211118164508-35a15a9fa71a
-## explicit; go 1.17
+# github.com/keybase/go-logging v0.0.0-20221220224924-396ca573808c
+## explicit; go 1.19
 github.com/keybase/go-logging
-# github.com/keybase/go-merkle-tree v0.0.0-20211118173306-f89b06604d00
-## explicit; go 1.17
+# github.com/keybase/go-merkle-tree v0.0.0-20221220225120-009ea00ffb15
+## explicit; go 1.19
 github.com/keybase/go-merkle-tree
 # github.com/keybase/go-porterstemmer v1.0.2-0.20181016185745-521f1ed5c3f7
 ## explicit
@@ -625,22 +625,19 @@ github.com/keybase/go-porterstemmer
 ## explicit
 github.com/keybase/go-ps
 github.com/keybase/go-ps/darwincgo
-# github.com/keybase/go-triplesec v0.0.0-20211109205539-1f96eeacbd86
-## explicit; go 1.17
+# github.com/keybase/go-triplesec v0.0.0-20221220225315-06ddee08f3c2
+## explicit; go 1.19
 github.com/keybase/go-triplesec
-# github.com/keybase/go-triplesec-insecure v0.0.0-20211118164850-99654891ba7c
-## explicit; go 1.17
+# github.com/keybase/go-triplesec-insecure v0.0.0-20221220225342-ddc3aa12adec
+## explicit; go 1.19
 github.com/keybase/go-triplesec-insecure
-# github.com/keybase/go-updater v0.0.0-20221221215057-da7f21f4d90b
+# github.com/keybase/go-updater v0.0.0-20221221194633-9e97736a0b42
 ## explicit; go 1.19
 github.com/keybase/go-updater/process
 github.com/keybase/go-updater/watchdog
 # github.com/keybase/go-winio v0.4.12-0.20180913221037-b1d96ab97b58
 ## explicit
 github.com/keybase/go-winio
-# github.com/keybase/go.dbus v0.0.0-20200324223359-a94be52c0b03
-## explicit
-github.com/keybase/go.dbus
 # github.com/keybase/golang-ico v0.0.0-20181117022008-819cbeb217c9
 ## explicit
 github.com/keybase/golang-ico
@@ -650,11 +647,11 @@ github.com/keybase/gomounts
 # github.com/keybase/keybase-test-vectors v1.0.12-0.20200309162119-ea1e58fecd5d
 ## explicit
 github.com/keybase/keybase-test-vectors/go
-# github.com/keybase/msgpackzip v0.0.0-20211109205514-10e4bc329851
-## explicit; go 1.17
+# github.com/keybase/msgpackzip v0.0.0-20221220225959-4abf538d2b9c
+## explicit; go 1.19
 github.com/keybase/msgpackzip
-# github.com/keybase/pipeliner v0.0.0-20190828022149-31ef4ee63659
-## explicit
+# github.com/keybase/pipeliner v0.0.0-20211118220306-ca1be321c9e5
+## explicit; go 1.17
 github.com/keybase/pipeliner
 # github.com/keybase/release v0.0.0-20221220220653-50771d921175
 ## explicit; go 1.19
@@ -663,7 +660,7 @@ github.com/keybase/release/github
 github.com/keybase/release/update
 github.com/keybase/release/version
 github.com/keybase/release/winbuild
-# github.com/keybase/saltpack v0.0.0-20211118165207-4039c5df46c0
+# github.com/keybase/saltpack v0.0.0-20221220231257-f6cce11cfd0f
 ## explicit; go 1.17
 github.com/keybase/saltpack
 github.com/keybase/saltpack/basic
@@ -712,7 +709,7 @@ github.com/leonklingele/grouper/pkg/analyzer/globals
 github.com/leonklingele/grouper/pkg/analyzer/imports
 github.com/leonklingele/grouper/pkg/analyzer/types
 github.com/leonklingele/grouper/pkg/analyzer/vars
-# github.com/lib/pq v1.10.6
+# github.com/lib/pq v1.10.7
 ## explicit; go 1.13
 github.com/lib/pq
 github.com/lib/pq/oid
@@ -757,8 +754,8 @@ github.com/mgechev/revive/formatter
 github.com/mgechev/revive/internal/typeparams
 github.com/mgechev/revive/lint
 github.com/mgechev/revive/rule
-# github.com/miekg/dns v1.1.41
-## explicit; go 1.13
+# github.com/miekg/dns v1.1.35
+## explicit; go 1.12
 github.com/miekg/dns
 # github.com/mitchellh/go-homedir v1.1.0
 ## explicit
@@ -929,8 +926,8 @@ github.com/shazow/go-diff/difflib
 ## explicit
 github.com/shirou/gopsutil/internal/common
 github.com/shirou/gopsutil/mem
-# github.com/shopspring/decimal v1.1.1-0.20191009025716-f1972eb1d1f5
-## explicit
+# github.com/shopspring/decimal v1.3.1
+## explicit; go 1.13
 github.com/shopspring/decimal
 # github.com/simplereach/timeutils v1.2.0
 ## explicit
@@ -997,7 +994,7 @@ github.com/stathat/go
 # github.com/stbenjam/no-sprintf-host-port v0.1.1
 ## explicit; go 1.16
 github.com/stbenjam/no-sprintf-host-port/pkg/analyzer
-# github.com/stellar/go v0.0.0-20191010205648-0fc3bfe3dfa7 => github.com/keybase/stellar-org v0.0.0-20191010205648-0fc3bfe3dfa7
+# github.com/stellar/go v0.0.0-20221209134558-b4ba6f8e67f2 => github.com/keybase/stellar-org v0.0.0-20191010205648-0fc3bfe3dfa7
 ## explicit; go 1.12
 github.com/stellar/go/address
 github.com/stellar/go/amount
@@ -1026,16 +1023,16 @@ github.com/stellar/go/support/render/problem
 github.com/stellar/go/support/url
 github.com/stellar/go/txnbuild
 github.com/stellar/go/xdr
-# github.com/stellar/go-xdr v0.0.0-20180917104419-0bc96f33a18e
-## explicit
+# github.com/stellar/go-xdr v0.0.0-20211103144802-8017fc4bdfee
+## explicit; go 1.12
 github.com/stellar/go-xdr/xdr3
 # github.com/steveyen/gtreap v0.0.0-20150807155958-0abe01ef9be2
 ## explicit
 github.com/steveyen/gtreap
-# github.com/stretchr/objx v0.4.0
+# github.com/stretchr/objx v0.5.0
 ## explicit; go 1.12
 github.com/stretchr/objx
-# github.com/stretchr/testify v1.8.0
+# github.com/stretchr/testify v1.8.1
 ## explicit; go 1.13
 github.com/stretchr/testify/assert
 github.com/stretchr/testify/mock
@@ -1045,7 +1042,7 @@ github.com/stretchr/testify/require
 # github.com/subosito/gotenv v1.4.1
 ## explicit; go 1.18
 github.com/subosito/gotenv
-# github.com/syndtr/goleveldb v1.0.0 => github.com/keybase/goleveldb v1.0.1-0.20211106225230-2a53fac0721c
+# github.com/syndtr/goleveldb v1.0.0 => github.com/keybase/goleveldb v1.0.1-0.20221007195407-9881c0c26e65
 ## explicit; go 1.14
 github.com/syndtr/goleveldb/leveldb
 github.com/syndtr/goleveldb/leveldb/cache
@@ -1144,7 +1141,7 @@ go.uber.org/zap/zapcore
 # go4.org v0.0.0-20161118210015-09d86de304dc
 ## explicit
 go4.org/readerutil
-# golang.org/x/crypto v0.0.0-20220722155217-630584e8d5aa
+# golang.org/x/crypto v0.4.0
 ## explicit; go 1.17
 golang.org/x/crypto/acme
 golang.org/x/crypto/acme/autocert
@@ -1157,8 +1154,8 @@ golang.org/x/crypto/curve25519
 golang.org/x/crypto/curve25519/internal/field
 golang.org/x/crypto/ed25519
 golang.org/x/crypto/hkdf
+golang.org/x/crypto/internal/alias
 golang.org/x/crypto/internal/poly1305
-golang.org/x/crypto/internal/subtle
 golang.org/x/crypto/nacl/box
 golang.org/x/crypto/nacl/secretbox
 golang.org/x/crypto/openpgp
@@ -1217,7 +1214,7 @@ golang.org/x/mod/internal/lazyregexp
 golang.org/x/mod/modfile
 golang.org/x/mod/module
 golang.org/x/mod/semver
-# golang.org/x/net v0.1.0
+# golang.org/x/net v0.4.0
 ## explicit; go 1.17
 golang.org/x/net/bpf
 golang.org/x/net/context
@@ -1235,11 +1232,11 @@ golang.org/x/net/ipv6
 golang.org/x/net/proxy
 golang.org/x/net/publicsuffix
 golang.org/x/net/trace
-# golang.org/x/sync v0.0.0-20220819030929-7fc1605a5dde
+# golang.org/x/sync v0.1.0
 ## explicit
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
-# golang.org/x/sys v0.1.0
+# golang.org/x/sys v0.3.0
 ## explicit; go 1.17
 golang.org/x/sys/cpu
 golang.org/x/sys/execabs
@@ -1247,8 +1244,9 @@ golang.org/x/sys/internal/unsafeheader
 golang.org/x/sys/unix
 golang.org/x/sys/windows
 golang.org/x/sys/windows/registry
-# golang.org/x/text v0.4.0
+# golang.org/x/text v0.5.0
 ## explicit; go 1.17
+golang.org/x/text/cases
 golang.org/x/text/encoding
 golang.org/x/text/encoding/charmap
 golang.org/x/text/encoding/htmlindex
@@ -1259,6 +1257,7 @@ golang.org/x/text/encoding/korean
 golang.org/x/text/encoding/simplifiedchinese
 golang.org/x/text/encoding/traditionalchinese
 golang.org/x/text/encoding/unicode
+golang.org/x/text/internal
 golang.org/x/text/internal/language
 golang.org/x/text/internal/language/compact
 golang.org/x/text/internal/tag
@@ -1512,7 +1511,7 @@ rsc.io/qr/gf256
 stathat.com/c/ramcache
 # bazil.org/fuse => github.com/keybase/fuse v0.0.0-20210104232444-d36009698767
 # github.com/stellar/go => github.com/keybase/stellar-org v0.0.0-20191010205648-0fc3bfe3dfa7
-# github.com/syndtr/goleveldb => github.com/keybase/goleveldb v1.0.1-0.20211106225230-2a53fac0721c
+# github.com/syndtr/goleveldb => github.com/keybase/goleveldb v1.0.1-0.20221007195407-9881c0c26e65
 # gopkg.in/src-d/go-billy.v4 => github.com/keybase/go-billy v3.1.1-0.20180828145748-b5a7b7bc2074+incompatible
 # gopkg.in/src-d/go-git.v4 => github.com/keybase/go-git v4.0.0-rc9.0.20190209005256-3a78daa8ce8e+incompatible
 # mvdan.cc/xurls/v2 => github.com/keybase/xurls/v2 v2.0.1-0.20190725180013-1e015cacd06c
