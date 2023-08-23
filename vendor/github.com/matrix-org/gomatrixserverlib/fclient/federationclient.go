@@ -31,6 +31,7 @@ type FederationClient interface {
 	MakeLeave(ctx context.Context, origin, s spec.ServerName, roomID, userID string) (res RespMakeLeave, err error)
 	SendLeave(ctx context.Context, origin, s spec.ServerName, event gomatrixserverlib.PDU) (err error)
 	SendInviteV2(ctx context.Context, origin, s spec.ServerName, request InviteV2Request) (res RespInviteV2, err error)
+	SendInviteV3(ctx context.Context, origin, s spec.ServerName, request InviteV3Request, userID spec.UserID) (res RespInviteV2, err error)
 
 	GetEvent(ctx context.Context, origin, s spec.ServerName, eventID string) (res gomatrixserverlib.Transaction, err error)
 
@@ -40,7 +41,7 @@ type FederationClient interface {
 	QueryKeys(ctx context.Context, origin, s spec.ServerName, keys map[string][]string) (RespQueryKeys, error)
 	Backfill(ctx context.Context, origin, s spec.ServerName, roomID string, limit int, eventIDs []string) (res gomatrixserverlib.Transaction, err error)
 	MSC2836EventRelationships(ctx context.Context, origin, dst spec.ServerName, r MSC2836EventRelationshipsRequest, roomVersion gomatrixserverlib.RoomVersion) (res MSC2836EventRelationshipsResponse, err error)
-	MSC2946Spaces(ctx context.Context, origin, dst spec.ServerName, roomID string, suggestedOnly bool) (res MSC2946SpacesResponse, err error)
+	RoomHierarchy(ctx context.Context, origin, dst spec.ServerName, roomID string, suggestedOnly bool) (res RoomHierarchyResponse, err error)
 
 	ExchangeThirdPartyInvite(ctx context.Context, origin, s spec.ServerName, builder gomatrixserverlib.ProtoEvent) (err error)
 	LookupState(ctx context.Context, origin, s spec.ServerName, roomID string, eventID string, roomVersion gomatrixserverlib.RoomVersion) (res RespState, err error)
@@ -123,6 +124,7 @@ func (ac *federationClient) doRequest(ctx context.Context, r FederationRequest, 
 
 var federationPathPrefixV1 = "/_matrix/federation/v1"
 var federationPathPrefixV2 = "/_matrix/federation/v2"
+var federationPathPrefixV3 = "/_matrix/federation/v3"
 
 // SendTransaction sends a transaction
 func (ac *federationClient) SendTransaction(
@@ -409,6 +411,23 @@ func (ac *federationClient) SendInviteV2(
 	return
 }
 
+// SendInviteV3 sends an invite m.room.member event to an invited server to be
+// signed by it. This is used to invite a user that is not on the local server.
+// V3 sends a partial event to allow the invitee to populate the mxid_mapping.
+func (ac *federationClient) SendInviteV3(
+	ctx context.Context, origin, s spec.ServerName, request InviteV3Request, userID spec.UserID,
+) (res RespInviteV2, err error) {
+	path := federationPathPrefixV3 + "/invite/" +
+		url.PathEscape(request.Event().RoomID) + "/" +
+		url.PathEscape(userID.String())
+	req := NewFederationRequest("PUT", origin, s, path)
+	if err = req.SetContent(request); err != nil {
+		return
+	}
+	err = ac.doRequest(ctx, req, &res)
+	return
+}
+
 // ExchangeThirdPartyInvite sends the builder of a m.room.member event of
 // "invite" membership derived from a response from invites sent by an identity
 // server.
@@ -691,9 +710,9 @@ func (ac *federationClient) MSC2836EventRelationships(
 	return
 }
 
-func (ac *federationClient) MSC2946Spaces(
+func (ac *federationClient) RoomHierarchy(
 	ctx context.Context, origin, dst spec.ServerName, roomID string, suggestedOnly bool,
-) (res MSC2946SpacesResponse, err error) {
+) (res RoomHierarchyResponse, err error) {
 	path := "/_matrix/federation/v1/hierarchy/" + url.PathEscape(roomID)
 	if suggestedOnly {
 		path += "?suggested_only=true"

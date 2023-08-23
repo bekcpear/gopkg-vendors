@@ -31,6 +31,7 @@ type Scope struct {
 	extra       map[string]interface{}
 	fingerprint []string
 	level       Level
+	transaction string
 	request     *http.Request
 	// requestBody holds a reference to the original request.Body.
 	requestBody interface {
@@ -274,6 +275,22 @@ func (scope *Scope) SetLevel(level Level) {
 	scope.level = level
 }
 
+// SetTransaction sets the transaction name for the current transaction.
+func (scope *Scope) SetTransaction(name string) {
+	scope.mu.Lock()
+	defer scope.mu.Unlock()
+
+	scope.transaction = name
+}
+
+// Transaction returns the transaction name for the current transaction.
+func (scope *Scope) Transaction() (name string) {
+	scope.mu.RLock()
+	defer scope.mu.RUnlock()
+
+	return scope.transaction
+}
+
 // Clone returns a copy of the current scope with all data copied over.
 func (scope *Scope) Clone() *Scope {
 	scope.mu.RLock()
@@ -287,7 +304,7 @@ func (scope *Scope) Clone() *Scope {
 		clone.tags[key] = value
 	}
 	for key, value := range scope.contexts {
-		clone.contexts[key] = cloneContext(value)
+		clone.contexts[key] = value
 	}
 	for key, value := range scope.extra {
 		clone.extra[key] = value
@@ -295,6 +312,7 @@ func (scope *Scope) Clone() *Scope {
 	clone.fingerprint = make([]string, len(scope.fingerprint))
 	copy(clone.fingerprint, scope.fingerprint)
 	clone.level = scope.level
+	clone.transaction = scope.transaction
 	clone.request = scope.request
 	clone.requestBody = scope.requestBody
 	clone.eventProcessors = scope.eventProcessors
@@ -347,11 +365,7 @@ func (scope *Scope) ApplyToEvent(event *Event, hint *EventHint) *Event {
 				// to link errors and traces/spans in Sentry.
 				continue
 			}
-
-			// Ensure we are not overwriting event fields
-			if _, ok := event.Contexts[key]; !ok {
-				event.Contexts[key] = cloneContext(value)
-			}
+			event.Contexts[key] = value
 		}
 	}
 
@@ -365,7 +379,8 @@ func (scope *Scope) ApplyToEvent(event *Event, hint *EventHint) *Event {
 		}
 	}
 
-	if event.User.IsEmpty() {
+	var emptyUser User
+	if event.User == emptyUser {
 		event.User = scope.user
 	}
 
@@ -375,6 +390,10 @@ func (scope *Scope) ApplyToEvent(event *Event, hint *EventHint) *Event {
 
 	if scope.level != "" {
 		event.Level = scope.level
+	}
+
+	if scope.transaction != "" {
+		event.Transaction = scope.transaction
 	}
 
 	if event.Request == nil && scope.request != nil {
@@ -403,17 +422,4 @@ func (scope *Scope) ApplyToEvent(event *Event, hint *EventHint) *Event {
 	}
 
 	return event
-}
-
-// cloneContext returns a new context with keys and values copied from the passed one.
-//
-// Note: a new Context (map) is returned, but the function does NOT do
-// a proper deep copy: if some context values are pointer types (e.g. maps),
-// they won't be properly copied.
-func cloneContext(c Context) Context {
-	res := Context{}
-	for k, v := range c {
-		res[k] = v
-	}
-	return res
 }

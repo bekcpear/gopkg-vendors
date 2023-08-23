@@ -280,16 +280,17 @@ func (hub *Hub) AddBreadcrumb(breadcrumb *Breadcrumb, hint *BreadcrumbHint) {
 		return
 	}
 
-	max := client.options.MaxBreadcrumbs
+	options := client.Options()
+	max := options.MaxBreadcrumbs
 	if max < 0 {
 		return
 	}
 
-	if client.options.BeforeBreadcrumb != nil {
+	if options.BeforeBreadcrumb != nil {
 		if hint == nil {
 			hint = &BreadcrumbHint{}
 		}
-		if breadcrumb = client.options.BeforeBreadcrumb(breadcrumb, hint); breadcrumb == nil {
+		if breadcrumb = options.BeforeBreadcrumb(breadcrumb, hint); breadcrumb == nil {
 			Logger.Println("breadcrumb dropped due to BeforeBreadcrumb callback.")
 			return
 		}

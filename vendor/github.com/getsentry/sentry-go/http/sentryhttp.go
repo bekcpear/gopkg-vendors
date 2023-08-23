@@ -71,9 +71,9 @@ func (h *Handler) Handle(handler http.Handler) http.Handler {
 // where that is convenient. In particular, use it to wrap a handler function
 // literal.
 //
-//	http.Handle(pattern, h.HandleFunc(func (w http.ResponseWriter, r *http.Request) {
-//	    // handler code here
-//	}))
+//  http.Handle(pattern, h.HandleFunc(func (w http.ResponseWriter, r *http.Request) {
+//      // handler code here
+//  }))
 func (h *Handler) HandleFunc(handler http.HandlerFunc) http.HandlerFunc {
 	return h.handle(handler)
 }
@@ -86,22 +86,15 @@ func (h *Handler) handle(handler http.Handler) http.HandlerFunc {
 			hub = sentry.CurrentHub().Clone()
 			ctx = sentry.SetHubOnContext(ctx, hub)
 		}
-		options := []sentry.SpanOption{
-			sentry.WithOpName("http.server"),
+		span := sentry.StartSpan(ctx, "http.server",
+			sentry.TransactionName(fmt.Sprintf("%s %s", r.Method, r.URL.Path)),
 			sentry.ContinueFromRequest(r),
-			sentry.WithTransactionSource(sentry.SourceURL),
-		}
-		// We don't mind getting an existing transaction back so we don't need to
-		// check if it is.
-		transaction := sentry.StartTransaction(ctx,
-			fmt.Sprintf("%s %s", r.Method, r.URL.Path),
-			options...,
 		)
-		defer transaction.Finish()
+		defer span.Finish()
 		// TODO(tracing): if the next handler.ServeHTTP panics, store
 		// information on the transaction accordingly (status, tag,
 		// level?, ...).
-		r = r.WithContext(transaction.Context())
+		r = r.WithContext(span.Context())
 		hub.Scope().SetRequest(r)
 		defer h.recoverWithSentry(hub, r)
 		// TODO(tracing): use custom response writer to intercept
