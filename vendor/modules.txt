@@ -263,10 +263,10 @@ github.com/mgutz/ansi
 # github.com/mitchellh/mapstructure v1.1.2
 ## explicit
 github.com/mitchellh/mapstructure
-# github.com/moby/buildkit v0.12.0
+# github.com/moby/buildkit v0.12.2
 ## explicit; go 1.20
 github.com/moby/buildkit/frontend/dockerfile/dockerignore
-# github.com/moby/patternmatcher v0.5.0
+# github.com/moby/patternmatcher v0.6.0
 ## explicit; go 1.19
 github.com/moby/patternmatcher
 # github.com/moby/sys/sequential v0.5.0
@@ -383,7 +383,7 @@ golang.org/x/net/proxy
 ## explicit
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
-# golang.org/x/sys v0.10.0
+# golang.org/x/sys v0.11.0
 ## explicit; go 1.17
 golang.org/x/sys/cpu
 golang.org/x/sys/execabs
@@ -391,7 +391,7 @@ golang.org/x/sys/internal/unsafeheader
 golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
-# golang.org/x/term v0.10.0
+# golang.org/x/term v0.11.0
 ## explicit; go 1.17
 golang.org/x/term
 # golang.org/x/text v0.11.0
