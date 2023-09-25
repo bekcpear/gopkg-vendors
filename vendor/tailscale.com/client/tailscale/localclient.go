@@ -96,8 +96,9 @@ func (lc *LocalClient) defaultDialer(ctx context.Context, network, addr string) 
 		// a TCP server on a random port, find the random port. For HTTP connections,
 		// we don't send the token. It gets added in an HTTP Basic-Auth header.
 		if port, _, err := safesocket.LocalTCPPortAndToken(); err == nil {
+			// We use 127.0.0.1 and not "localhost" (issue 7851).
 			var d net.Dialer
-			return d.DialContext(ctx, "tcp", "localhost:"+strconv.Itoa(port))
+			return d.DialContext(ctx, "tcp", "127.0.0.1:"+strconv.Itoa(port))
 		}
 	}
 	s := safesocket.DefaultConnectionStrategy(lc.socket())
@@ -1101,7 +1102,6 @@ func (lc *LocalClient) StreamDebugCapture(ctx context.Context) (io.ReadCloser, e
 	}
 	res, err := lc.doLocalRequestNiceError(req)
 	if err != nil {
-		res.Body.Close()
 		return nil, err
 	}
 	if res.StatusCode != 200 {

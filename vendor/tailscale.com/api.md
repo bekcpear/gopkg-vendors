@@ -503,7 +503,8 @@ Returns the enabled and advertised subnet routes for a device.
 POST /api/v2/device/{deviceID}/authorized
 ```
 
-Authorize a device. This call marks a device as authorized for tailnets where device authorization is required.
+Authorize a device.
+This call marks a device as authorized or revokes its authorization for tailnets where device authorization is required, according to the `authorized` field in the payload.
 
 This returns a successful 2xx response with an empty JSON object in the response body.
 
@@ -515,7 +516,7 @@ The ID of the device.
 
 #### `authorized` (required in `POST` body)
 
-Specify whether the device is authorized. Only 'true' is currently supported.
+Specify whether the device is authorized.
 
 ``` jsonc
 {
@@ -1336,8 +1337,8 @@ It holds the capabilities specified in the request and can no longer be retrieve
 
 ``` jsonc
 {
-  "id":           "XXXX456CNTRL",
-  "key":          "tskey-k123456CNTRL-abcdefghijklmnopqrstuvwxyz",
+  "id":           "k123456CNTRL",
+  "key":          "tskey-auth-k123456CNTRL-abcdefghijklmnopqrstuvwxyz",
   "created":      "2021-12-09T23:22:39Z",
   "expires":      "2022-03-09T23:22:39Z",
   "revoked":      "2022-03-12T23:22:39Z",
@@ -1348,9 +1349,9 @@ It holds the capabilities specified in the request and can no longer be retrieve
         "ephemeral": false,
         "preauthorized": false,
         "tags": [ "tag:example" ]
-        }
       }
     }
+  }
 }
 ```
 

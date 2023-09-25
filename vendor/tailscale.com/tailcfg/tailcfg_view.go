@@ -176,40 +176,51 @@ func (v NodeView) ComputedName() string              { return v.ж.ComputedName 
 func (v NodeView) ComputedNameWithHost() string      { return v.ж.ComputedNameWithHost }
 func (v NodeView) DataPlaneAuditLogID() string       { return v.ж.DataPlaneAuditLogID }
 func (v NodeView) Expired() bool                     { return v.ж.Expired }
-func (v NodeView) Equal(v2 NodeView) bool            { return v.ж.Equal(v2.ж) }
+func (v NodeView) SelfNodeV4MasqAddrForThisPeer() *netip.Addr {
+	if v.ж.SelfNodeV4MasqAddrForThisPeer == nil {
+		return nil
+	}
+	x := *v.ж.SelfNodeV4MasqAddrForThisPeer
+	return &x
+}
+
+func (v NodeView) IsWireGuardOnly() bool  { return v.ж.IsWireGuardOnly }
+func (v NodeView) Equal(v2 NodeView) bool { return v.ж.Equal(v2.ж) }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _NodeViewNeedsRegeneration = Node(struct {
-	ID                      NodeID
-	StableID                StableNodeID
-	Name                    string
-	User                    UserID
-	Sharer                  UserID
-	Key                     key.NodePublic
-	KeyExpiry               time.Time
-	KeySignature            tkatype.MarshaledSignature
-	Machine                 key.MachinePublic
-	DiscoKey                key.DiscoPublic
-	Addresses               []netip.Prefix
-	AllowedIPs              []netip.Prefix
-	Endpoints               []string
-	DERP                    string
-	Hostinfo                HostinfoView
-	Created                 time.Time
-	Cap                     CapabilityVersion
-	Tags                    []string
-	PrimaryRoutes           []netip.Prefix
-	LastSeen                *time.Time
-	Online                  *bool
-	KeepAlive               bool
-	MachineAuthorized       bool
-	Capabilities            []string
-	UnsignedPeerAPIOnly     bool
-	ComputedName            string
-	computedHostIfDifferent string
-	ComputedNameWithHost    string
-	DataPlaneAuditLogID     string
-	Expired                 bool
+	ID                            NodeID
+	StableID                      StableNodeID
+	Name                          string
+	User                          UserID
+	Sharer                        UserID
+	Key                           key.NodePublic
+	KeyExpiry                     time.Time
+	KeySignature                  tkatype.MarshaledSignature
+	Machine                       key.MachinePublic
+	DiscoKey                      key.DiscoPublic
+	Addresses                     []netip.Prefix
+	AllowedIPs                    []netip.Prefix
+	Endpoints                     []string
+	DERP                          string
+	Hostinfo                      HostinfoView
+	Created                       time.Time
+	Cap                           CapabilityVersion
+	Tags                          []string
+	PrimaryRoutes                 []netip.Prefix
+	LastSeen                      *time.Time
+	Online                        *bool
+	KeepAlive                     bool
+	MachineAuthorized             bool
+	Capabilities                  []string
+	UnsignedPeerAPIOnly           bool
+	ComputedName                  string
+	computedHostIfDifferent       string
+	ComputedNameWithHost          string
+	DataPlaneAuditLogID           string
+	Expired                       bool
+	SelfNodeV4MasqAddrForThisPeer *netip.Addr
+	IsWireGuardOnly               bool
 }{})
 
 // View returns a readonly view of Hostinfo.
@@ -791,6 +802,7 @@ func (v DERPNodeView) STUNOnly() bool         { return v.ж.STUNOnly }
 func (v DERPNodeView) DERPPort() int          { return v.ж.DERPPort }
 func (v DERPNodeView) InsecureForTests() bool { return v.ж.InsecureForTests }
 func (v DERPNodeView) STUNTestIP() string     { return v.ж.STUNTestIP }
+func (v DERPNodeView) CanPort80() bool        { return v.ж.CanPort80 }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _DERPNodeViewNeedsRegeneration = DERPNode(struct {
@@ -805,6 +817,7 @@ var _DERPNodeViewNeedsRegeneration = DERPNode(struct {
 	DERPPort         int
 	InsecureForTests bool
 	STUNTestIP       string
+	CanPort80        bool
 }{})
 
 // View returns a readonly view of SSHRule.
@@ -927,18 +940,28 @@ func (v SSHActionView) SessionDuration() time.Duration         { return v.ж.Ses
 func (v SSHActionView) AllowAgentForwarding() bool             { return v.ж.AllowAgentForwarding }
 func (v SSHActionView) HoldAndDelegate() string                { return v.ж.HoldAndDelegate }
 func (v SSHActionView) AllowLocalPortForwarding() bool         { return v.ж.AllowLocalPortForwarding }
+func (v SSHActionView) AllowRemotePortForwarding() bool        { return v.ж.AllowRemotePortForwarding }
 func (v SSHActionView) Recorders() views.Slice[netip.AddrPort] { return views.SliceOf(v.ж.Recorders) }
+func (v SSHActionView) OnRecordingFailure() *SSHRecorderFailureAction {
+	if v.ж.OnRecordingFailure == nil {
+		return nil
+	}
+	x := *v.ж.OnRecordingFailure
+	return &x
+}
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _SSHActionViewNeedsRegeneration = SSHAction(struct {
-	Message                  string
-	Reject                   bool
-	Accept                   bool
-	SessionDuration          time.Duration
-	AllowAgentForwarding     bool
-	HoldAndDelegate          string
-	AllowLocalPortForwarding bool
-	Recorders                []netip.AddrPort
+	Message                   string
+	Reject                    bool
+	Accept                    bool
+	SessionDuration           time.Duration
+	AllowAgentForwarding      bool
+	HoldAndDelegate           string
+	AllowLocalPortForwarding  bool
+	AllowRemotePortForwarding bool
+	Recorders                 []netip.AddrPort
+	OnRecordingFailure        *SSHRecorderFailureAction
 }{})
 
 // View returns a readonly view of SSHPrincipal.

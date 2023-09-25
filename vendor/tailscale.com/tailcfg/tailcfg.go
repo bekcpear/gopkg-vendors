@@ -95,7 +95,12 @@ type CapabilityVersion int
 //   - 56: 2023-01-24: Client understands CapabilityDebugTSDNSResolution
 //   - 57: 2023-01-25: Client understands CapabilityBindToInterfaceByRoute
 //   - 58: 2023-03-10: Client retries lite map updates before restarting map poll.
-const CurrentCapabilityVersion CapabilityVersion = 58
+//   - 59: 2023-03-16: Client understands Peers[].SelfNodeV4MasqAddrForThisPeer
+//   - 60: 2023-04-06: Client understands IsWireGuardOnly
+//   - 61: 2023-04-18: Client understand SSHAction.SSHRecorderFailureAction
+//   - 62: 2023-05-05: Client can notify control over noise for SSHEventNotificationRequest recording failure events
+//   - 63: 2023-06-08: Client understands SSHAction.AllowRemotePortForwarding.
+const CurrentCapabilityVersion CapabilityVersion = 63
 
 type StableID string
 
@@ -273,6 +278,27 @@ type Node struct {
 	// the client, this is calculated client-side based on a timestamp sent
 	// from control, to avoid clock skew issues.
 	Expired bool `json:",omitempty"`
+
+	// SelfNodeV4MasqAddrForThisPeer is the IPv4 that this peer knows the current node as.
+	// It may be empty if the peer knows the current node by its native
+	// IPv4 address.
+	// This field is only populated in a MapResponse for peers and not
+	// for the current node.
+	//
+	// If set, it should be used to masquerade traffic originating from the
+	// current node to this peer. The masquerade address is only relevant
+	// for this peer and not for other peers.
+	//
+	// This only applies to traffic originating from the current node to the
+	// peer or any of its subnets. Traffic originating from subnet routes will
+	// not be masqueraded (e.g. in case of --snat-subnet-routes).
+	SelfNodeV4MasqAddrForThisPeer *netip.Addr `json:",omitempty"`
+
+	// IsWireGuardOnly indicates that this is a non-Tailscale WireGuard peer, it
+	// is not expected to speak Disco or DERP, and it must have Endpoints in
+	// order to be reachable. TODO(#7826): 2023-04-06: only the first parseable
+	// Endpoint is used, see #7826 for updates.
+	IsWireGuardOnly bool `json:",omitempty"`
 }
 
 // DisplayName returns the user-facing name for a node which should
@@ -1682,7 +1708,7 @@ func (n *Node) Equal(n2 *Node) bool {
 		bytes.Equal(n.KeySignature, n2.KeySignature) &&
 		n.Machine == n2.Machine &&
 		n.DiscoKey == n2.DiscoKey &&
-		eqBoolPtr(n.Online, n2.Online) &&
+		eqPtr(n.Online, n2.Online) &&
 		eqCIDRs(n.Addresses, n2.Addresses) &&
 		eqCIDRs(n.AllowedIPs, n2.AllowedIPs) &&
 		eqCIDRs(n.PrimaryRoutes, n2.PrimaryRoutes) &&
@@ -1698,10 +1724,12 @@ func (n *Node) Equal(n2 *Node) bool {
 		n.computedHostIfDifferent == n2.computedHostIfDifferent &&
 		n.ComputedNameWithHost == n2.ComputedNameWithHost &&
 		eqStrings(n.Tags, n2.Tags) &&
-		n.Expired == n2.Expired
+		n.Expired == n2.Expired &&
+		eqPtr(n.SelfNodeV4MasqAddrForThisPeer, n2.SelfNodeV4MasqAddrForThisPeer) &&
+		n.IsWireGuardOnly == n2.IsWireGuardOnly
 }
 
-func eqBoolPtr(a, b *bool) bool {
+func eqPtr[T comparable](a, b *T) bool {
 	if a == b { // covers nil
 		return true
 	}
@@ -1709,7 +1737,6 @@ func eqBoolPtr(a, b *bool) bool {
 		return false
 	}
 	return *a == *b
-
 }
 
 func eqStrings(a, b []string) bool {
@@ -2022,9 +2049,98 @@ type SSHAction struct {
 	// to use local port forwarding if requested.
 	AllowLocalPortForwarding bool `json:"allowLocalPortForwarding,omitempty"`
 
+	// AllowRemotePortForwarding, if true, allows accepted connections
+	// to use remote port forwarding if requested.
+	AllowRemotePortForwarding bool `json:"allowRemotePortForwarding,omitempty"`
+
 	// Recorders defines the destinations of the SSH session recorders.
 	// The recording will be uploaded to http://addr:port/record.
-	Recorders []netip.AddrPort `json:"recorders"`
+	Recorders []netip.AddrPort `json:"recorders,omitempty"`
+
+	// OnRecorderFailure is the action to take if recording fails.
+	// If nil, the default action is to fail open.
+	OnRecordingFailure *SSHRecorderFailureAction `json:"onRecordingFailure,omitempty"`
+}
+
+// SSHRecorderFailureAction is the action to take if recording fails.
+type SSHRecorderFailureAction struct {
+	// RejectSessionWithMessage, if not empty, specifies that the session should
+	// be rejected if the recording fails to start.
+	// The message will be shown to the user before the session is rejected.
+	RejectSessionWithMessage string `json:",omitempty"`
+
+	// TerminateSessionWithMessage, if not empty, specifies that the session
+	// should be terminated if the recording fails after it has started. The
+	// message will be shown to the user before the session is terminated.
+	TerminateSessionWithMessage string `json:",omitempty"`
+
+	// NotifyURL, if non-empty, specifies a HTTP POST URL to notify when the
+	// recording fails. The payload is the JSON encoded
+	// SSHRecordingFailureNotifyRequest struct. The host field in the URL is
+	// ignored, and it will be sent to control over the Noise transport.
+	NotifyURL string `json:",omitempty"`
+}
+
+// SSHEventNotifyRequest is the JSON payload sent to the NotifyURL
+// for an SSH event.
+type SSHEventNotifyRequest struct {
+	// EventType is the type of notify request being sent.
+	EventType SSHEventType
+
+	// ConnectionID uniquely identifies a connection made to the SSH server.
+	// It may be shared across multiple sessions over the same connection in
+	// case a single connection creates multiple sessions.
+	ConnectionID string
+
+	// CapVersion is the client's current CapabilityVersion.
+	CapVersion CapabilityVersion
+
+	// NodeKey is the client's current node key.
+	NodeKey key.NodePublic
+
+	// SrcNode is the ID of the node that initiated the SSH session.
+	SrcNode NodeID
+
+	// SSHUser is the user that was presented to the SSH server.
+	SSHUser string
+
+	// LocalUser is the user that was resolved from the SSHUser for the local machine.
+	LocalUser string
+
+	// RecordingAttempts is the list of recorders that were attempted, in order.
+	RecordingAttempts []*SSHRecordingAttempt
+}
+
+// SSHEventType defines the event type linked to a SSH action or state.
+type SSHEventType int
+
+const (
+	UnspecifiedSSHEventType SSHEventType = 0
+	// SSHSessionRecordingRejected is the event that
+	// defines when a SSH session cannot be started
+	// because no recorder is available for session
+	// recording, and the SSHRecorderFailureAction
+	// RejectSessionWithMessage is not empty.
+	SSHSessionRecordingRejected SSHEventType = 1
+	// SSHSessionRecordingTerminated is the event that
+	// defines when session recording has failed
+	// during the session and the SSHRecorderFailureAction
+	// TerminateSessionWithMessage is not empty.
+	SSHSessionRecordingTerminated SSHEventType = 2
+	// SSHSessionRecordingFailed is the event that
+	// defines when session recording is unavailable and
+	// the SSHRecorderFailureAction RejectSessionWithMessage
+	// or TerminateSessionWithMessage is empty.
+	SSHSessionRecordingFailed SSHEventType = 3
+)
+
+// SSHRecordingAttempt is a single attempt to start a recording.
+type SSHRecordingAttempt struct {
+	// Recorder is the address of the recorder that was attempted.
+	Recorder netip.AddrPort
+
+	// FailureMessage is the error message of the failed attempt.
+	FailureMessage string
 }
 
 // OverTLSPublicKeyResponse is the JSON response to /key?v=<n>

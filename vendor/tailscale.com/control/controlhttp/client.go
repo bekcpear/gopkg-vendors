@@ -273,7 +273,7 @@ func (a *Dialer) dialHost(ctx context.Context, addr netip.Addr) (*ClientConn, er
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	ctx = sockstats.WithSockStats(ctx, sockstats.LabelControlClientDialer)
+	ctx = sockstats.WithSockStats(ctx, sockstats.LabelControlClientDialer, a.logf)
 
 	// u80 and u443 are the URLs we'll try to hit over HTTP or HTTPS,
 	// respectively, in order to do the HTTP upgrade to a net.Conn over which
@@ -374,6 +374,22 @@ func (a *Dialer) dialURL(ctx context.Context, u *url.URL, addr netip.Addr) (*Cli
 	}, nil
 }
 
+// resolver returns a.DNSCache if non-nil or a new *dnscache.Resolver
+// otherwise.
+func (a *Dialer) resolver() *dnscache.Resolver {
+	if a.DNSCache != nil {
+		return a.DNSCache
+	}
+
+	return &dnscache.Resolver{
+		Forward:          dnscache.Get().Forward,
+		LookupIPFallback: dnsfallback.MakeLookupFunc(a.logf, a.NetMon),
+		UseLastGood:      true,
+		Logf:             a.Logf, // not a.logf method; we want to propagate nil-ness
+		NetMon:           a.NetMon,
+	}
+}
+
 // tryURLUpgrade connects to u, and tries to upgrade it to a net.Conn. If addr
 // is valid, then no DNS is used and the connection will be made to the
 // provided address.
@@ -389,14 +405,10 @@ func (a *Dialer) tryURLUpgrade(ctx context.Context, u *url.URL, addr netip.Addr,
 			SingleHostStaticResult: []netip.Addr{addr},
 			SingleHost:             u.Hostname(),
 			Logf:                   a.Logf, // not a.logf method; we want to propagate nil-ness
+			NetMon:                 a.NetMon,
 		}
 	} else {
-		dns = &dnscache.Resolver{
-			Forward:          dnscache.Get().Forward,
-			LookupIPFallback: dnsfallback.Lookup,
-			UseLastGood:      true,
-			Logf:             a.Logf, // not a.logf method; we want to propagate nil-ness
-		}
+		dns = a.resolver()
 	}
 
 	var dialer dnscache.DialContextFunc
