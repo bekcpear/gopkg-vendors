@@ -2,61 +2,41 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package json implements serialization of JSON
-// as specified in RFC 4627, RFC 7159, RFC 7493, RFC 8259, and RFC 8785.
+// Package json implements semantic processing of JSON as specified in RFC 8259.
 // JSON is a simple data interchange format that can represent
 // primitive data types such as booleans, strings, and numbers,
 // in addition to structured data types such as objects and arrays.
 //
-// # Terminology
+// [Marshal] and [Unmarshal] encode and decode Go values
+// to/from JSON text contained within a []byte.
+// [MarshalWrite] and [UnmarshalRead] operate on JSON text
+// by writing to or reading from an [io.Writer] or [io.Reader].
+// [MarshalEncode] and [UnmarshalDecode] operate on JSON text
+// by encoding to or decoding from a [jsontext.Encoder] or [jsontext.Decoder].
+// [Options] may be passed to each of the marshal or unmarshal functions
+// to configure the semantic behavior of marshaling and unmarshaling
+// (i.e., alter how JSON data is understood as Go data and vice versa).
+// [jsontext.Options] may also be passed to the marshal or unmarshal functions
+// to configure the syntactic behavior of encoding or decoding.
 //
-// This package uses the terms "encode" and "decode" for syntactic functionality
-// that is concerned with processing JSON based on its grammar, and
-// uses the terms "marshal" and "unmarshal" for semantic functionality
-// that determines the meaning of JSON values as Go values and vice-versa.
-// It aims to provide a clear distinction between functionality that
-// is purely concerned with encoding versus that of marshaling.
-// For example, one can directly encode a stream of JSON tokens without
-// needing to marshal a concrete Go value representing them.
-// Similarly, one can decode a stream of JSON tokens without
-// needing to unmarshal them into a concrete Go value.
+// The data types of JSON are mapped to/from the data types of Go based on
+// the closest logical equivalent between the two type systems. For example,
+// a JSON boolean corresponds with a Go bool,
+// a JSON string corresponds with a Go string,
+// a JSON number corresponds with a Go int, uint or float,
+// a JSON array corresponds with a Go slice or array, and
+// a JSON object corresponds with a Go struct or map.
+// See the documentation on [Marshal] and [Unmarshal] for a comprehensive list
+// of how the JSON and Go type systems correspond.
 //
-// This package uses JSON terminology when discussing JSON, which may differ
-// from related concepts in Go or elsewhere in computing literature.
-//
-//   - A JSON "object" refers to an unordered collection of name/value members.
-//   - A JSON "array" refers to an ordered sequence of elements.
-//   - A JSON "value" refers to either a literal (i.e., null, false, or true),
-//     string, number, object, or array.
-//
-// See RFC 8259 for more information.
-//
-// # Specifications
-//
-// Relevant specifications include RFC 4627, RFC 7159, RFC 7493, RFC 8259,
-// and RFC 8785. Each RFC is generally a stricter subset of another RFC.
-// In increasing order of strictness:
-//
-//   - RFC 4627 and RFC 7159 do not require (but recommend) the use of UTF-8
-//     and also do not require (but recommend) that object names be unique.
-//   - RFC 8259 requires the use of UTF-8,
-//     but does not require (but recommends) that object names be unique.
-//   - RFC 7493 requires the use of UTF-8
-//     and also requires that object names be unique.
-//   - RFC 8785 defines a canonical representation. It requires the use of UTF-8
-//     and also requires that object names be unique and in a specific ordering.
-//     It specifies exactly how strings and numbers must be formatted.
-//
-// The primary difference between RFC 4627 and RFC 7159 is that the former
-// restricted top-level values to only JSON objects and arrays, while
-// RFC 7159 and subsequent RFCs permit top-level values to additionally be
-// JSON nulls, booleans, strings, or numbers.
-//
-// By default, this package operates on RFC 7493, but can be configured
-// to operate according to the other RFC specifications.
-// RFC 7493 is a stricter subset of RFC 8259 and fully compliant with it.
-// In particular, it makes specific choices about behavior that RFC 8259
-// leaves as undefined in order to ensure greater interoperability.
+// Arbitrary Go types can customize their JSON representation by implementing
+// [MarshalerV1], [MarshalerV2], [UnmarshalerV1], or [UnmarshalerV2].
+// This provides authors of Go types with control over how their types are
+// serialized as JSON. Alternatively, users can implement functions that match
+// [MarshalFuncV1], [MarshalFuncV2], [UnmarshalFuncV1], or [UnmarshalFuncV2]
+// to specify the JSON representation for arbitrary types.
+// This provides callers of JSON functionality with control over
+// how any arbitrary type is serialized as JSON.
 //
 // # JSON Representation of Go structs
 //
@@ -68,7 +48,7 @@
 // into the corresponding Go struct fields.
 // Object members that do not match any struct fields,
 // also known as “unknown members”, are ignored by default or rejected
-// if UnmarshalOptions.RejectUnknownMembers is specified.
+// if [RejectUnknownMembers] is specified.
 //
 // The representation of each struct field can be customized in the
 // "json" struct field tag, where the tag is a comma separated list of options.
@@ -98,8 +78,7 @@
 //     encoded as a JSON null, empty string, empty object, or empty array.
 //     This option has no effect when unmarshaling.
 //
-//   - string: The "string" option specifies that
-//     MarshalOptions.StringifyNumbers and UnmarshalOptions.StringifyNumbers
+//   - string: The "string" option specifies that [StringifyNumbers]
 //     be set when marshaling or unmarshaling a struct field value.
 //     This causes numeric types to be encoded as a JSON number
 //     within a JSON string, and to be decoded from either a JSON number or
@@ -111,8 +90,15 @@
 //     if the JSON object name does not exactly match the JSON name
 //     for any of the struct fields, then it attempts to match the struct field
 //     using a case-insensitive match that also ignores dashes and underscores.
-//     If multiple fields match, the first declared field in breadth-first order
-//     takes precedence. This option has no effect when marshaling.
+//     If multiple fields match,
+//     the first declared field in breadth-first order takes precedence.
+//     This takes precedence even if [MatchCaseInsensitiveNames] is set to false.
+//     This cannot be specified together with the "strictcase" option.
+//
+//   - strictcase: When unmarshaling, the "strictcase" option specifies that the
+//     JSON object name must exactly match the JSON name for the struct field.
+//     This takes precedence even if [MatchCaseInsensitiveNames] is set to true.
+//     This cannot be specified together with the "nocase" option.
 //
 //   - inline: The "inline" option specifies that
 //     the JSON representable content of this field type is to be promoted
@@ -120,10 +106,10 @@
 //     It is the JSON equivalent of Go struct embedding.
 //     A Go embedded field is implicitly inlined unless an explicit JSON name
 //     is specified. The inlined field must be a Go struct
-//     (that does not implement any JSON methods), RawValue, map[string]T,
-//     or an unnamed pointer to such types. When marshaling,
+//     (that does not implement any JSON methods), [jsontext.Value],
+//     map[string]T, or an unnamed pointer to such types. When marshaling,
 //     inlined fields from a pointer type are omitted if it is nil.
-//     Inlined fields of type RawValue and map[string]T are called
+//     Inlined fields of type [jsontext.Value] and map[string]T are called
 //     “inlined fallbacks” as they can represent all possible
 //     JSON object members not directly handled by the parent struct.
 //     Only one inlined fallback field may be specified in a struct,
@@ -132,11 +118,11 @@
 //
 //   - unknown: The "unknown" option is a specialized variant
 //     of the inlined fallback to indicate that this Go struct field
-//     contains any number of unknown JSON object members. The field type
-//     must be a RawValue, map[string]T, or an unnamed pointer to such types.
-//     If MarshalOptions.DiscardUnknownMembers is specified when marshaling,
+//     contains any number of unknown JSON object members. The field type must
+//     be a [jsontext.Value], map[string]T, or an unnamed pointer to such types.
+//     If [DiscardUnknownMembers] is specified when marshaling,
 //     the contents of this field are ignored.
-//     If UnmarshalOptions.RejectUnknownMembers is specified when unmarshaling,
+//     If [RejectUnknownMembers] is specified when unmarshaling,
 //     any unknown object members are rejected regardless of whether
 //     an inlined fallback with the "unknown" option exists. This option
 //     must not be specified with any other option (including the JSON name).
@@ -156,7 +142,7 @@
 // For example, only a nil slice or map is omitted under "omitzero", while
 // an empty slice or map is omitted under "omitempty" regardless of nilness.
 // The "omitzero" option is useful for types with a well-defined zero value
-// (e.g., netip.Addr) or have an IsZero method (e.g., time.Time).
+// (e.g., [net/netip.Addr]) or have an IsZero method (e.g., [time.Time.IsZero]).
 //
 // Every Go struct corresponds to a list of JSON representable fields
 // which is constructed by performing a breadth-first search over
@@ -173,7 +159,7 @@
 // with embedded struct types.
 //
 // Marshaling or unmarshaling a non-empty struct
-// without any JSON representable fields results in a SemanticError.
+// without any JSON representable fields results in a [SemanticError].
 // Unexported fields must not have any `json` tags except for `json:"-"`.
 package json
 

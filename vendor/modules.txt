@@ -292,6 +292,9 @@ github.com/coreos/go-iptables/iptables
 # github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf
 ## explicit
 github.com/coreos/go-systemd/activation
+# github.com/coreos/go-systemd/v22 v22.4.0
+## explicit; go 1.12
+github.com/coreos/go-systemd/v22/dbus
 # github.com/creack/pty v1.1.18
 ## explicit; go 1.13
 github.com/creack/pty
@@ -316,10 +319,11 @@ github.com/dave/jennifer/jen
 # github.com/davecgh/go-spew v1.1.1
 ## explicit
 github.com/davecgh/go-spew/spew
-# github.com/dblohm7/wingoes v0.0.0-20230803162905-5c6286bb8c6e
+# github.com/dblohm7/wingoes v0.0.0-20230821191801-fc76608aecf0
 ## explicit; go 1.18
 github.com/dblohm7/wingoes
 github.com/dblohm7/wingoes/com
+github.com/dblohm7/wingoes/com/automation
 github.com/dblohm7/wingoes/internal
 github.com/dblohm7/wingoes/pe
 # github.com/denis-tingaikin/go-header v0.4.3
@@ -482,9 +486,14 @@ github.com/go-git/go-git/v5/utils/merkletrie/index
 github.com/go-git/go-git/v5/utils/merkletrie/internal/frame
 github.com/go-git/go-git/v5/utils/merkletrie/noder
 github.com/go-git/go-git/v5/utils/sync
-# github.com/go-json-experiment/json v0.0.0-20230321051131-ccbac49a6929
-## explicit; go 1.20
+# github.com/go-json-experiment/json v0.0.0-20230908182459-f320be06fe37
+## explicit; go 1.21
 github.com/go-json-experiment/json
+github.com/go-json-experiment/json/internal
+github.com/go-json-experiment/json/internal/jsonflags
+github.com/go-json-experiment/json/internal/jsonopts
+github.com/go-json-experiment/json/internal/jsonwire
+github.com/go-json-experiment/json/jsontext
 # github.com/go-logr/logr v1.2.4
 ## explicit; go 1.16
 github.com/go-logr/logr
@@ -539,7 +548,7 @@ github.com/gobwas/glob/syntax/ast
 github.com/gobwas/glob/syntax/lexer
 github.com/gobwas/glob/util/runes
 github.com/gobwas/glob/util/strings
-# github.com/godbus/dbus/v5 v5.1.0
+# github.com/godbus/dbus/v5 v5.1.1-0.20230522191255-76236955d466
 ## explicit; go 1.12
 github.com/godbus/dbus/v5
 # github.com/gofrs/flock v0.8.1
@@ -706,6 +715,12 @@ github.com/goreleaser/nfpm/v2/files
 github.com/goreleaser/nfpm/v2/internal/glob
 github.com/goreleaser/nfpm/v2/internal/sign
 github.com/goreleaser/nfpm/v2/rpm
+# github.com/gorilla/csrf v1.7.1
+## explicit; go 1.13
+github.com/gorilla/csrf
+# github.com/gorilla/securecookie v1.1.1
+## explicit
+github.com/gorilla/securecookie
 # github.com/gostaticanalysis/analysisutil v0.7.1
 ## explicit; go 1.16
 github.com/gostaticanalysis/analysisutil
@@ -1233,7 +1248,10 @@ github.com/tailscale/mkctr
 # github.com/tailscale/netlink v1.1.1-0.20211101221916-cabfb018fe85
 ## explicit; go 1.12
 github.com/tailscale/netlink
-# github.com/tailscale/wireguard-go v0.0.0-20230710185534-bb2c8f22eccf
+# github.com/tailscale/web-client-prebuilt v0.0.0-20230919163828-68bd39ee4109
+## explicit; go 1.21
+github.com/tailscale/web-client-prebuilt
+# github.com/tailscale/wireguard-go v0.0.0-20230824215414-93bd5cbf7fd8
 ## explicit; go 1.20
 github.com/tailscale/wireguard-go/conn
 github.com/tailscale/wireguard-go/conn/winrio
@@ -1355,7 +1373,7 @@ go4.org/mem
 # go4.org/netipx v0.0.0-20230728180743-ad4cb58a6516
 ## explicit; go 1.18
 go4.org/netipx
-# golang.org/x/crypto v0.11.0
+# golang.org/x/crypto v0.12.0
 ## explicit; go 1.17
 golang.org/x/crypto/acme
 golang.org/x/crypto/acme/autocert
@@ -1402,7 +1420,7 @@ golang.org/x/mod/internal/lazyregexp
 golang.org/x/mod/modfile
 golang.org/x/mod/module
 golang.org/x/mod/semver
-# golang.org/x/net v0.10.0
+# golang.org/x/net v0.14.0
 ## explicit; go 1.17
 golang.org/x/net/bpf
 golang.org/x/net/context
@@ -1431,7 +1449,7 @@ golang.org/x/oauth2/internal
 ## explicit
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
-# golang.org/x/sys v0.10.0
+# golang.org/x/sys v0.11.0
 ## explicit; go 1.17
 golang.org/x/sys/cpu
 golang.org/x/sys/execabs
@@ -1443,10 +1461,10 @@ golang.org/x/sys/windows/registry
 golang.org/x/sys/windows/svc
 golang.org/x/sys/windows/svc/eventlog
 golang.org/x/sys/windows/svc/mgr
-# golang.org/x/term v0.10.0
+# golang.org/x/term v0.11.0
 ## explicit; go 1.17
 golang.org/x/term
-# golang.org/x/text v0.11.0
+# golang.org/x/text v0.12.0
 ## explicit; go 1.17
 golang.org/x/text/runes
 golang.org/x/text/secure/bidirule

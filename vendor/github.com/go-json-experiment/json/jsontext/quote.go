@@ -2,7 +2,12 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package json
+package jsontext
+
+import (
+	"github.com/go-json-experiment/json/internal/jsonflags"
+	"github.com/go-json-experiment/json/internal/jsonwire"
+)
 
 var errInvalidUTF8 = &SyntacticError{str: "invalid UTF-8 within string"}
 
@@ -12,7 +17,7 @@ var errInvalidUTF8 = &SyntacticError{str: "invalid UTF-8 within string"}
 // Invalid UTF-8 bytes are replaced with the Unicode replacement character
 // and an error is returned at the end indicating the presence of invalid UTF-8.
 func AppendQuote[Bytes ~[]byte | ~string](dst []byte, src Bytes) ([]byte, error) {
-	return appendString(dst, src, true, nil)
+	return jsonwire.AppendQuote(dst, src, &jsonflags.Flags{})
 }
 
 // AppendUnquote appends the decoded interpretation of src as a
@@ -22,5 +27,5 @@ func AppendQuote[Bytes ~[]byte | ~string](dst []byte, src Bytes) ([]byte, error)
 // and an error is returned at the end indicating the presence of invalid UTF-8.
 // Any trailing bytes after the JSON string literal results in an error.
 func AppendUnquote[Bytes ~[]byte | ~string](dst []byte, src Bytes) ([]byte, error) {
-	return unescapeString(dst, src)
+	return jsonwire.AppendUnquote(dst, src)
 }

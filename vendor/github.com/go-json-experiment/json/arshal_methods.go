@@ -8,6 +8,11 @@ import (
 	"encoding"
 	"errors"
 	"reflect"
+
+	"github.com/go-json-experiment/json/internal/jsonflags"
+	"github.com/go-json-experiment/json/internal/jsonopts"
+	"github.com/go-json-experiment/json/internal/jsonwire"
+	"github.com/go-json-experiment/json/jsontext"
 )
 
 // Interfaces for custom serialization.
@@ -16,12 +21,24 @@ var (
 	jsonMarshalerV2Type   = reflect.TypeOf((*MarshalerV2)(nil)).Elem()
 	jsonUnmarshalerV1Type = reflect.TypeOf((*UnmarshalerV1)(nil)).Elem()
 	jsonUnmarshalerV2Type = reflect.TypeOf((*UnmarshalerV2)(nil)).Elem()
+	textAppenderType      = reflect.TypeOf((*encodingTextAppender)(nil)).Elem()
 	textMarshalerType     = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
 	textUnmarshalerType   = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
+
+	// TODO(https://go.dev/issue/62384): Use encoding.TextAppender instead of this hack.
+	// This exists for now to provide performance benefits to netip types.
+	// There is no semantic difference with this change.
+	appenderToType = reflect.TypeOf((*interface{ AppendTo([]byte) []byte })(nil)).Elem()
 )
 
+// TODO(https://go.dev/issue/62384): Use encoding.TextAppender instead
+// and document public support for this method in json.Marshal.
+type encodingTextAppender interface {
+	AppendText(b []byte) ([]byte, error)
+}
+
 // MarshalerV1 is implemented by types that can marshal themselves.
-// It is recommended that types implement MarshalerV2 unless the implementation
+// It is recommended that types implement [MarshalerV2] unless the implementation
 // is trying to avoid a hard dependency on the "jsontext" package.
 //
 // It is recommended that implementations return a buffer that is safe
@@ -31,24 +48,24 @@ type MarshalerV1 interface {
 }
 
 // MarshalerV2 is implemented by types that can marshal themselves.
-// It is recommended that types implement MarshalerV2 instead of MarshalerV1
+// It is recommended that types implement MarshalerV2 instead of [MarshalerV1]
 // since this is both more performant and flexible.
 // If a type implements both MarshalerV1 and MarshalerV2,
 // then MarshalerV2 takes precedence. In such a case, both implementations
 // should aim to have equivalent behavior for the default marshal options.
 //
 // The implementation must write only one JSON value to the Encoder and
-// must not retain the pointer to Encoder.
+// must not retain the pointer to [jsontext.Encoder] or the [Options] value.
 type MarshalerV2 interface {
-	MarshalNextJSON(MarshalOptions, *Encoder) error
+	MarshalJSONV2(*jsontext.Encoder, Options) error
 
-	// TODO: Should users call the MarshalOptions.MarshalNext method or
+	// TODO: Should users call the MarshalEncode function or
 	// should/can they call this method directly? Does it matter?
 }
 
 // UnmarshalerV1 is implemented by types that can unmarshal themselves.
-// It is recommended that types implement UnmarshalerV2 unless
-// the implementation is trying to avoid a hard dependency on this package.
+// It is recommended that types implement [UnmarshalerV2] unless the implementation
+// is trying to avoid a hard dependency on the "jsontext" package.
 //
 // The input can be assumed to be a valid encoding of a JSON value
 // if called from unmarshal functionality in this package.
@@ -62,21 +79,22 @@ type UnmarshalerV1 interface {
 }
 
 // UnmarshalerV2 is implemented by types that can unmarshal themselves.
-// It is recommended that types implement UnmarshalerV2 instead of UnmarshalerV1
+// It is recommended that types implement UnmarshalerV2 instead of [UnmarshalerV1]
 // since this is both more performant and flexible.
 // If a type implements both UnmarshalerV1 and UnmarshalerV2,
 // then UnmarshalerV2 takes precedence. In such a case, both implementations
 // should aim to have equivalent behavior for the default unmarshal options.
 //
 // The implementation must read only one JSON value from the Decoder.
-// It is recommended that UnmarshalNextJSON implement merge semantics when
+// It is recommended that UnmarshalJSONV2 implement merge semantics when
 // unmarshaling into a pre-populated value.
 //
-// Implementations must not retain the pointer to Decoder.
+// Implementations must not retain the pointer to [jsontext.Decoder] or
+// the [Options] value.
 type UnmarshalerV2 interface {
-	UnmarshalNextJSON(UnmarshalOptions, *Decoder) error
+	UnmarshalJSONV2(*jsontext.Decoder, Options) error
 
-	// TODO: Should users call the UnmarshalOptions.UnmarshalNext method or
+	// TODO: Should users call the UnmarshalDecode function or
 	// should/can they call this method directly? Does it matter?
 }
 
@@ -89,13 +107,16 @@ func makeMethodArshaler(fncs *arshaler, t reflect.Type) *arshaler {
 	}
 
 	// Handle custom marshaler.
-	switch which, needAddr := implementsWhich(t, jsonMarshalerV2Type, jsonMarshalerV1Type, textMarshalerType); which {
+	switch which := implementsWhich(t, jsonMarshalerV2Type, jsonMarshalerV1Type, textAppenderType, textMarshalerType); which {
 	case jsonMarshalerV2Type:
 		fncs.nonDefault = true
-		fncs.marshal = func(mo MarshalOptions, enc *Encoder, va addressableValue) error {
-			prevDepth, prevLength := enc.tokens.depthLength()
-			err := va.addrWhen(needAddr).Interface().(MarshalerV2).MarshalNextJSON(mo, enc)
-			currDepth, currLength := enc.tokens.depthLength()
+		fncs.marshal = func(enc *jsontext.Encoder, va addressableValue, mo *jsonopts.Struct) error {
+			xe := export.Encoder(enc)
+			prevDepth, prevLength := xe.Tokens.DepthLength()
+			xe.Flags.Set(jsonflags.WithinArshalCall | 1)
+			err := va.Addr().Interface().(MarshalerV2).MarshalJSONV2(enc, mo)
+			xe.Flags.Set(jsonflags.WithinArshalCall | 0)
+			currDepth, currLength := xe.Tokens.DepthLength()
 			if (prevDepth != currDepth || prevLength+1 != currLength) && err == nil {
 				err = errors.New("must write exactly one JSON value")
 			}
@@ -108,8 +129,8 @@ func makeMethodArshaler(fncs *arshaler, t reflect.Type) *arshaler {
 		}
 	case jsonMarshalerV1Type:
 		fncs.nonDefault = true
-		fncs.marshal = func(mo MarshalOptions, enc *Encoder, va addressableValue) error {
-			marshaler := va.addrWhen(needAddr).Interface().(MarshalerV1)
+		fncs.marshal = func(enc *jsontext.Encoder, va addressableValue, mo *jsonopts.Struct) error {
+			marshaler := va.Addr().Interface().(MarshalerV1)
 			val, err := marshaler.MarshalJSON()
 			if err != nil {
 				err = wrapSkipFunc(err, "marshal method")
@@ -118,41 +139,62 @@ func makeMethodArshaler(fncs *arshaler, t reflect.Type) *arshaler {
 			}
 			if err := enc.WriteValue(val); err != nil {
 				// TODO: Avoid wrapping semantic or I/O errors.
-				return &SemanticError{action: "marshal", JSONKind: RawValue(val).Kind(), GoType: t, Err: err}
+				return &SemanticError{action: "marshal", JSONKind: jsontext.Value(val).Kind(), GoType: t, Err: err}
+			}
+			return nil
+		}
+	case textAppenderType:
+		fncs.nonDefault = true
+		fncs.marshal = func(enc *jsontext.Encoder, va addressableValue, mo *jsonopts.Struct) (err error) {
+			appender := va.Addr().Interface().(encodingTextAppender)
+			if err := export.Encoder(enc).AppendRaw('"', false, appender.AppendText); err != nil {
+				// TODO: Avoid wrapping semantic, syntactic, or I/O errors.
+				err = wrapSkipFunc(err, "append method")
+				return &SemanticError{action: "marshal", JSONKind: '"', GoType: t, Err: err}
 			}
 			return nil
 		}
 	case textMarshalerType:
 		fncs.nonDefault = true
-		fncs.marshal = func(mo MarshalOptions, enc *Encoder, va addressableValue) error {
-			marshaler := va.addrWhen(needAddr).Interface().(encoding.TextMarshaler)
-			s, err := marshaler.MarshalText()
-			if err != nil {
+		fncs.marshal = func(enc *jsontext.Encoder, va addressableValue, mo *jsonopts.Struct) error {
+			marshaler := va.Addr().Interface().(encoding.TextMarshaler)
+			if err := export.Encoder(enc).AppendRaw('"', false, func(b []byte) ([]byte, error) {
+				b2, err := marshaler.MarshalText()
+				return append(b, b2...), err
+			}); err != nil {
+				// TODO: Avoid wrapping semantic, syntactic, or I/O errors.
 				err = wrapSkipFunc(err, "marshal method")
-				// TODO: Avoid wrapping semantic errors.
-				return &SemanticError{action: "marshal", JSONKind: '"', GoType: t, Err: err}
-			}
-			val := enc.UnusedBuffer()
-			val, err = appendString(val, string(s), true, nil)
-			if err != nil {
-				return &SemanticError{action: "marshal", JSONKind: '"', GoType: t, Err: err}
-			}
-			if err := enc.WriteValue(val); err != nil {
-				// TODO: Avoid wrapping syntactic or I/O errors.
 				return &SemanticError{action: "marshal", JSONKind: '"', GoType: t, Err: err}
 			}
 			return nil
 		}
+		// TODO(https://go.dev/issue/62384): Rely on encoding.TextAppender instead.
+		if implementsWhich(t, appenderToType) != nil && t.PkgPath() == "net/netip" {
+			fncs.marshal = func(enc *jsontext.Encoder, va addressableValue, mo *jsonopts.Struct) error {
+				appender := va.Addr().Interface().(interface{ AppendTo([]byte) []byte })
+				if err := export.Encoder(enc).AppendRaw('"', false, func(b []byte) ([]byte, error) {
+					return appender.AppendTo(b), nil
+				}); err != nil {
+					// TODO: Avoid wrapping semantic, syntactic, or I/O errors.
+					err = wrapSkipFunc(err, "append method")
+					return &SemanticError{action: "marshal", JSONKind: '"', GoType: t, Err: err}
+				}
+				return nil
+			}
+		}
 	}
 
 	// Handle custom unmarshaler.
-	switch which, needAddr := implementsWhich(t, jsonUnmarshalerV2Type, jsonUnmarshalerV1Type, textUnmarshalerType); which {
+	switch which := implementsWhich(t, jsonUnmarshalerV2Type, jsonUnmarshalerV1Type, textUnmarshalerType); which {
 	case jsonUnmarshalerV2Type:
 		fncs.nonDefault = true
-		fncs.unmarshal = func(uo UnmarshalOptions, dec *Decoder, va addressableValue) error {
-			prevDepth, prevLength := dec.tokens.depthLength()
-			err := va.addrWhen(needAddr).Interface().(UnmarshalerV2).UnmarshalNextJSON(uo, dec)
-			currDepth, currLength := dec.tokens.depthLength()
+		fncs.unmarshal = func(dec *jsontext.Decoder, va addressableValue, uo *jsonopts.Struct) error {
+			xd := export.Decoder(dec)
+			prevDepth, prevLength := xd.Tokens.DepthLength()
+			xd.Flags.Set(jsonflags.WithinArshalCall | 1)
+			err := va.Addr().Interface().(UnmarshalerV2).UnmarshalJSONV2(dec, uo)
+			xd.Flags.Set(jsonflags.WithinArshalCall | 0)
+			currDepth, currLength := xd.Tokens.DepthLength()
 			if (prevDepth != currDepth || prevLength+1 != currLength) && err == nil {
 				err = errors.New("must read exactly one JSON value")
 			}
@@ -165,12 +207,12 @@ func makeMethodArshaler(fncs *arshaler, t reflect.Type) *arshaler {
 		}
 	case jsonUnmarshalerV1Type:
 		fncs.nonDefault = true
-		fncs.unmarshal = func(uo UnmarshalOptions, dec *Decoder, va addressableValue) error {
+		fncs.unmarshal = func(dec *jsontext.Decoder, va addressableValue, uo *jsonopts.Struct) error {
 			val, err := dec.ReadValue()
 			if err != nil {
 				return err // must be a syntactic or I/O error
 			}
-			unmarshaler := va.addrWhen(needAddr).Interface().(UnmarshalerV1)
+			unmarshaler := va.Addr().Interface().(UnmarshalerV1)
 			if err := unmarshaler.UnmarshalJSON(val); err != nil {
 				err = wrapSkipFunc(err, "unmarshal method")
 				// TODO: Avoid wrapping semantic, syntactic, or I/O errors.
@@ -180,9 +222,10 @@ func makeMethodArshaler(fncs *arshaler, t reflect.Type) *arshaler {
 		}
 	case textUnmarshalerType:
 		fncs.nonDefault = true
-		fncs.unmarshal = func(uo UnmarshalOptions, dec *Decoder, va addressableValue) error {
-			var flags valueFlags
-			val, err := dec.readValue(&flags)
+		fncs.unmarshal = func(dec *jsontext.Decoder, va addressableValue, uo *jsonopts.Struct) error {
+			xd := export.Decoder(dec)
+			var flags jsonwire.ValueFlags
+			val, err := xd.ReadValue(&flags)
 			if err != nil {
 				return err // must be a syntactic or I/O error
 			}
@@ -190,8 +233,8 @@ func makeMethodArshaler(fncs *arshaler, t reflect.Type) *arshaler {
 				err = errors.New("JSON value must be string type")
 				return &SemanticError{action: "unmarshal", JSONKind: val.Kind(), GoType: t, Err: err}
 			}
-			s := unescapeStringMayCopy(val, flags.isVerbatim())
-			unmarshaler := va.addrWhen(needAddr).Interface().(encoding.TextUnmarshaler)
+			s := jsonwire.UnquoteMayCopy(val, flags.IsVerbatim())
+			unmarshaler := va.Addr().Interface().(encoding.TextUnmarshaler)
 			if err := unmarshaler.UnmarshalText(s); err != nil {
 				err = wrapSkipFunc(err, "unmarshal method")
 				// TODO: Avoid wrapping semantic, syntactic, or I/O errors.
@@ -206,24 +249,11 @@ func makeMethodArshaler(fncs *arshaler, t reflect.Type) *arshaler {
 
 // implementsWhich is like t.Implements(ifaceType) for a list of interfaces,
 // but checks whether either t or reflect.PointerTo(t) implements the interface.
-// It returns the first interface type that matches and whether a value of t
-// needs to be addressed first before it implements the interface.
-func implementsWhich(t reflect.Type, ifaceTypes ...reflect.Type) (which reflect.Type, needAddr bool) {
+func implementsWhich(t reflect.Type, ifaceTypes ...reflect.Type) (which reflect.Type) {
 	for _, ifaceType := range ifaceTypes {
-		switch {
-		case t.Implements(ifaceType):
-			return ifaceType, false
-		case reflect.PointerTo(t).Implements(ifaceType):
-			return ifaceType, true
+		if t.Implements(ifaceType) || reflect.PointerTo(t).Implements(ifaceType) {
+			return ifaceType
 		}
 	}
-	return nil, false
-}
-
-// addrWhen returns va.Addr if addr is specified, otherwise it returns itself.
-func (va addressableValue) addrWhen(addr bool) reflect.Value {
-	if addr {
-		return va.Addr()
-	}
-	return va.Value
+	return nil
 }
