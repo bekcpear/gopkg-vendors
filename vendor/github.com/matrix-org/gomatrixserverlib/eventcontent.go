@@ -69,14 +69,9 @@ func NewCreateContentFromAuthEvents(authEvents AuthEventProvider, userIDForSende
 		err = errorf("unparseable create event content: %s", err.Error())
 		return
 	}
-	c.roomID = createEvent.RoomID()
+	c.roomID = createEvent.RoomID().String()
 	c.eventID = createEvent.EventID()
-	validRoomID, err := spec.NewRoomID(createEvent.RoomID())
-	if err != nil {
-		err = errorf("roomID is invalid: %s", err.Error())
-		return
-	}
-	sender, err := userIDForSender(*validRoomID, createEvent.SenderID())
+	sender, err := userIDForSender(createEvent.RoomID(), createEvent.SenderID())
 	if err != nil {
 		err = errorf("invalid sender userID: %s", err.Error())
 		return
@@ -579,4 +574,28 @@ type RelationContent struct {
 type RelatesTo struct {
 	EventID      string `json:"event_id"`
 	RelationType string `json:"rel_type"`
+}
+
+func noCheckCreateEvent(event PDU, knownRoomVersion knownRoomVersionFunc) error {
+	return nil
+}
+
+func checkCreateEvent(event PDU, knownRoomVersion knownRoomVersionFunc) error {
+	c := struct {
+		Creator     *string      `json:"creator"`
+		RoomVersion *RoomVersion `json:"room_version"`
+	}{}
+	if err := json.Unmarshal(event.Content(), &c); err != nil {
+		return errorf("create event has invalid content: %s", err.Error())
+	}
+	if c.Creator == nil {
+		return errorf("create event has no creator field")
+	}
+	if c.RoomVersion != nil {
+		if !knownRoomVersion(*c.RoomVersion) {
+			return errorf("create event has unrecognised room version %q", *c.RoomVersion)
+		}
+	}
+
+	return nil
 }

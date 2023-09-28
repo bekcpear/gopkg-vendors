@@ -259,7 +259,7 @@ func (a *AuthEvents) AddEvent(event PDU) error {
 	if event.StateKey() == nil {
 		return fmt.Errorf("AddEvent: event %q does not have a state key", event.Type())
 	}
-	a.roomIDs[event.RoomID()] = struct{}{}
+	a.roomIDs[event.RoomID().String()] = struct{}{}
 	a.events[StateKeyTuple{event.Type(), *event.StateKey()}] = event
 	return nil
 }
@@ -370,7 +370,11 @@ func (a *allowerContext) update(provider AuthEventProvider) {
 		}
 	}
 	if e, _ := provider.PowerLevels(); a.powerLevelsEvent == nil || a.powerLevelsEvent != e {
-		if p, err := NewPowerLevelContentFromAuthEvents(provider, a.create.Creator); err == nil {
+		creator := ""
+		if a.createEvent != nil {
+			creator = string(a.createEvent.SenderID())
+		}
+		if p, err := NewPowerLevelContentFromAuthEvents(provider, creator); err == nil {
 			a.powerLevelsEvent = e
 			a.powerLevels = p
 		}
@@ -412,11 +416,7 @@ func Allowed(event PDU, authEvents AuthEventProvider, userIDQuerier spec.UserIDF
 	if !authEvents.Valid() {
 		return errorf("authEvents contains events from different rooms")
 	}
-	validRoomID, err := spec.NewRoomID(event.RoomID())
-	if err != nil {
-		return err
-	}
-	return newAllowerContext(authEvents, userIDQuerier, *validRoomID).allowed(event)
+	return newAllowerContext(authEvents, userIDQuerier, event.RoomID()).allowed(event)
 }
 
 // createEventAllowed checks whether the m.room.create event is allowed.
@@ -428,32 +428,22 @@ func (a *allowerContext) createEventAllowed(event PDU) error {
 	if len(event.PrevEventIDs()) > 0 {
 		return errorf("create event must be the first event in the room: found %d prev_events", len(event.PrevEventIDs()))
 	}
-	roomIDDomain, err := domainFromID(event.RoomID())
-	if err != nil {
-		return err
-	}
 	sender, err := a.userIDQuerier(a.roomID, event.SenderID())
 	if err != nil {
 		return err
 	}
-	if string(sender.Domain()) != roomIDDomain {
-		return errorf("create event room ID domain does not match sender: %q != %q", roomIDDomain, sender.String())
+	if sender.Domain() != event.RoomID().Domain() {
+		return errorf("create event room ID domain does not match sender: %q != %q", event.RoomID().Domain(), sender.String())
 	}
-	c := struct {
-		Creator     *string      `json:"creator"`
-		RoomVersion *RoomVersion `json:"room_version"`
-	}{}
-	if err := json.Unmarshal(event.Content(), &c); err != nil {
-		return errorf("create event has invalid content: %s", err.Error())
+
+	verImpl, err := GetRoomVersion(event.Version())
+	if err != nil {
+		return nil
 	}
-	if c.Creator == nil {
-		return errorf("create event has no creator field")
+	if err = verImpl.CheckCreateEvent(event, KnownRoomVersion); err != nil {
+		return err
 	}
-	if c.RoomVersion != nil {
-		if !KnownRoomVersion(*c.RoomVersion) {
-			return errorf("create event has unrecognised room version %q", *c.RoomVersion)
-		}
-	}
+
 	return nil
 }
 
@@ -479,10 +469,10 @@ func (a *allowerContext) aliasEventAllowed(event PDU) error {
 		return err
 	}
 
-	if event.RoomID() != a.create.roomID {
+	if event.RoomID().String() != a.create.roomID {
 		return errorf(
 			"create event has different roomID: %q (%s) != %q (%s)",
-			event.RoomID(), event.EventID(), a.create.roomID, a.create.eventID,
+			event.RoomID().String(), event.EventID(), a.create.roomID, a.create.eventID,
 		)
 	}
 
@@ -876,10 +866,10 @@ func (a *allowerContext) newEventAllower(senderID spec.SenderID) (e eventAllower
 // commonChecks does the checks that are applied to all events types other than
 // m.room.create, m.room.member, or m.room.alias.
 func (e *eventAllower) commonChecks(event PDU) error {
-	if event.RoomID() != e.create.roomID {
+	if event.RoomID().String() != e.create.roomID {
 		return errorf(
 			"create event has different roomID: %q (%s) != %q (%s)",
-			event.RoomID(), event.EventID(), e.create.roomID, e.create.eventID,
+			event.RoomID().String(), event.EventID(), e.create.roomID, e.create.eventID,
 		)
 	}
 
@@ -889,7 +879,7 @@ func (e *eventAllower) commonChecks(event PDU) error {
 		return err
 	}
 	if userID == nil {
-		return errorf("userID not found for sender %q in room %q", event.SenderID(), event.RoomID())
+		return errorf("userID not found for sender %q in room %q", event.SenderID(), event.RoomID().String())
 	}
 	if err := e.create.UserIDAllowed(*userID); err != nil {
 		return err
@@ -983,10 +973,10 @@ func (a *allowerContext) newMembershipAllower(authEvents AuthEventProvider, even
 
 // membershipAllowed checks whether the membership event is allowed
 func (m *membershipAllower) membershipAllowed(event PDU) error { // nolint: gocyclo
-	if m.create.roomID != event.RoomID() {
+	if m.create.roomID != event.RoomID().String() {
 		return errorf(
 			"create event has different roomID: %q (%s) != %q (%s)",
-			event.RoomID(), event.EventID(), m.create.roomID, m.create.eventID,
+			event.RoomID().String(), event.EventID(), m.create.roomID, m.create.eventID,
 		)
 	}
 
@@ -1013,7 +1003,7 @@ func (m *membershipAllower) membershipAllowed(event PDU) error { // nolint: gocy
 	}
 
 	if sender == nil {
-		return errorf("userID not found for sender %q in room %q", m.senderID, event.RoomID())
+		return errorf("userID not found for sender %q in room %q", m.senderID, event.RoomID().String())
 	}
 	if err := m.create.UserIDAllowed(*sender); err != nil {
 		return err
@@ -1021,7 +1011,7 @@ func (m *membershipAllower) membershipAllowed(event PDU) error { // nolint: gocy
 
 	// Special case the first join event in the room to allow the creator to join.
 	// https://github.com/matrix-org/synapse/blob/v0.18.5/synapse/api/auth.py#L328
-	if m.targetID == m.create.Creator &&
+	if m.targetID == string(m.createEvent.SenderID()) &&
 		m.newMember.Membership == spec.Join &&
 		m.senderID == m.targetID &&
 		len(event.PrevEventIDs()) == 1 {

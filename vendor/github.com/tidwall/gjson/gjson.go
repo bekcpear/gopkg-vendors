@@ -2754,6 +2754,7 @@ func execModifier(json, path string) (pathOut, res string, ok bool) {
 			var parsedArgs bool
 			switch pathOut[0] {
 			case '{', '[', '"':
+				// json arg
 				res := Parse(pathOut)
 				if res.Exists() {
 					args = squash(pathOut)
@@ -2762,14 +2763,20 @@ func execModifier(json, path string) (pathOut, res string, ok bool) {
 				}
 			}
 			if !parsedArgs {
-				idx := strings.IndexByte(pathOut, '|')
-				if idx == -1 {
-					args = pathOut
-					pathOut = ""
-				} else {
-					args = pathOut[:idx]
-					pathOut = pathOut[idx:]
+				// simple arg
+				i := 0
+				for ; i < len(pathOut); i++ {
+					if pathOut[i] == '|' {
+						break
+					}
+					switch pathOut[i] {
+					case '{', '[', '"', '(':
+						s := squash(pathOut[i:])
+						i += len(s) - 1
+					}
 				}
+				args = pathOut[:i]
+				pathOut = pathOut[i:]
 			}
 		}
 		return pathOut, fn(json, args), true
@@ -2789,19 +2796,24 @@ func unwrap(json string) string {
 // DisableModifiers will disable the modifier syntax
 var DisableModifiers = false
 
-var modifiers = map[string]func(json, arg string) string{
-	"pretty":  modPretty,
-	"ugly":    modUgly,
-	"reverse": modReverse,
-	"this":    modThis,
-	"flatten": modFlatten,
-	"join":    modJoin,
-	"valid":   modValid,
-	"keys":    modKeys,
-	"values":  modValues,
-	"tostr":   modToStr,
-	"fromstr": modFromStr,
-	"group":   modGroup,
+var modifiers map[string]func(json, arg string) string
+
+func init() {
+	modifiers = map[string]func(json, arg string) string{
+		"pretty":  modPretty,
+		"ugly":    modUgly,
+		"reverse": modReverse,
+		"this":    modThis,
+		"flatten": modFlatten,
+		"join":    modJoin,
+		"valid":   modValid,
+		"keys":    modKeys,
+		"values":  modValues,
+		"tostr":   modToStr,
+		"fromstr": modFromStr,
+		"group":   modGroup,
+		"dig":     modDig,
+	}
 }
 
 // AddModifier binds a custom modifier command to the GJSON syntax.
@@ -3398,7 +3410,7 @@ func (t Result) Path(json string) string {
 		if !rcomp.Exists() {
 			goto fail
 		}
-		comp := escapeComp(rcomp.String())
+		comp := Escape(rcomp.String())
 		path = append(path, '.')
 		path = append(path, comp...)
 	}
@@ -3413,17 +3425,31 @@ fail:
 // isSafePathKeyChar returns true if the input character is safe for not
 // needing escaping.
 func isSafePathKeyChar(c byte) bool {
-	return c <= ' ' || c > '~' || c == '_' || c == '-' || c == ':' ||
-		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-		(c >= '0' && c <= '9')
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') || c <= ' ' || c > '~' || c == '_' ||
+		c == '-' || c == ':'
 }
 
-// escapeComp escaped a path compontent, making it safe for generating a
-// path for later use.
-func escapeComp(comp string) string {
+// Escape returns an escaped path component.
+//
+//	json := `{
+//	  "user":{
+//	     "first.name": "Janet",
+//	     "last.name": "Prichard"
+//	   }
+//	}`
+//	user := gjson.Get(json, "user")
+//	println(user.Get(gjson.Escape("first.name"))
+//	println(user.Get(gjson.Escape("last.name"))
+//	// Output:
+//	// Janet
+//	// Prichard
+func Escape(comp string) string {
 	for i := 0; i < len(comp); i++ {
 		if !isSafePathKeyChar(comp[i]) {
-			ncomp := []byte(comp[:i])
+			ncomp := make([]byte, len(comp)+1)
+			copy(ncomp, comp[:i])
+			ncomp = ncomp[:i]
 			for ; i < len(comp); i++ {
 				if !isSafePathKeyChar(comp[i]) {
 					ncomp = append(ncomp, '\\')
@@ -3434,4 +3460,31 @@ func escapeComp(comp string) string {
 		}
 	}
 	return comp
+}
+
+func parseRecursiveDescent(all []Result, parent Result, path string) []Result {
+	if res := parent.Get(path); res.Exists() {
+		all = append(all, res)
+	}
+	if parent.IsArray() || parent.IsObject() {
+		parent.ForEach(func(_, val Result) bool {
+			all = parseRecursiveDescent(all, val, path)
+			return true
+		})
+	}
+	return all
+}
+
+func modDig(json, arg string) string {
+	all := parseRecursiveDescent(nil, Parse(json), arg)
+	var out []byte
+	out = append(out, '[')
+	for i, res := range all {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, res.Raw...)
+	}
+	out = append(out, ']')
+	return string(out)
 }
