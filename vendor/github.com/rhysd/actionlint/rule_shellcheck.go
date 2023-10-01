@@ -25,7 +25,7 @@ type RuleShellcheck struct {
 	mu            sync.Mutex
 }
 
-// NewRuleShellcheck craetes new RuleShellcheck instance. Parameter executable can be command name
+// NewRuleShellcheck creates new RuleShellcheck instance. Parameter executable can be command name
 // or relative/absolute file path. When the given executable is not found in system, it returns an
 // error as 2nd return value.
 func NewRuleShellcheck(executable string, proc *concurrentProcess) (*RuleShellcheck, error) {
@@ -34,7 +34,10 @@ func NewRuleShellcheck(executable string, proc *concurrentProcess) (*RuleShellch
 		return nil, err
 	}
 	r := &RuleShellcheck{
-		RuleBase:      RuleBase{name: "shellcheck"},
+		RuleBase: RuleBase{
+			name: "shellcheck",
+			desc: "Checks for shell script sources in \"run:\" using shellcheck",
+		},
 		cmd:           cmd,
 		workflowShell: "",
 		jobShell:      "",
@@ -155,7 +158,7 @@ func sanitizeExpressionsInScript(src string) string {
 
 func (rule *RuleShellcheck) runShellcheck(src, sh string, pos *Pos) {
 	src = sanitizeExpressionsInScript(src)
-	rule.debug("%s: Run shellcheck for %s script:\n%s", pos, sh, src)
+	rule.Debug("%s: Run shellcheck for %s script:\n%s", pos, sh, src)
 
 	// Reasons to exclude the rules:
 	//
@@ -170,7 +173,7 @@ func (rule *RuleShellcheck) runShellcheck(src, sh string, pos *Pos) {
 	// - SC2157: Argument to -z is always false due to literal strings. When the argument of -z is replaced from ${{ }},
 	//           this can happen. For example, `if [ -z ${{ env.FOO }} ]` -> `if [ -z ______________ ]` (#113).
 	args := []string{"--norc", "-f", "json", "-x", "--shell", sh, "-e", "SC1091,SC2194,SC2050,SC2154,SC2157", "-"}
-	rule.debug("%s: Running %s command with %s", pos, rule.cmd.exe, args)
+	rule.Debug("%s: Running %s command with %s", pos, rule.cmd.exe, args)
 
 	// Use same options to run shell process described at document
 	// https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#using-a-specific-shell
@@ -182,7 +185,7 @@ func (rule *RuleShellcheck) runShellcheck(src, sh string, pos *Pos) {
 
 	rule.cmd.run(args, script, func(stdout []byte, err error) error {
 		if err != nil {
-			rule.debug("Command %s %s failed: %v", rule.cmd.exe, args, err)
+			rule.Debug("Command %s %s failed: %v", rule.cmd.exe, args, err)
 			return fmt.Errorf("`%s %s` did not run successfully while checking script at %s: %w", rule.cmd.exe, strings.Join(args, " "), pos, err)
 		}
 
@@ -206,7 +209,7 @@ func (rule *RuleShellcheck) runShellcheck(src, sh string, pos *Pos) {
 			// Consider the first line is setup for running shell which was implicitly added for better check
 			line := err.Line - 1
 			msg := strings.TrimSuffix(err.Message, ".") // Trim period aligning style of error message
-			rule.errorf(pos, "shellcheck reported issue in this script: SC%d:%s:%d:%d: %s", err.Code, err.Level, line, err.Column, msg)
+			rule.Errorf(pos, "shellcheck reported issue in this script: SC%d:%s:%d:%d: %s", err.Code, err.Level, line, err.Column, msg)
 		}
 
 		return nil

@@ -16,7 +16,10 @@ type RuleDeprecatedCommands struct {
 // NewRuleDeprecatedCommands creates a new RuleDeprecatedCommands instance.
 func NewRuleDeprecatedCommands() *RuleDeprecatedCommands {
 	return &RuleDeprecatedCommands{
-		RuleBase: RuleBase{name: "deprecated-commands"},
+		RuleBase: RuleBase{
+			name: "deprecated-commands",
+			desc: "Checks for deprecated \"set-output\", \"save-state\", \"set-env\", and \"add-path\" commands at \"run:\"",
+		},
 	}
 }
 
@@ -43,7 +46,7 @@ func (rule *RuleDeprecatedCommands) VisitStep(n *Step) error {
 				panic("unreachable")
 			}
 
-			rule.errorf(
+			rule.Errorf(
 				r.Run.Pos,
 				"workflow command %q was deprecated. use `%s` instead: https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions",
 				c,

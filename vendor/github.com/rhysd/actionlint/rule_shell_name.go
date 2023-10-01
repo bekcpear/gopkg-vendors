@@ -22,7 +22,10 @@ type RuleShellName struct {
 // NewRuleShellName creates new RuleShellName instance.
 func NewRuleShellName() *RuleShellName {
 	return &RuleShellName{
-		RuleBase: RuleBase{name: "shell-name"},
+		RuleBase: RuleBase{
+			name: "shell-name",
+			desc: "Checks for shell names used for scripts in \"run:\"",
+		},
 		platform: platformKindAny,
 	}
 }
@@ -73,7 +76,7 @@ func (rule *RuleShellName) checkShellName(node *String) {
 	}
 
 	// Ignore dynamic shell name
-	if strings.Contains(node.Value, "${{") {
+	if node.ContainsExpression() {
 		return
 	}
 
@@ -102,7 +105,7 @@ func (rule *RuleShellName) checkShellName(node *String) {
 		}
 	}
 
-	rule.errorf(
+	rule.Errorf(
 		node.Pos,
 		"shell name %q is invalid%s. available names are %s",
 		node.Value,

@@ -2,7 +2,6 @@ package actionlint
 
 import (
 	"fmt"
-	"strings"
 )
 
 // RuleCredentials is a rule to check credentials in workflows
@@ -13,7 +12,10 @@ type RuleCredentials struct {
 // NewRuleCredentials creates new RuleCredentials instance
 func NewRuleCredentials() *RuleCredentials {
 	return &RuleCredentials{
-		RuleBase: RuleBase{name: "credentials"},
+		RuleBase: RuleBase{
+			name: "credentials",
+			desc: "Checks for credentials in \"services:\" configuration",
+		},
 	}
 }
 
@@ -34,8 +36,7 @@ func (rule *RuleCredentials) checkContainer(where string, n *Container) {
 	}
 
 	p := n.Credentials.Password
-	s := strings.TrimSpace(p.Value)
-	if !strings.HasPrefix(s, "${{") || !strings.HasSuffix(s, "}}") {
-		rule.errorf(p.Pos, "\"password\" section in %s should be specified via secrets. do not put password value directly", where)
+	if !p.IsExpressionAssigned() {
+		rule.Errorf(p.Pos, "\"password\" section in %s should be specified via secrets. do not put password value directly", where)
 	}
 }

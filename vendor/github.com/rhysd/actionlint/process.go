@@ -13,16 +13,19 @@ import (
 )
 
 // concurrentProcess is a manager to run process concurrently. Since running process consumes OS
-// resources, running too many processes concurrently causes some issues. On macOS, making new
-// process hangs (see issue #3). And also running processes which opens files causes an error
-// "pipe: too many files to open". To avoid it, this class manages how many processes are run at
-// the same time.
+// resources, running too many processes concurrently causes some issues. On macOS, making too many
+// process makes the parent process hang (see issue #3). And running processes which open files can
+// cause the error "pipe: too many files to open". To avoid it, this type manages how many processes
+// are run at once.
 type concurrentProcess struct {
 	ctx  context.Context
 	sema *semaphore.Weighted
 	wg   sync.WaitGroup
 }
 
+// newConcurrentProcess creates a new ConcurrentProcess instance. The `par` argument represents how
+// many processes can be run in parallel. It is recommended to use the value returned from
+// runtime.NumCPU() for the argument.
 func newConcurrentProcess(par int) *concurrentProcess {
 	return &concurrentProcess{
 		ctx:  context.Background(),

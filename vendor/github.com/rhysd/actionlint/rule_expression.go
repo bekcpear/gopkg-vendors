@@ -1,7 +1,6 @@
 package actionlint
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 )
@@ -11,11 +10,6 @@ import (
 type typedExpr struct {
 	ty  ExprType
 	pos Pos
-}
-
-func isExprAssigned(str *String) bool {
-	s := strings.TrimSpace(str.Value)
-	return strings.HasPrefix(s, "${{") && strings.HasSuffix(s, "}}")
 }
 
 // RuleExpression is a rule checker to check expression syntax in string values of workflow syntax.
@@ -40,7 +34,10 @@ type RuleExpression struct {
 // NewRuleExpression creates new RuleExpression instance.
 func NewRuleExpression(actionsCache *LocalActionsCache, workflowCache *LocalReusableWorkflowCache) *RuleExpression {
 	return &RuleExpression{
-		RuleBase:         RuleBase{name: "expression"},
+		RuleBase: RuleBase{
+			name: "expression",
+			desc: "Syntax and semantics checks for expressions embedded with ${{ }} syntax",
+		},
 		matrixTy:         nil,
 		stepsTy:          nil,
 		needsTy:          nil,
@@ -83,6 +80,8 @@ func (rule *RuleExpression) VisitWorkflowPre(n *Workflow) error {
 				switch i.Type {
 				case WorkflowDispatchEventInputTypeBoolean:
 					ty = BoolType{}
+				case WorkflowDispatchEventInputTypeNumber:
+					ty = NumberType{}
 				case WorkflowDispatchEventInputTypeString, WorkflowDispatchEventInputTypeChoice, WorkflowDispatchEventInputTypeEnvironment:
 					ty = StringType{}
 				default:
@@ -107,7 +106,7 @@ func (rule *RuleExpression) VisitWorkflowPre(n *Workflow) error {
 
 			for _, i := range e.Inputs {
 				rule.checkString(i.Description, "")
-				// Check default value before setting type to `ity` because refering myself should cause an error.
+				// Check default value before setting type to `ity` because referring myself should cause an error.
 				//   inputs:
 				//     recursive:
 				//       type: string
@@ -120,22 +119,22 @@ func (rule *RuleExpression) VisitWorkflowPre(n *Workflow) error {
 					ty = StringType{}
 				case WorkflowCallEventInputTypeBoolean:
 					ty = BoolType{}
-					if len(ts) == 1 && isExprAssigned(i.Default) {
+					if len(ts) == 1 && i.Default.IsExpressionAssigned() {
 						switch ts[0].ty.(type) {
 						case BoolType, AnyType:
 							// ok
 						default:
-							rule.errorf(i.Default.Pos, "type of input %q must be bool but found type %s", i.Name.Value, ts[0].ty.String())
+							rule.Errorf(i.Default.Pos, "type of input %q must be bool but found type %s", i.Name.Value, ts[0].ty.String())
 						}
 					}
 				case WorkflowCallEventInputTypeNumber:
 					ty = NumberType{}
-					if len(ts) == 1 && isExprAssigned(i.Default) {
+					if len(ts) == 1 && i.Default.IsExpressionAssigned() {
 						switch ts[0].ty.(type) {
 						case NumberType, AnyType:
 							// ok
 						default:
-							rule.errorf(i.Default.Pos, "type of input %q must be number but found type %s", i.Name.Value, ts[0].ty.String())
+							rule.Errorf(i.Default.Pos, "type of input %q must be number but found type %s", i.Name.Value, ts[0].ty.String())
 						}
 					}
 				default:
@@ -197,7 +196,8 @@ func (rule *RuleExpression) VisitJobPre(n *Job) error {
 	//           os: [ubuntu-latest, macos-latest, windows-latest]
 	//       runs-on: ${{ matrix.os }}
 	if n.Strategy != nil && n.Strategy.Matrix != nil {
-		rule.matrixTy = rule.guessTypeOfMatrix(n.Strategy.Matrix)
+		// Check and guess type of the matrix
+		rule.matrixTy = rule.checkMatrix(n.Strategy.Matrix)
 	}
 
 	rule.checkString(n.Name, "jobs.<job_id>.name")
@@ -210,7 +210,7 @@ func (rule *RuleExpression) VisitJobPre(n *Job) error {
 				case *ArrayType, StringType, AnyType:
 					// OK
 				default:
-					rule.errorf(n.RunsOn.LabelsExpr.Pos, "type of expression at \"runs-on\" must be string or array but found type %q", ty.String())
+					rule.Errorf(n.RunsOn.LabelsExpr.Pos, "type of expression at \"runs-on\" must be string or array but found type %q", ty.String())
 				}
 			}
 		} else {
@@ -229,15 +229,7 @@ func (rule *RuleExpression) VisitJobPre(n *Job) error {
 	rule.checkIfCondition(n.If, "jobs.<job_id>.if")
 
 	if n.Strategy != nil {
-		if n.Strategy.Matrix != nil {
-			for _, r := range n.Strategy.Matrix.Rows {
-				for _, v := range r.Values {
-					rule.checkRawYAMLValue(v)
-				}
-			}
-			rule.checkMatrixCombinations(n.Strategy.Matrix.Include, "include")
-			rule.checkMatrixCombinations(n.Strategy.Matrix.Exclude, "exclude")
-		}
+		// Note: Types in "jobs.<job_id>.strategy.matrix" were checked `checkMatrix`
 		rule.checkBool(n.Strategy.FailFast, "jobs.<job_id>.strategy")
 		rule.checkInt(n.Strategy.MaxParallel, "jobs.<job_id>.strategy")
 	}
@@ -305,12 +297,12 @@ func (rule *RuleExpression) VisitStep(n *Step) error {
 	rule.checkFloat(n.TimeoutMinutes, "jobs.<job_id>.steps.timeout-minutes")
 
 	if n.ID != nil {
-		// Step ID is case insensitive
-		id := strings.ToLower(n.ID.Value)
-		if strings.Contains(id, "${{") && strings.Contains(id, "}}") {
+		if n.ID.ContainsExpression() {
 			rule.checkString(n.ID, "")
 			rule.stepsTy.Loose()
 		}
+		// Step ID is case insensitive
+		id := strings.ToLower(n.ID.Value)
 		rule.stepsTy.Props[id] = NewStrictObjectType(map[string]ExprType{
 			"outputs":    rule.getActionOutputsType(spec),
 			"conclusion": StringType{},
@@ -330,7 +322,7 @@ func (rule *RuleExpression) getActionOutputsType(spec *String) *ObjectType {
 	if strings.HasPrefix(spec.Value, "./") {
 		meta, err := rule.localActions.FindMetadata(spec.Value)
 		if err != nil {
-			rule.error(spec.Pos, err.Error())
+			rule.Error(spec.Pos, err.Error())
 			return NewMapObjectType(StringType{})
 		}
 		if meta == nil {
@@ -362,7 +354,7 @@ func (rule *RuleExpression) getWorkflowCallOutputsType(call *WorkflowCall) *Obje
 
 	m, err := rule.localWorkflows.FindMetadata(call.Uses.Value)
 	if err != nil {
-		rule.error(call.Uses.Pos, err.Error())
+		rule.Error(call.Uses.Pos, err.Error())
 		return NewMapObjectType(StringType{})
 	}
 	if m == nil {
@@ -389,7 +381,7 @@ func (rule *RuleExpression) checkOneExpression(s *String, what, workflowKey stri
 
 	if len(ts) != 1 {
 		// This case should be unreachable since only one ${{ }} is included is checked by parser
-		rule.errorf(s.Pos, "one ${{ }} expression should be included in %q value but got %d expressions", what, len(ts))
+		rule.Errorf(s.Pos, "one ${{ }} expression should be included in %q value but got %d expressions", what, len(ts))
 		return nil
 	}
 
@@ -404,7 +396,7 @@ func (rule *RuleExpression) checkObjectTy(ty ExprType, pos *Pos, what string) Ex
 	case *ObjectType, AnyType:
 		return ty
 	default:
-		rule.errorf(pos, "type of expression at %q must be object but found type %s", what, ty.String())
+		rule.Errorf(pos, "type of expression at %q must be object but found type %s", what, ty.String())
 		return nil
 	}
 }
@@ -417,7 +409,7 @@ func (rule *RuleExpression) checkArrayTy(ty ExprType, pos *Pos, what string) Exp
 	case *ArrayType, AnyType:
 		return ty
 	default:
-		rule.errorf(pos, "type of expression at %q must be array but found type %s", what, ty.String())
+		rule.Errorf(pos, "type of expression at %q must be array but found type %s", what, ty.String())
 		return nil
 	}
 }
@@ -430,7 +422,7 @@ func (rule *RuleExpression) checkNumberTy(ty ExprType, pos *Pos, what string) Ex
 	case NumberType, AnyType:
 		return ty
 	default:
-		rule.errorf(pos, "type of expression at %q must be number but found type %s", what, ty.String())
+		rule.Errorf(pos, "type of expression at %q must be number but found type %s", what, ty.String())
 		return nil
 	}
 }
@@ -459,30 +451,6 @@ func (rule *RuleExpression) checkNumberExpression(s *String, what, workflowKey s
 	return rule.checkNumberTy(ty, s.Pos, what)
 }
 
-func (rule *RuleExpression) checkMatrixCombinations(cs *MatrixCombinations, what string) {
-	if cs == nil {
-		return
-	}
-
-	if cs.Expression != nil {
-		if ty, ok := rule.checkArrayExpression(cs.Expression, what, "jobs.<job_id>.strategy").(*ArrayType); ok {
-			rule.checkObjectTy(ty.Elem, cs.Expression.Pos, what)
-		}
-		return
-	}
-
-	what = fmt.Sprintf("matrix combination at element of %s section", what)
-	for _, combi := range cs.Combinations {
-		if combi.Expression != nil {
-			rule.checkObjectExpression(combi.Expression, what, "jobs.<job_id>.strategy")
-			continue
-		}
-		for _, a := range combi.Assigns {
-			rule.checkRawYAMLValue(a.Value)
-		}
-	}
-}
-
 func (rule *RuleExpression) checkEnv(env *Env, workflowKey string) {
 	if env == nil {
 		return
@@ -490,6 +458,7 @@ func (rule *RuleExpression) checkEnv(env *Env, workflowKey string) {
 
 	if env.Vars != nil {
 		for _, e := range env.Vars {
+			rule.checkString(e.Name, workflowKey)
 			rule.checkString(e.Value, workflowKey)
 		}
 		return
@@ -544,7 +513,7 @@ func (rule *RuleExpression) checkWorkflowCall(c *WorkflowCall) {
 
 	m, err := rule.localWorkflows.FindMetadata(c.Uses.Value)
 	if err != nil {
-		rule.error(c.Uses.Pos, err.Error())
+		rule.Error(c.Uses.Pos, err.Error())
 	}
 
 	for n, i := range c.Inputs {
@@ -578,13 +547,13 @@ func (rule *RuleExpression) checkWorkflowCall(c *WorkflowCall) {
 				}
 			}
 		case 1:
-			if isExprAssigned(i.Value) {
+			if i.Value.IsExpressionAssigned() {
 				ty = ts[0].ty
 			}
 		}
 
 		if !mi.Type.Assignable(ty) {
-			rule.errorf(
+			rule.Errorf(
 				i.Value.Pos,
 				"input %q is typed as %s by reusable workflow %q. %s value cannot be assigned",
 				mi.Name,
@@ -641,11 +610,11 @@ func (rule *RuleExpression) checkIfCondition(str *String, workflowKey string) {
 	//   if: true && false
 
 	var condTy ExprType
-	if strings.Contains(str.Value, "${{") && strings.Contains(str.Value, "}}") {
+	if str.ContainsExpression() {
 		ts := rule.checkString(str, workflowKey)
 
 		if len(ts) == 1 {
-			if isExprAssigned(str) {
+			if str.IsExpressionAssigned() {
 				condTy = ts[0].ty
 			}
 		}
@@ -666,7 +635,7 @@ func (rule *RuleExpression) checkIfCondition(str *String, workflowKey string) {
 	}
 
 	if condTy != nil && !(BoolType{}).Assignable(condTy) {
-		rule.errorf(str.Pos, "\"if\" condition should be type \"bool\" but got type %q", condTy.String())
+		rule.Errorf(str.Pos, "\"if\" condition should be type \"bool\" but got type %q", condTy.String())
 	}
 }
 
@@ -674,7 +643,7 @@ func (rule *RuleExpression) checkTemplateEvaluatedType(ts []typedExpr) {
 	for _, t := range ts {
 		switch t.ty.(type) {
 		case *ObjectType, *ArrayType, NullType:
-			rule.errorf(&t.pos, "object, array, and null values should not be evaluated in template with ${{ }} but evaluating the value of type %s", t.ty)
+			rule.Errorf(&t.pos, "object, array, and null values should not be evaluated in template with ${{ }} but evaluating the value of type %s", t.ty)
 		}
 	}
 }
@@ -720,7 +689,7 @@ func (rule *RuleExpression) checkBool(b *Bool, workflowKey string) {
 	case BoolType, AnyType:
 		// ok
 	default:
-		rule.errorf(b.Expression.Pos, "type of expression must be bool but found type %s", ty.String())
+		rule.Errorf(b.Expression.Pos, "type of expression must be bool but found type %s", ty.String())
 	}
 }
 
@@ -774,26 +743,9 @@ func (rule *RuleExpression) checkExprsIn(s string, pos *Pos, quoted, checkUntrus
 	return ts, true
 }
 
-func (rule *RuleExpression) checkRawYAMLValue(v RawYAMLValue) {
-	switch v := v.(type) {
-	case *RawYAMLObject:
-		for _, p := range v.Props {
-			rule.checkRawYAMLValue(p)
-		}
-	case *RawYAMLArray:
-		for _, v := range v.Elems {
-			rule.checkRawYAMLValue(v)
-		}
-	case *RawYAMLString:
-		rule.checkExprsIn(v.Value, v.Pos(), false, false, "jobs.<job_id>.strategy")
-	default:
-		panic("unreachable")
-	}
-}
-
 func (rule *RuleExpression) exprError(err *ExprError, lineBase, colBase int) {
 	pos := convertExprLineColToPos(err.Line, err.Column, lineBase, colBase)
-	rule.error(pos, err.Message)
+	rule.Error(pos, err.Message)
 }
 
 func (rule *RuleExpression) checkSemanticsOfExprNode(expr ExprNode, line, col int, checkUntrusted bool, workflowKey string) (ExprType, bool) {
@@ -826,7 +778,7 @@ func (rule *RuleExpression) checkSemanticsOfExprNode(expr ExprNode, line, col in
 	if workflowKey != "" {
 		ctx, sp := WorkflowKeyAvailability(workflowKey)
 		if len(ctx) == 0 {
-			rule.debug("No context avaiability was found for workflow key %q", workflowKey)
+			rule.Debug("No context avaiability was found for workflow key %q", workflowKey)
 		}
 		c.SetContextAvailability(ctx)
 		c.SetSpecialFunctionAvailability(sp)
@@ -893,7 +845,7 @@ func (rule *RuleExpression) populateDependantNeedsTypes(out *ObjectType, job *Jo
 	}
 }
 
-func (rule *RuleExpression) guessTypeOfMatrixExpression(expr *String) *ObjectType {
+func (rule *RuleExpression) checkMatrixExpression(expr *String) *ObjectType {
 	ty := rule.checkObjectExpression(expr, "matrix", "jobs.<job_id>.strategy")
 	if ty == nil {
 		return NewEmptyObjectType()
@@ -926,18 +878,35 @@ func (rule *RuleExpression) guessTypeOfMatrixExpression(expr *String) *ObjectTyp
 	return matTy
 }
 
-func (rule *RuleExpression) guessTypeOfMatrix(m *Matrix) *ObjectType {
+func (rule *RuleExpression) checkMatrix(m *Matrix) *ObjectType {
 	if m.Expression != nil {
-		return rule.guessTypeOfMatrixExpression(m.Expression)
+		return rule.checkMatrixExpression(m.Expression)
+	}
+
+	// Check types of "exclude" but they are not used to guess type of matrix
+	if m.Exclude != nil {
+		if m.Exclude.Expression != nil {
+			if ty, ok := rule.checkArrayExpression(m.Exclude.Expression, "exclude", "jobs.<job_id>.strategy").(*ArrayType); ok {
+				rule.checkObjectTy(ty.Elem, m.Exclude.Expression.Pos, "exclude")
+			}
+		} else {
+			for _, combi := range m.Exclude.Combinations {
+				if combi.Expression != nil {
+					rule.checkObjectExpression(combi.Expression, "exclude", "jobs.<job_id>.strategy")
+					continue
+				}
+				for _, a := range combi.Assigns {
+					rule.checkRawYAMLValue(a.Value)
+				}
+			}
+		}
 	}
 
 	o := NewEmptyStrictObjectType()
 
 	for n, r := range m.Rows {
-		o.Props[n] = rule.guessTypeOfMatrixRow(r)
+		o.Props[n] = rule.checkMatrixRow(r)
 	}
-
-	// Note: Type check in 'include' section duplicates with checkMatrixCombinations() method
 
 	if m.Include == nil {
 		return o
@@ -967,7 +936,7 @@ func (rule *RuleExpression) guessTypeOfMatrix(m *Matrix) *ObjectType {
 		}
 
 		for n, assign := range combi.Assigns {
-			ty := guessTypeOfRawYAMLValue(assign.Value)
+			ty := rule.checkRawYAMLValue(assign.Value)
 			if t, ok := o.Props[n]; ok {
 				// When the combination exists in 'matrix' section, merge type with existing one
 				ty = t.Merge(ty)
@@ -976,12 +945,10 @@ func (rule *RuleExpression) guessTypeOfMatrix(m *Matrix) *ObjectType {
 		}
 	}
 
-	// Note: m.Exclude is not considered when guessing type of matrix
-
 	return o
 }
 
-func (rule *RuleExpression) guessTypeOfMatrixRow(r *MatrixRow) ExprType {
+func (rule *RuleExpression) checkMatrixRow(r *MatrixRow) ExprType {
 	if r.Expression != nil {
 		if a, ok := rule.checkArrayExpression(r.Expression, "matrix row", "jobs.<job_id>.strategy").(*ArrayType); ok {
 			return a.Elem
@@ -991,7 +958,7 @@ func (rule *RuleExpression) guessTypeOfMatrixRow(r *MatrixRow) ExprType {
 
 	var ty ExprType
 	for _, v := range r.Values {
-		t := guessTypeOfRawYAMLValue(v)
+		t := rule.checkRawYAMLValue(v)
 		if ty == nil {
 			ty = t
 		} else {
@@ -1035,31 +1002,41 @@ func (rule *RuleExpression) checkWorkflowCallOutputs(outputs map[string]*Workflo
 	}
 }
 
-func guessTypeOfRawYAMLValue(v RawYAMLValue) ExprType {
+func (rule *RuleExpression) checkRawYAMLValue(v RawYAMLValue) ExprType {
 	switch v := v.(type) {
 	case *RawYAMLObject:
 		m := make(map[string]ExprType, len(v.Props))
 		for k, p := range v.Props {
-			m[k] = guessTypeOfRawYAMLValue(p)
+			m[k] = rule.checkRawYAMLValue(p)
 		}
 		return NewStrictObjectType(m)
 	case *RawYAMLArray:
 		if len(v.Elems) == 0 {
 			return &ArrayType{AnyType{}, false}
 		}
-		elem := guessTypeOfRawYAMLValue(v.Elems[0])
+		elem := rule.checkRawYAMLValue(v.Elems[0])
 		for _, v := range v.Elems[1:] {
-			elem = elem.Merge(guessTypeOfRawYAMLValue(v))
+			elem = elem.Merge(rule.checkRawYAMLValue(v))
 		}
 		return &ArrayType{elem, false}
 	case *RawYAMLString:
-		return guessTypeFromString(v.Value)
+		return rule.checkRawYAMLString(v)
 	default:
 		panic("unreachable")
 	}
 }
 
-func guessTypeFromString(s string) ExprType {
+func (rule *RuleExpression) checkRawYAMLString(y *RawYAMLString) ExprType {
+	ts, ok := rule.checkExprsIn(y.Value, y.Pos(), false, false, "jobs.<job_id>.strategy")
+
+	if isExprAssigned(y.Value) {
+		if !ok || len(ts) != 1 {
+			return AnyType{}
+		}
+		return ts[0].ty
+	}
+
+	s := strings.TrimSpace(y.Value)
 	// Note that keywords are case sensitive. TRUE, FALSE, NULL are invalid named value.
 	if s == "true" || s == "false" {
 		return BoolType{}

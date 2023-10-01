@@ -17,8 +17,11 @@ type RuleAction struct {
 // NewRuleAction creates new RuleAction instance.
 func NewRuleAction(cache *LocalActionsCache) *RuleAction {
 	return &RuleAction{
-		RuleBase: RuleBase{name: "action"},
-		cache:    cache,
+		RuleBase: RuleBase{
+			name: "action",
+			desc: "Checks for popular actions released on GitHub, local actions, and action calls at \"uses:\"",
+		},
+		cache: cache,
 	}
 }
 
@@ -29,12 +32,12 @@ func (rule *RuleAction) VisitStep(n *Step) error {
 		return nil
 	}
 
-	spec := e.Uses.Value
-
-	if strings.Contains(spec, "${{") && strings.Contains(spec, "}}") {
+	if e.Uses.ContainsExpression() {
 		// Cannot parse specification made with interpolation. Give up
 		return nil
 	}
+
+	spec := e.Uses.Value
 
 	if strings.HasPrefix(spec, "./") {
 		// Relative to repository root
@@ -82,11 +85,11 @@ func (rule *RuleAction) checkRepoAction(spec string, exec *ExecAction) {
 
 	meta, ok := PopularActions[spec]
 	if !ok {
-		rule.debug("This action is not found in popular actions data set: %s", spec)
+		rule.Debug("This action is not found in popular actions data set: %s", spec)
 		return
 	}
 	if meta.SkipInputs {
-		rule.debug("This action skips to check inputs: %s", spec)
+		rule.Debug("This action skips to check inputs: %s", spec)
 		return
 	}
 
@@ -96,7 +99,7 @@ func (rule *RuleAction) checkRepoAction(spec string, exec *ExecAction) {
 }
 
 func (rule *RuleAction) invalidActionFormat(pos *Pos, spec string, why string) {
-	rule.errorf(pos, "specifying action %q in invalid format because %s. available formats are \"{owner}/{repo}@{ref}\" or \"{owner}/{repo}/{path}@{ref}\"", spec, why)
+	rule.Errorf(pos, "specifying action %q in invalid format because %s. available formats are \"{owner}/{repo}@{ref}\" or \"{owner}/{repo}/{path}@{ref}\"", spec, why)
 }
 
 // https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#example-using-the-github-packages-container-registry
@@ -113,7 +116,7 @@ func (rule *RuleAction) checkDockerAction(uri string, exec *ExecAction) {
 	}
 
 	if _, err := url.Parse(uri); err != nil {
-		rule.errorf(
+		rule.Errorf(
 			exec.Uses.Pos,
 			"URI for Docker container %q is invalid: %s (tag=%s)",
 			uri,
@@ -123,7 +126,7 @@ func (rule *RuleAction) checkDockerAction(uri string, exec *ExecAction) {
 	}
 
 	if tagExists && tag == "" {
-		rule.errorf(exec.Uses.Pos, "tag of Docker action should not be empty: %q", uri)
+		rule.Errorf(exec.Uses.Pos, "tag of Docker action should not be empty: %q", uri)
 	}
 }
 
@@ -131,7 +134,7 @@ func (rule *RuleAction) checkDockerAction(uri string, exec *ExecAction) {
 func (rule *RuleAction) checkLocalAction(path string, action *ExecAction) {
 	meta, err := rule.cache.FindMetadata(path)
 	if err != nil {
-		rule.error(action.Uses.Pos, err.Error())
+		rule.Error(action.Uses.Pos, err.Error())
 		return
 	}
 	if meta == nil {
@@ -151,7 +154,7 @@ func (rule *RuleAction) checkAction(meta *ActionMetadata, exec *ExecAction, desc
 			for _, i := range meta.Inputs {
 				ns = append(ns, i.Name)
 			}
-			rule.errorf(
+			rule.Errorf(
 				i.Name.Pos,
 				"input %q is not defined in action %s. available inputs are %s",
 				i.Name.Value,
@@ -171,7 +174,7 @@ func (rule *RuleAction) checkAction(meta *ActionMetadata, exec *ExecAction, desc
 						ns = append(ns, i.Name)
 					}
 				}
-				rule.errorf(
+				rule.Errorf(
 					exec.Uses.Pos,
 					"missing input %q which is required by action %s. all required inputs are %s",
 					i.Name,

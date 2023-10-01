@@ -25,7 +25,10 @@ type RulePermissions struct {
 // NewRulePermissions creates new RulePermissions instance.
 func NewRulePermissions() *RulePermissions {
 	return &RulePermissions{
-		RuleBase: RuleBase{name: "permissions"},
+		RuleBase: RuleBase{
+			name: "permissions",
+			desc: "Checks for permissions configuration in \"permissions:\". Permission names and permission scopes are checked",
+		},
 	}
 }
 
@@ -51,7 +54,7 @@ func (rule *RulePermissions) checkPermissions(p *Permissions) {
 		case "write-all", "read-all":
 			// OK
 		default:
-			rule.errorf(p.All.Pos, "%q is invalid for permission for all the scopes. available values are \"read-all\" and \"write-all\"", p.All.Value)
+			rule.Errorf(p.All.Pos, "%q is invalid for permission for all the scopes. available values are \"read-all\" and \"write-all\"", p.All.Value)
 		}
 		return
 	}
@@ -63,13 +66,13 @@ func (rule *RulePermissions) checkPermissions(p *Permissions) {
 			for s := range allPermissionScopes {
 				ss = append(ss, s)
 			}
-			rule.errorf(p.Name.Pos, "unknown permission scope %q. all available permission scopes are %s", n, sortedQuotes(ss))
+			rule.Errorf(p.Name.Pos, "unknown permission scope %q. all available permission scopes are %s", n, sortedQuotes(ss))
 		}
 		switch p.Value.Value {
 		case "read", "write", "none":
 			// OK
 		default:
-			rule.errorf(p.Value.Pos, "%q is invalid for permission of scope %q. available values are \"read\", \"write\" or \"none\"", p.Value.Value, n)
+			rule.Errorf(p.Value.Pos, "%q is invalid for permission of scope %q. available values are \"read\", \"write\" or \"none\"", p.Value.Value, n)
 		}
 	}
 }

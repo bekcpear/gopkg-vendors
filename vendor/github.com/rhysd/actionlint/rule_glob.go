@@ -9,7 +9,10 @@ type RuleGlob struct {
 // NewRuleGlob creates new RuleGlob instance.
 func NewRuleGlob() *RuleGlob {
 	return &RuleGlob{
-		RuleBase: RuleBase{name: "glob"},
+		RuleBase: RuleBase{
+			name: "glob",
+			desc: "Checks for glob syntax used in branch names, tags, and paths",
+		},
 	}
 }
 
@@ -62,6 +65,6 @@ func (rule *RuleGlob) globErrors(errs []InvalidGlobPattern, pos *Pos, quoted boo
 		if err.Column != 0 {
 			p.Col += err.Column - 1
 		}
-		rule.errorf(&p, "%s. note: filter pattern syntax is explained at https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#filter-pattern-cheat-sheet", err.Message)
+		rule.Errorf(&p, "%s. note: filter pattern syntax is explained at https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#filter-pattern-cheat-sheet", err.Message)
 	}
 }

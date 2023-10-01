@@ -10,7 +10,10 @@ type RuleMatrix struct {
 // NewRuleMatrix creates new RuleMatrix instance.
 func NewRuleMatrix() *RuleMatrix {
 	return &RuleMatrix{
-		RuleBase: RuleBase{name: "matrix"},
+		RuleBase: RuleBase{
+			name: "matrix",
+			desc: "Checks for matrix combinations in \"matrix:\"",
+		},
 	}
 }
 
@@ -49,7 +52,7 @@ func (rule *RuleMatrix) checkDuplicateInRow(row *MatrixRow) {
 		ok := true
 		for _, p := range seen {
 			if p.Equals(v) {
-				rule.errorf(
+				rule.Errorf(
 					v.Pos(),
 					"duplicate value %s is found in matrix %q. the same value is at %s",
 					v.String(),
@@ -66,9 +69,43 @@ func (rule *RuleMatrix) checkDuplicateInRow(row *MatrixRow) {
 	}
 }
 
-func findYAMLValueInArray(heystack []RawYAMLValue, needle RawYAMLValue) bool {
-	for _, v := range heystack {
-		if v.Equals(needle) {
+func filterMatchesYAMLValue(v, filter RawYAMLValue) bool {
+	switch v := v.(type) {
+	case *RawYAMLObject:
+		// `exclude` and `include` filter can match to objects in matrix as subset of them (#249).
+		// For example,
+		//
+		// matrix:
+		//   os:
+		//     - { name: Ubuntu, matrix: ubuntu }
+		//     - { name: Windows, matrix: windows }
+		//   arch:
+		//     - { name: ARM, matrix: arm }
+		//     - { name: Intel, matrix: intel }
+		//   exclude:
+		//     - os: { matrix: windows }
+		//       arch: { matrix: arm }
+		//
+		// The `exclude` filters out `{ os: { name: Windows, matrix: windows }, arch: {name: ARM, matrix: arm } }`
+		switch filter := filter.(type) {
+		case *RawYAMLObject:
+			for n, f := range filter.Props {
+				if p, ok := v.Props[n]; !ok || !filterMatchesYAMLValue(p, f) {
+					return false
+				}
+			}
+			return true
+		default:
+			return false
+		}
+	default:
+		return v.Equals(filter)
+	}
+}
+
+func filterMatchesMatrixRow(row []RawYAMLValue, filter RawYAMLValue) bool {
+	for _, v := range row {
+		if filterMatchesYAMLValue(v, filter) {
 			return true
 		}
 	}
@@ -80,21 +117,29 @@ func (rule *RuleMatrix) checkExclude(m *Matrix) {
 		return
 	}
 
-	rows := m.Rows
-	if len(rows) == 0 && (m.Include == nil || len(m.Include.Combinations) == 0) {
-		rule.error(m.Pos, "\"exclude\" section exists but no matrix variation exists")
+	if len(m.Rows) == 0 && (m.Include == nil || len(m.Include.Combinations) == 0) {
+		rule.Error(m.Pos, "\"exclude\" section exists but no matrix variation exists")
 		return
 	}
 
-	vals := make(map[string][]RawYAMLValue, len(rows))
+	vals := make(map[string][]RawYAMLValue, len(m.Rows))
 	ignored := map[string]struct{}{}
-	for name, row := range rows {
+Outer:
+	for name, row := range m.Rows {
 		if row.Expression != nil {
 			ignored[name] = struct{}{}
-		} else {
-			vals[name] = row.Values
+			continue
 		}
+		// When some item is constructed with ${{ }} dynamically, give up checking combination values (#261)
+		for _, y := range row.Values {
+			if s, ok := y.(*RawYAMLString); ok && isExprAssigned(s.Value) {
+				ignored[name] = struct{}{}
+				continue Outer
+			}
+		}
+		vals[name] = row.Values
 	}
+
 	if m.Include != nil {
 		for _, combi := range m.Include.Combinations {
 			for n, a := range combi.Assigns {
@@ -106,7 +151,7 @@ func (rule *RuleMatrix) checkExclude(m *Matrix) {
 					vals[n] = []RawYAMLValue{a.Value}
 					continue
 				}
-				if !findYAMLValueInArray(vs, a.Value) {
+				if !filterMatchesMatrixRow(vs, a.Value) {
 					vals[n] = append(vs, a.Value)
 				}
 			}
@@ -124,7 +169,7 @@ func (rule *RuleMatrix) checkExclude(m *Matrix) {
 				for k := range vals {
 					ss = append(ss, k)
 				}
-				rule.errorf(
+				rule.Errorf(
 					a.Key.Pos,
 					"%q in \"exclude\" section does not exist in matrix. available matrix configurations are %s",
 					k,
@@ -133,7 +178,7 @@ func (rule *RuleMatrix) checkExclude(m *Matrix) {
 				continue
 			}
 
-			if findYAMLValueInArray(vs, a.Value) {
+			if filterMatchesMatrixRow(vs, a.Value) {
 				continue
 			}
 
@@ -141,9 +186,9 @@ func (rule *RuleMatrix) checkExclude(m *Matrix) {
 			for _, v := range vs {
 				ss = append(ss, v.String())
 			}
-			rule.errorf(
+			rule.Errorf(
 				a.Value.Pos(),
-				"value %s in \"exclude\" does not exist in matrix %q combinations. possible values are %s",
+				"value %s in \"exclude\" does not match in matrix %q combinations. possible values are %s",
 				a.Value.String(),
 				k,
 				strings.Join(ss, ", "), // Note: do not use quotesBuilder
