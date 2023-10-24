@@ -15,7 +15,7 @@ github.com/andybalholm/brotli
 # github.com/boljen/go-bitmap v0.0.0-20151001105940-23cd2fb0ce7d
 ## explicit
 github.com/boljen/go-bitmap
-# github.com/bufbuild/protocompile v0.5.1
+# github.com/bufbuild/protocompile v0.6.0
 ## explicit; go 1.18
 github.com/bufbuild/protocompile/protoutil
 # github.com/cloudflare/circl v1.3.3
@@ -76,11 +76,11 @@ github.com/gabriel-vasile/mimetype/internal/magic
 # github.com/gaukas/godicttls v0.0.4
 ## explicit; go 1.19
 github.com/gaukas/godicttls
-# github.com/go-chi/chi/v5 v5.0.8
+# github.com/go-chi/chi/v5 v5.0.10
 ## explicit; go 1.14
 github.com/go-chi/chi/v5
 github.com/go-chi/chi/v5/middleware
-# github.com/go-chi/render v1.0.2
+# github.com/go-chi/render v1.0.3
 ## explicit; go 1.16
 github.com/go-chi/render
 # github.com/go-playground/locales v0.14.1
@@ -90,7 +90,7 @@ github.com/go-playground/locales/currency
 # github.com/go-playground/universal-translator v0.18.1
 ## explicit; go 1.18
 github.com/go-playground/universal-translator
-# github.com/go-playground/validator/v10 v10.14.1
+# github.com/go-playground/validator/v10 v10.15.5
 ## explicit; go 1.18
 github.com/go-playground/validator/v10
 # github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572
@@ -107,7 +107,10 @@ github.com/golang/protobuf/ptypes
 github.com/golang/protobuf/ptypes/any
 github.com/golang/protobuf/ptypes/duration
 github.com/golang/protobuf/ptypes/timestamp
-# github.com/google/go-cmp v0.5.9
+# github.com/google/btree v1.1.2
+## explicit; go 1.18
+github.com/google/btree
+# github.com/google/go-cmp v0.6.0
 ## explicit; go 1.13
 github.com/google/go-cmp/cmp
 github.com/google/go-cmp/cmp/cmpopts
@@ -115,13 +118,17 @@ github.com/google/go-cmp/cmp/internal/diff
 github.com/google/go-cmp/cmp/internal/flags
 github.com/google/go-cmp/cmp/internal/function
 github.com/google/go-cmp/cmp/internal/value
+# github.com/google/gopacket v1.1.19
+## explicit; go 1.12
+github.com/google/gopacket
+github.com/google/gopacket/layers
 # github.com/google/pprof v0.0.0-20230602150820-91b7bce49751
 ## explicit; go 1.19
 github.com/google/pprof/profile
 # github.com/gorilla/websocket v1.5.0
 ## explicit; go 1.12
 github.com/gorilla/websocket
-# github.com/jhump/protoreflect v1.15.1
+# github.com/jhump/protoreflect v1.15.3
 ## explicit; go 1.18
 github.com/jhump/protoreflect/codec
 github.com/jhump/protoreflect/desc
@@ -151,7 +158,7 @@ github.com/leodido/go-urn
 # github.com/lunixbochs/struc v0.0.0-20200707160740-784aaebc1d40
 ## explicit; go 1.12
 github.com/lunixbochs/struc
-# github.com/miekg/dns v1.1.54
+# github.com/miekg/dns v1.1.56
 ## explicit; go 1.19
 github.com/miekg/dns
 # github.com/mustafaturan/bus v1.0.2
@@ -249,9 +256,10 @@ github.com/quic-go/quic-go/internal/utils/ringbuffer
 github.com/quic-go/quic-go/internal/wire
 github.com/quic-go/quic-go/logging
 github.com/quic-go/quic-go/quicvarint
-# github.com/refraction-networking/utls v1.5.2
+# github.com/refraction-networking/utls v1.5.4
 ## explicit; go 1.20
 github.com/refraction-networking/utls
+github.com/refraction-networking/utls/internal/boring
 github.com/refraction-networking/utls/internal/helper
 # github.com/riobard/go-bloom v0.0.0-20200614022211-cdc8013cb5b3
 ## explicit
@@ -339,7 +347,7 @@ go.uber.org/mock/mockgen/model
 # go4.org/netipx v0.0.0-20230303233057-f1b76eb4bb35
 ## explicit; go 1.18
 go4.org/netipx
-# golang.org/x/crypto v0.12.0
+# golang.org/x/crypto v0.14.0
 ## explicit; go 1.17
 golang.org/x/crypto/blake2b
 golang.org/x/crypto/blake2s
@@ -354,17 +362,17 @@ golang.org/x/crypto/hkdf
 golang.org/x/crypto/internal/alias
 golang.org/x/crypto/internal/poly1305
 golang.org/x/crypto/sha3
-# golang.org/x/exp v0.0.0-20230522175609-2e198f4a06a1
+# golang.org/x/exp v0.0.0-20230725093048-515e97ebf090
 ## explicit; go 1.20
 golang.org/x/exp/constraints
 golang.org/x/exp/rand
-# golang.org/x/mod v0.11.0
-## explicit; go 1.17
+# golang.org/x/mod v0.13.0
+## explicit; go 1.18
 golang.org/x/mod/internal/lazyregexp
 golang.org/x/mod/modfile
 golang.org/x/mod/module
 golang.org/x/mod/semver
-# golang.org/x/net v0.14.0
+# golang.org/x/net v0.17.0
 ## explicit; go 1.17
 golang.org/x/net/bpf
 golang.org/x/net/dns/dnsmessage
@@ -383,17 +391,16 @@ golang.org/x/net/ipv4
 golang.org/x/net/ipv6
 golang.org/x/net/proxy
 golang.org/x/net/trace
-# golang.org/x/sync v0.2.0
-## explicit
+# golang.org/x/sync v0.4.0
+## explicit; go 1.17
 golang.org/x/sync/errgroup
-# golang.org/x/sys v0.11.0
+# golang.org/x/sys v0.13.0
 ## explicit; go 1.17
 golang.org/x/sys/cpu
 golang.org/x/sys/execabs
-golang.org/x/sys/internal/unsafeheader
 golang.org/x/sys/unix
 golang.org/x/sys/windows
-# golang.org/x/text v0.12.0
+# golang.org/x/text v0.13.0
 ## explicit; go 1.17
 golang.org/x/text/internal/language
 golang.org/x/text/internal/language/compact
@@ -403,13 +410,17 @@ golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
-# golang.org/x/tools v0.9.3
+# golang.org/x/time v0.3.0
+## explicit
+golang.org/x/time/rate
+# golang.org/x/tools v0.14.0
 ## explicit; go 1.18
 golang.org/x/tools/go/ast/astutil
 golang.org/x/tools/go/ast/inspector
 golang.org/x/tools/go/gcexportdata
 golang.org/x/tools/go/internal/packagesdriver
 golang.org/x/tools/go/packages
+golang.org/x/tools/go/types/objectpath
 golang.org/x/tools/imports
 golang.org/x/tools/internal/event
 golang.org/x/tools/internal/event/core
@@ -426,11 +437,11 @@ golang.org/x/tools/internal/pkgbits
 golang.org/x/tools/internal/tokeninternal
 golang.org/x/tools/internal/typeparams
 golang.org/x/tools/internal/typesinternal
-# google.golang.org/genproto/googleapis/rpc v0.0.0-20230530153820-e85fd2cbaebc
+# google.golang.org/genproto/googleapis/rpc v0.0.0-20230822172742-b8732ec3820d
 ## explicit; go 1.19
 google.golang.org/genproto/googleapis/rpc/status
-# google.golang.org/grpc v1.57.0
-## explicit; go 1.17
+# google.golang.org/grpc v1.59.0
+## explicit; go 1.19
 google.golang.org/grpc
 google.golang.org/grpc/attributes
 google.golang.org/grpc/backoff
@@ -460,6 +471,7 @@ google.golang.org/grpc/internal/grpclog
 google.golang.org/grpc/internal/grpcrand
 google.golang.org/grpc/internal/grpcsync
 google.golang.org/grpc/internal/grpcutil
+google.golang.org/grpc/internal/idle
 google.golang.org/grpc/internal/metadata
 google.golang.org/grpc/internal/pretty
 google.golang.org/grpc/internal/resolver
@@ -526,6 +538,60 @@ google.golang.org/protobuf/types/known/wrapperspb
 # gopkg.in/yaml.v3 v3.0.1
 ## explicit
 gopkg.in/yaml.v3
+# gvisor.dev/gvisor v0.0.0-20231020174304-b8a429915ff1
+## explicit; go 1.20
+gvisor.dev/gvisor/pkg/abi/linux/errno
+gvisor.dev/gvisor/pkg/atomicbitops
+gvisor.dev/gvisor/pkg/bits
+gvisor.dev/gvisor/pkg/buffer
+gvisor.dev/gvisor/pkg/context
+gvisor.dev/gvisor/pkg/cpuid
+gvisor.dev/gvisor/pkg/errors
+gvisor.dev/gvisor/pkg/errors/linuxerr
+gvisor.dev/gvisor/pkg/gohacks
+gvisor.dev/gvisor/pkg/goid
+gvisor.dev/gvisor/pkg/linewriter
+gvisor.dev/gvisor/pkg/log
+gvisor.dev/gvisor/pkg/rand
+gvisor.dev/gvisor/pkg/refs
+gvisor.dev/gvisor/pkg/sleep
+gvisor.dev/gvisor/pkg/state
+gvisor.dev/gvisor/pkg/state/wire
+gvisor.dev/gvisor/pkg/sync
+gvisor.dev/gvisor/pkg/sync/locking
+gvisor.dev/gvisor/pkg/tcpip
+gvisor.dev/gvisor/pkg/tcpip/adapters/gonet
+gvisor.dev/gvisor/pkg/tcpip/checksum
+gvisor.dev/gvisor/pkg/tcpip/hash/jenkins
+gvisor.dev/gvisor/pkg/tcpip/header
+gvisor.dev/gvisor/pkg/tcpip/header/parse
+gvisor.dev/gvisor/pkg/tcpip/internal/tcp
+gvisor.dev/gvisor/pkg/tcpip/link/channel
+gvisor.dev/gvisor/pkg/tcpip/link/fdbased
+gvisor.dev/gvisor/pkg/tcpip/link/nested
+gvisor.dev/gvisor/pkg/tcpip/link/packetsocket
+gvisor.dev/gvisor/pkg/tcpip/link/rawfile
+gvisor.dev/gvisor/pkg/tcpip/link/stopfd
+gvisor.dev/gvisor/pkg/tcpip/link/tun
+gvisor.dev/gvisor/pkg/tcpip/network/hash
+gvisor.dev/gvisor/pkg/tcpip/network/internal/fragmentation
+gvisor.dev/gvisor/pkg/tcpip/network/internal/ip
+gvisor.dev/gvisor/pkg/tcpip/network/internal/multicast
+gvisor.dev/gvisor/pkg/tcpip/network/ipv4
+gvisor.dev/gvisor/pkg/tcpip/network/ipv6
+gvisor.dev/gvisor/pkg/tcpip/ports
+gvisor.dev/gvisor/pkg/tcpip/seqnum
+gvisor.dev/gvisor/pkg/tcpip/stack
+gvisor.dev/gvisor/pkg/tcpip/transport
+gvisor.dev/gvisor/pkg/tcpip/transport/icmp
+gvisor.dev/gvisor/pkg/tcpip/transport/internal/network
+gvisor.dev/gvisor/pkg/tcpip/transport/internal/noop
+gvisor.dev/gvisor/pkg/tcpip/transport/packet
+gvisor.dev/gvisor/pkg/tcpip/transport/raw
+gvisor.dev/gvisor/pkg/tcpip/transport/tcp
+gvisor.dev/gvisor/pkg/tcpip/transport/tcpconntrack
+gvisor.dev/gvisor/pkg/tcpip/transport/udp
+gvisor.dev/gvisor/pkg/waiter
 # h12.io/socks v1.0.3
 ## explicit; go 1.9
 h12.io/socks
