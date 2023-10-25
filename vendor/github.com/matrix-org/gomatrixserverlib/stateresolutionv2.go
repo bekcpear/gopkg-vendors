@@ -46,15 +46,20 @@ type stateResolverV2 struct {
 	resolvedMembers           map[spec.SenderID]PDU         // Resolved member events
 	resolvedOthers            map[StateKeyTuple]PDU         // Resolved other events
 	result                    []PDU                         // Final list of resolved events
+	isRejectedFn              IsRejected                    // Check if the given eventID is rejected
 }
+
+// IsRejected should return if the given eventID is rejected or not.
+type IsRejected func(eventID string) bool
 
 // ResolveStateConflicts takes a list of state events with conflicting state
 // keys and works out which event should be used for each state event. This
 // function returns the resolved state, including unconflicted state events.
 func ResolveStateConflictsV2(
-	conflicted, unconflicted []PDU,
+	conflicted, unconflicted,
 	authEvents []PDU,
 	userIDForSender spec.UserIDForSender,
+	isRejectedFn IsRejected,
 ) []PDU {
 	// Prepare the state resolver.
 	conflictedControlEvents := make([]PDU, 0, len(conflicted))
@@ -69,6 +74,7 @@ func ResolveStateConflictsV2(
 		resolvedMembers:           make(map[spec.SenderID]PDU, len(conflicted)),
 		resolvedOthers:            make(map[StateKeyTuple]PDU, len(conflicted)),
 		result:                    make([]PDU, 0, len(conflicted)+len(unconflicted)),
+		isRejectedFn:              isRejectedFn,
 	}
 	var roomID *spec.RoomID
 	if len(conflicted) > 0 {
@@ -450,8 +456,22 @@ func (r *stateResolverV2) authAndApplyEvents(events []PDU) {
 			_ = r.authProvider.AddEvent(event)
 		}
 		for _, needed := range needed.Member {
-			if event := r.resolvedMembers[spec.SenderID(needed)]; event != nil {
-				_ = r.authProvider.AddEvent(event)
+			if membershipEvent := r.resolvedMembers[spec.SenderID(needed)]; membershipEvent != nil {
+				_ = r.authProvider.AddEvent(membershipEvent)
+			} else {
+				for _, authEventID := range event.AuthEventIDs() {
+					authEv, ok := r.authEventMap[authEventID]
+					if !ok {
+						continue
+					}
+					if authEv.Type() == spec.MRoomMember && authEv.StateKeyEquals(needed) {
+						// Don't use rejected events for auth
+						if r.isRejectedFn(authEventID) {
+							continue
+						}
+						_ = r.authProvider.AddEvent(authEv)
+					}
+				}
 			}
 		}
 		for _, needed := range needed.ThirdPartyInvite {
@@ -467,7 +487,6 @@ func (r *stateResolverV2) authAndApplyEvents(events []PDU) {
 			// auth events from the event, so skip it.
 			continue
 		}
-
 		// Apply the newly authed event to the partial state. We need to do this
 		// here so that the next loop will have partial state to auth against.
 		r.applyEvents([]PDU{event})

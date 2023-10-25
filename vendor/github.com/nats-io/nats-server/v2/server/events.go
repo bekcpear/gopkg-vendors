@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,7 +31,9 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/s2"
+
 	"github.com/nats-io/jwt/v2"
+	"github.com/nats-io/nats-server/v2/server/certidp"
 	"github.com/nats-io/nats-server/v2/server/pse"
 )
 
@@ -53,6 +56,7 @@ const (
 	connsRespSubj            = "$SYS._INBOX_.%s"
 	accConnsEventSubjNew     = "$SYS.ACCOUNT.%s.SERVER.CONNS"
 	accConnsEventSubjOld     = "$SYS.SERVER.ACCOUNT.%s.CONNS" // kept for backward compatibility
+	lameDuckEventSubj        = "$SYS.SERVER.%s.LAMEDUCK"
 	shutdownEventSubj        = "$SYS.SERVER.%s.SHUTDOWN"
 	authErrorEventSubj       = "$SYS.SERVER.%s.CLIENT.AUTH.ERR"
 	serverStatsSubj          = "$SYS.SERVER.%s.STATSZ"
@@ -78,6 +82,9 @@ const (
 
 	accReqTokens   = 5
 	accReqAccIndex = 3
+
+	ocspPeerRejectEventSubj           = "$SYS.SERVER.%s.OCSP.PEER.CONN.REJECT"
+	ocspPeerChainlinkInvalidEventSubj = "$SYS.SERVER.%s.OCSP.PEER.LINK.INVALID"
 )
 
 // FIXME(dlc) - make configurable.
@@ -150,6 +157,34 @@ type DisconnectEventMsg struct {
 
 // DisconnectEventMsgType is the schema type for DisconnectEventMsg
 const DisconnectEventMsgType = "io.nats.server.advisory.v1.client_disconnect"
+
+// OCSPPeerRejectEventMsg is sent when a peer TLS handshake is ultimately rejected due to OCSP invalidation.
+// A "peer" can be an inbound client connection or a leaf connection to a remote server. Peer in event payload
+// is always the peer's (TLS) leaf cert, which may or may be the invalid cert (See also OCSPPeerChainlinkInvalidEventMsg)
+type OCSPPeerRejectEventMsg struct {
+	TypedEvent
+	Kind   string           `json:"kind"`
+	Peer   certidp.CertInfo `json:"peer"`
+	Server ServerInfo       `json:"server"`
+	Reason string           `json:"reason"`
+}
+
+// OCSPPeerRejectEventMsgType is the schema type for OCSPPeerRejectEventMsg
+const OCSPPeerRejectEventMsgType = "io.nats.server.advisory.v1.ocsp_peer_reject"
+
+// OCSPPeerChainlinkInvalidEventMsg is sent when a certificate (link) in a valid TLS chain is found to be OCSP invalid
+// during a peer TLS handshake. A "peer" can be an inbound client connection or a leaf connection to a remote server.
+// Peer and Link may be the same if the invalid cert was the peer's leaf cert
+type OCSPPeerChainlinkInvalidEventMsg struct {
+	TypedEvent
+	Link   certidp.CertInfo `json:"link"`
+	Peer   certidp.CertInfo `json:"peer"`
+	Server ServerInfo       `json:"server"`
+	Reason string           `json:"reason"`
+}
+
+// OCSPPeerChainlinkInvalidEventMsgType is the schema type for OCSPPeerChainlinkInvalidEventMsg
+const OCSPPeerChainlinkInvalidEventMsgType = "io.nats.server.advisory.v1.ocsp_peer_link_invalid"
 
 // AccountNumConns is an event that will be sent from a server that is tracking
 // a given account when the number of connections changes. It will also HB
@@ -499,6 +534,19 @@ RESET:
 	}
 }
 
+// Will send a shutdown message for lame-duck. Unlike sendShutdownEvent, this will
+// not close off the send queue or reply handler, as we may still have a workload
+// that needs migrating off.
+// Lock should be held.
+func (s *Server) sendLDMShutdownEventLocked() {
+	if s.sys == nil || s.sys.sendq == nil {
+		return
+	}
+	subj := fmt.Sprintf(lameDuckEventSubj, s.info.ID)
+	si := &ServerInfo{}
+	s.sys.sendq.push(newPubMsg(nil, subj, _EMPTY_, si, nil, si, noCompression, false, true))
+}
+
 // Will send a shutdown message.
 func (s *Server) sendShutdownEvent() {
 	s.mu.Lock()
@@ -843,35 +891,15 @@ func getHash(name string) string {
 	return getHashSize(name, sysHashLen)
 }
 
-var nameToHashSize8 = sync.Map{}
-var nameToHashSize6 = sync.Map{}
-
 // Computes a hash for the given `name`. The result will be `size` characters long.
 func getHashSize(name string, size int) string {
-	compute := func() string {
-		sha := sha256.New()
-		sha.Write([]byte(name))
-		b := sha.Sum(nil)
-		for i := 0; i < size; i++ {
-			b[i] = digits[int(b[i]%base)]
-		}
-		return string(b[:size])
+	sha := sha256.New()
+	sha.Write([]byte(name))
+	b := sha.Sum(nil)
+	for i := 0; i < size; i++ {
+		b[i] = digits[int(b[i]%base)]
 	}
-	var m *sync.Map
-	switch size {
-	case 8:
-		m = &nameToHashSize8
-	case 6:
-		m = &nameToHashSize6
-	default:
-		return compute()
-	}
-	if v, ok := m.Load(name); ok {
-		return v.(string)
-	}
-	h := compute()
-	m.Store(name, h)
-	return h
+	return string(b[:size])
 }
 
 // Returns the node name for this server which is a hash of the server name.
@@ -927,6 +955,13 @@ func (s *Server) initEventTracking() {
 	}
 	// Listen for all server shutdowns.
 	subject = fmt.Sprintf(shutdownEventSubj, "*")
+	if _, err := s.sysSubscribe(subject, s.noInlineCallback(s.remoteServerShutdown)); err != nil {
+		s.Errorf("Error setting up internal tracking: %v", err)
+	}
+	// Listen for servers entering lame-duck mode.
+	// NOTE: This currently is handled in the same way as a server shutdown, but has
+	// a different subject in case we need to handle differently in future.
+	subject = fmt.Sprintf(lameDuckEventSubj, "*")
 	if _, err := s.sysSubscribe(subject, s.noInlineCallback(s.remoteServerShutdown)); err != nil {
 		s.Errorf("Error setting up internal tracking: %v", err)
 	}
@@ -2487,4 +2522,75 @@ func (s *Server) wrapChk(f func()) func() {
 		f()
 		s.mu.Unlock()
 	}
+}
+
+// sendOCSPPeerRejectEvent sends a system level event to system account when a peer connection is
+// rejected due to OCSP invalid status of its trust chain(s).
+func (s *Server) sendOCSPPeerRejectEvent(kind string, peer *x509.Certificate, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.eventsEnabled() {
+		return
+	}
+	if peer == nil {
+		s.Errorf(certidp.ErrPeerEmptyNoEvent)
+		return
+	}
+	eid := s.nextEventID()
+	now := time.Now().UTC()
+	m := OCSPPeerRejectEventMsg{
+		TypedEvent: TypedEvent{
+			Type: OCSPPeerRejectEventMsgType,
+			ID:   eid,
+			Time: now,
+		},
+		Kind: kind,
+		Peer: certidp.CertInfo{
+			Subject:     certidp.GetSubjectDNForm(peer),
+			Issuer:      certidp.GetIssuerDNForm(peer),
+			Fingerprint: certidp.GenerateFingerprint(peer),
+			Raw:         peer.Raw,
+		},
+		Reason: reason,
+	}
+	subj := fmt.Sprintf(ocspPeerRejectEventSubj, s.info.ID)
+	s.sendInternalMsg(subj, _EMPTY_, &m.Server, &m)
+}
+
+// sendOCSPPeerChainlinkInvalidEvent sends a system level event to system account when a link in a peer's trust chain
+// is OCSP invalid.
+func (s *Server) sendOCSPPeerChainlinkInvalidEvent(peer *x509.Certificate, link *x509.Certificate, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.eventsEnabled() {
+		return
+	}
+	if peer == nil || link == nil {
+		s.Errorf(certidp.ErrPeerEmptyNoEvent)
+		return
+	}
+	eid := s.nextEventID()
+	now := time.Now().UTC()
+	m := OCSPPeerChainlinkInvalidEventMsg{
+		TypedEvent: TypedEvent{
+			Type: OCSPPeerChainlinkInvalidEventMsgType,
+			ID:   eid,
+			Time: now,
+		},
+		Link: certidp.CertInfo{
+			Subject:     certidp.GetSubjectDNForm(link),
+			Issuer:      certidp.GetIssuerDNForm(link),
+			Fingerprint: certidp.GenerateFingerprint(link),
+			Raw:         link.Raw,
+		},
+		Peer: certidp.CertInfo{
+			Subject:     certidp.GetSubjectDNForm(peer),
+			Issuer:      certidp.GetIssuerDNForm(peer),
+			Fingerprint: certidp.GenerateFingerprint(peer),
+			Raw:         peer.Raw,
+		},
+		Reason: reason,
+	}
+	subj := fmt.Sprintf(ocspPeerChainlinkInvalidEventSubj, s.info.ID)
+	s.sendInternalMsg(subj, _EMPTY_, &m.Server, &m)
 }

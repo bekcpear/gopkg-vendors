@@ -217,7 +217,8 @@ type stream struct {
 	mirror *sourceInfo
 
 	// Sources
-	sources map[string]*sourceInfo
+	sources              map[string]*sourceInfo
+	sourcesConsumerSetup *time.Timer
 
 	// Indicates we have direct consumers.
 	directs int
@@ -681,6 +682,11 @@ func (mset *stream) setLeader(isLeader bool) error {
 			return err
 		}
 	} else {
+		// cancel timer to create the source consumers if not fired yet
+		if mset.sourcesConsumerSetup != nil {
+			mset.sourcesConsumerSetup.Stop()
+			mset.sourcesConsumerSetup = nil
+		}
 		// Stop responding to sync requests.
 		mset.stopClusterSubs()
 		// Unsubscribe from direct stream.
@@ -836,6 +842,14 @@ func (mset *stream) lastSeqAndCLFS() (uint64, uint64) {
 	mset.mu.RLock()
 	defer mset.mu.RUnlock()
 	return mset.lseq, mset.clfs
+}
+
+func (mset *stream) clearCLFS() uint64 {
+	mset.mu.Lock()
+	defer mset.mu.Unlock()
+	clfs := mset.clfs
+	mset.clfs, mset.clseq = 0, 0
+	return clfs
 }
 
 func (mset *stream) lastSeq() uint64 {
@@ -2093,7 +2107,7 @@ func (mset *stream) processInboundMirrorMsg(m *inMsg) bool {
 	var err error
 	if node != nil {
 		if js.limitsExceeded(stype) {
-			s.resourcesExeededError()
+			s.resourcesExceededError()
 			err = ApiErrors[JSInsufficientResourcesErr]
 		} else {
 			err = node.Propose(encodeStreamMsg(m.subj, _EMPTY_, m.hdr, m.msg, sseq-1, ts))
@@ -2203,7 +2217,7 @@ func (mset *stream) scheduleSetupMirrorConsumerRetryAsap() {
 	}
 	// To make *sure* that the next request will not fail, add a bit of buffer
 	// and some randomness.
-	next += time.Duration(rand.Intn(50)) + 10*time.Millisecond
+	next += time.Duration(rand.Intn(int(10*time.Millisecond))) + 10*time.Millisecond
 	time.AfterFunc(next, func() {
 		mset.mu.Lock()
 		mset.setupMirrorConsumer()
@@ -2522,7 +2536,7 @@ func (mset *stream) scheduleSetSourceConsumerRetryAsap(si *sourceInfo, seq uint6
 	}
 	// To make *sure* that the next request will not fail, add a bit of buffer
 	// and some randomness.
-	next += time.Duration(rand.Intn(50)) + 10*time.Millisecond
+	next += time.Duration(rand.Intn(int(10*time.Millisecond))) + 10*time.Millisecond
 	mset.scheduleSetSourceConsumerRetry(si.iname, seq, next, startTime)
 }
 
@@ -2975,7 +2989,7 @@ func streamAndSeq(shdr string) (string, uint64) {
 	}
 	// New version which is stream index name <SPC> sequence
 	fields := strings.Fields(shdr)
-	if len(fields) != 2 {
+	if len(fields) < 2 {
 		return _EMPTY_, 0
 	}
 	return fields[0], uint64(parseAckReplyNum(fields[1]))
@@ -3017,15 +3031,8 @@ func (mset *stream) setStartingSequenceForSource(sname string) {
 }
 
 // Lock should be held.
-// This will do a reverse scan on startup or leader election
-// searching for the starting sequence number.
-// This can be slow in degenerative cases.
-// Lock should be held.
-func (mset *stream) startingSequenceForSources() {
-	if len(mset.cfg.Sources) == 0 {
-		return
-	}
-	// Always reset here.
+// Resets the SourceInfo for all the sources
+func (mset *stream) resetSourceInfo() {
 	mset.sources = make(map[string]*sourceInfo)
 
 	for _, ssi := range mset.cfg.Sources {
@@ -3035,6 +3042,20 @@ func (mset *stream) startingSequenceForSources() {
 		si := &sourceInfo{name: ssi.Name, iname: ssi.iname}
 		mset.sources[ssi.iname] = si
 	}
+}
+
+// Lock should be held.
+// This will do a reverse scan on startup or leader election
+// searching for the starting sequence number.
+// This can be slow in degenerative cases.
+// Lock should be held.
+func (mset *stream) startingSequenceForSources() {
+	if len(mset.cfg.Sources) == 0 {
+		return
+	}
+
+	// Always reset here.
+	mset.resetSourceInfo()
 
 	var state StreamState
 	mset.store.FastState(&state)
@@ -3105,6 +3126,11 @@ func (mset *stream) setupSourceConsumers() error {
 		}
 	}
 
+	// If we are no longer the leader, give up
+	if !mset.isLeader() {
+		return nil
+	}
+
 	mset.startingSequenceForSources()
 
 	// Setup our consumers at the proper starting position.
@@ -3130,13 +3156,21 @@ func (mset *stream) subscribeToStream() error {
 	}
 	// Check if we need to setup mirroring.
 	if mset.cfg.Mirror != nil {
-		if err := mset.setupMirrorConsumer(); err != nil {
-			return err
-		}
+		// setup the initial mirror sourceInfo
+		mset.mirror = &sourceInfo{name: mset.cfg.Mirror.Name}
+
+		// delay the actual mirror consumer creation for after a delay
+		mset.scheduleSetupMirrorConsumerRetryAsap()
 	} else if len(mset.cfg.Sources) > 0 {
-		if err := mset.setupSourceConsumers(); err != nil {
-			return err
-		}
+		// Setup the initial source infos for the sources
+		mset.resetSourceInfo()
+		// Delay the actual source consumer(s) creation(s) for after a delay
+
+		mset.sourcesConsumerSetup = time.AfterFunc(time.Duration(rand.Intn(int(10*time.Millisecond)))+10*time.Millisecond, func() {
+			mset.mu.Lock()
+			mset.setupSourceConsumers()
+			mset.mu.Unlock()
+		})
 	}
 	// Check for direct get access.
 	// We spin up followers for clustered streams in monitorStream().
@@ -3364,9 +3398,9 @@ func (mset *stream) setupStore(fsCfg *FileStoreConfig) error {
 		// Register our server.
 		fs.registerServer(s)
 	}
-	mset.mu.Unlock()
-
+	// This will fire the callback but we do not require the lock since md will be 0 here.
 	mset.store.RegisterStorageUpdates(mset.storeUpdates)
+	mset.mu.Unlock()
 
 	return nil
 }
@@ -3838,7 +3872,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		}
 		// Expected last sequence per subject.
 		// If we are clustered we have prechecked seq > 0.
-		if seq, exists := getExpectedLastSeqPerSubject(hdr); exists && (!isClustered || seq == 0) {
+		if seq, exists := getExpectedLastSeqPerSubject(hdr); exists {
 			// TODO(dlc) - We could make a new store func that does this all in one.
 			var smv StoreMsg
 			var fseq uint64
@@ -3952,7 +3986,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 
 	// Check to see if we have exceeded our limits.
 	if js.limitsExceeded(stype) {
-		s.resourcesExeededError()
+		s.resourcesExceededError()
 		mset.clfs++
 		mset.mu.Unlock()
 		if canRespond {
@@ -4447,7 +4481,7 @@ func (mset *stream) internalLoop() {
 				// Check to see if this is a delivery for a consumer and
 				// we failed to deliver the message. If so alert the consumer.
 				if pm.o != nil && pm.seq > 0 && !didDeliver {
-					pm.o.didNotDeliver(pm.seq)
+					pm.o.didNotDeliver(pm.seq, pm.dsubj)
 				}
 				pm.returnToPool()
 			}

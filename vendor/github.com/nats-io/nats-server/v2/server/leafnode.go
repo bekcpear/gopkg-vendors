@@ -1643,6 +1643,10 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 	subs := _subs[:0]
 	ims := []string{}
 
+	// Hold the client lock otherwise there can be a race and miss some subs.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	acc.mu.RLock()
 	accName := acc.Name
 	accNTag := acc.nameTag
@@ -1718,7 +1722,6 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 	}
 
 	// Now walk the results and add them to our smap
-	c.mu.Lock()
 	rc := c.leaf.remoteCluster
 	c.leaf.smap = make(map[string]int32)
 	for _, sub := range subs {
@@ -1784,7 +1787,6 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 			c.mu.Unlock()
 		})
 	}
-	c.mu.Unlock()
 }
 
 // updateInterestForAccountOnGateway called from gateway code when processing RS+ and RS-.
@@ -2101,8 +2103,11 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 	spoke := c.isSpokeLeafNode()
 	c.mu.Unlock()
 
-	if err := c.addShadowSubscriptions(acc, sub); err != nil {
-		c.Errorf(err.Error())
+	// Only add in shadow subs if a new sub or qsub.
+	if osub == nil {
+		if err := c.addShadowSubscriptions(acc, sub); err != nil {
+			c.Errorf(err.Error())
+		}
 	}
 
 	// If we are not solicited, treat leaf node subscriptions similar to a
