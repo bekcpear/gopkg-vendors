@@ -1,17 +1,23 @@
 package api
 
+// This file implements most of the API. This includes the "Build", "Transform",
+// "FormatMessages", and "AnalyzeMetafile" functions.
+
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"math"
-	"math/rand"
 	"os"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -21,14 +27,16 @@ import (
 	"github.com/evanw/esbuild/internal/cache"
 	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/config"
+	"github.com/evanw/esbuild/internal/css_ast"
 	"github.com/evanw/esbuild/internal/fs"
 	"github.com/evanw/esbuild/internal/graph"
 	"github.com/evanw/esbuild/internal/helpers"
 	"github.com/evanw/esbuild/internal/js_ast"
-	"github.com/evanw/esbuild/internal/js_lexer"
 	"github.com/evanw/esbuild/internal/js_parser"
+	"github.com/evanw/esbuild/internal/linker"
 	"github.com/evanw/esbuild/internal/logger"
 	"github.com/evanw/esbuild/internal/resolver"
+	"github.com/evanw/esbuild/internal/xxhash"
 )
 
 func validatePathTemplate(template string) []config.PathTemplate {
@@ -97,11 +105,9 @@ func validatePathTemplate(template string) []config.PathTemplate {
 	return parts
 }
 
-func validatePlatform(value Platform, defaultPlatform config.Platform) config.Platform {
+func validatePlatform(value Platform) config.Platform {
 	switch value {
-	case PlatformDefault:
-		return defaultPlatform
-	case PlatformBrowser:
+	case PlatformDefault, PlatformBrowser:
 		return config.PlatformBrowser
 	case PlatformNode:
 		return config.PlatformNode
@@ -241,14 +247,22 @@ func validateLoader(value Loader) config.Loader {
 		return config.LoaderCSS
 	case LoaderDataURL:
 		return config.LoaderDataURL
+	case LoaderDefault:
+		return config.LoaderDefault
+	case LoaderEmpty:
+		return config.LoaderEmpty
 	case LoaderFile:
 		return config.LoaderFile
+	case LoaderGlobalCSS:
+		return config.LoaderGlobalCSS
 	case LoaderJS:
 		return config.LoaderJS
 	case LoaderJSON:
 		return config.LoaderJSON
 	case LoaderJSX:
 		return config.LoaderJSX
+	case LoaderLocalCSS:
+		return config.LoaderLocalCSS
 	case LoaderNone:
 		return config.LoaderNone
 	case LoaderText:
@@ -257,8 +271,6 @@ func validateLoader(value Loader) config.Loader {
 		return config.LoaderTS
 	case LoaderTSX:
 		return config.LoaderTSX
-	case LoaderDefault:
-		return config.LoaderDefault
 	default:
 		panic("Invalid loader")
 	}
@@ -283,40 +295,36 @@ func validateEngine(value EngineName) compat.Engine {
 	}
 }
 
-var versionRegex = regexp.MustCompile(`^([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?$`)
+var versionRegex = regexp.MustCompile(`^([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?(-[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*)?$`)
 
-func validateFeatures(log logger.Log, target Target, engines []Engine) (config.TargetFromAPI, compat.JSFeature, compat.CSSFeature, string) {
+func validateFeatures(log logger.Log, target Target, engines []Engine) (compat.JSFeature, compat.CSSFeature, map[css_ast.D]compat.CSSPrefix, string) {
 	if target == DefaultTarget && len(engines) == 0 {
-		return config.TargetWasUnconfigured, 0, 0, ""
+		return 0, 0, nil, ""
 	}
 
-	constraints := make(map[compat.Engine][]int)
+	constraints := make(map[compat.Engine]compat.Semver)
 	targets := make([]string, 0, 1+len(engines))
-	targetFromAPI := config.TargetWasConfigured
 
 	switch target {
 	case ES5:
-		constraints[compat.ES] = []int{5}
+		constraints[compat.ES] = compat.Semver{Parts: []int{5}}
 	case ES2015:
-		constraints[compat.ES] = []int{2015}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2015}}
 	case ES2016:
-		constraints[compat.ES] = []int{2016}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2016}}
 	case ES2017:
-		constraints[compat.ES] = []int{2017}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2017}}
 	case ES2018:
-		constraints[compat.ES] = []int{2018}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2018}}
 	case ES2019:
-		constraints[compat.ES] = []int{2019}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2019}}
 	case ES2020:
-		constraints[compat.ES] = []int{2020}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2020}}
 	case ES2021:
-		constraints[compat.ES] = []int{2021}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2021}}
 	case ES2022:
-		constraints[compat.ES] = []int{2022}
-		targetFromAPI = config.TargetWasConfiguredAndAtLeastES2022
-	case ESNext:
-		targetFromAPI = config.TargetWasConfiguredAndAtLeastES2022
-	case DefaultTarget:
+		constraints[compat.ES] = compat.Semver{Parts: []int{2022}}
+	case ESNext, DefaultTarget:
 	default:
 		panic("Invalid target")
 	}
@@ -324,38 +332,38 @@ func validateFeatures(log logger.Log, target Target, engines []Engine) (config.T
 	for _, engine := range engines {
 		if match := versionRegex.FindStringSubmatch(engine.Version); match != nil {
 			if major, err := strconv.Atoi(match[1]); err == nil {
-				version := []int{major}
+				parts := []int{major}
 				if minor, err := strconv.Atoi(match[2]); err == nil {
-					version = append(version, minor)
+					parts = append(parts, minor)
+					if patch, err := strconv.Atoi(match[3]); err == nil {
+						parts = append(parts, patch)
+					}
 				}
-				if patch, err := strconv.Atoi(match[3]); err == nil {
-					version = append(version, patch)
+				constraints[convertEngineName(engine.Name)] = compat.Semver{
+					Parts:      parts,
+					PreRelease: match[4],
 				}
-				constraints[convertEngineName(engine.Name)] = version
 				continue
 			}
 		}
 
-		log.AddError(nil, logger.Range{}, fmt.Sprintf("Invalid version: %q", engine.Version))
+		text := "All version numbers passed to esbuild must be in the format \"X\", \"X.Y\", or \"X.Y.Z\" where X, Y, and Z are non-negative integers."
+
+		log.AddErrorWithNotes(nil, logger.Range{}, fmt.Sprintf("Invalid version: %q", engine.Version),
+			[]logger.MsgData{{Text: text}})
 	}
 
 	for engine, version := range constraints {
-		var text string
-		switch len(version) {
-		case 1:
-			text = fmt.Sprintf("%s%d", engine.String(), version[0])
-		case 2:
-			text = fmt.Sprintf("%s%d.%d", engine.String(), version[0], version[1])
-		case 3:
-			text = fmt.Sprintf("%s%d.%d.%d", engine.String(), version[0], version[1], version[2])
-		}
-		targets = append(targets, text)
+		targets = append(targets, engine.String()+version.String())
+	}
+	if target == ESNext {
+		targets = append(targets, "esnext")
 	}
 
 	sort.Strings(targets)
 	targetEnv := helpers.StringArrayToQuotedCommaSeparatedString(targets)
 
-	return targetFromAPI, compat.UnsupportedJSFeatures(constraints), compat.UnsupportedCSSFeatures(constraints), targetEnv
+	return compat.UnsupportedJSFeatures(constraints), compat.UnsupportedCSSFeatures(constraints), compat.CSSPrefixData(constraints), targetEnv
 }
 
 func validateSupported(log logger.Log, supported map[string]bool) (
@@ -446,6 +454,74 @@ func validateExternals(log logger.Log, fs fs.FS, paths []string) config.External
 	return result
 }
 
+func esmParsePackageName(packageSpecifier string) (packageName string, packageSubpath string, ok bool) {
+	if packageSpecifier == "" {
+		return
+	}
+
+	slash := strings.IndexByte(packageSpecifier, '/')
+	if !strings.HasPrefix(packageSpecifier, "@") {
+		if slash == -1 {
+			slash = len(packageSpecifier)
+		}
+		packageName = packageSpecifier[:slash]
+	} else {
+		if slash == -1 {
+			return
+		}
+		slash2 := strings.IndexByte(packageSpecifier[slash+1:], '/')
+		if slash2 == -1 {
+			slash2 = len(packageSpecifier[slash+1:])
+		}
+		packageName = packageSpecifier[:slash+1+slash2]
+	}
+
+	if strings.HasPrefix(packageName, ".") || strings.ContainsAny(packageName, "\\%") {
+		return
+	}
+
+	packageSubpath = "." + packageSpecifier[len(packageName):]
+	ok = true
+	return
+}
+
+func validateAlias(log logger.Log, fs fs.FS, alias map[string]string) map[string]string {
+	valid := make(map[string]string, len(alias))
+
+	for old, new := range alias {
+		if new == "" {
+			log.AddError(nil, logger.Range{}, fmt.Sprintf("Invalid alias substitution: %q", new))
+			continue
+		}
+
+		// Valid alias names:
+		//   "foo"
+		//   "foo/bar"
+		//   "@foo"
+		//   "@foo/bar"
+		//   "@foo/bar/baz"
+		//
+		// Invalid alias names:
+		//   "./foo"
+		//   "../foo"
+		//   "/foo"
+		//   "C:\\foo"
+		//   ".foo"
+		//   "foo/"
+		//   "@foo/"
+		//   "foo/../bar"
+		//
+		if !strings.HasPrefix(old, ".") && !strings.HasPrefix(old, "/") && !fs.IsAbs(old) && path.Clean(strings.ReplaceAll(old, "\\", "/")) == old {
+			valid[old] = new
+			continue
+		}
+
+		log.AddError(nil, logger.Range{}, fmt.Sprintf("Invalid alias name: %q", old))
+	}
+
+	return valid
+}
+
 func isValidExtension(ext string) bool {
 	return len(ext) >= 2 && ext[0] == '.' && ext[len(ext)-1] != '.'
 }
@@ -466,7 +542,7 @@ func validateLoaders(log logger.Log, loaders map[string]Loader) map[string]confi
 	result := bundler.DefaultExtensionToLoaderMap()
 	if loaders != nil {
 		for ext, loader := range loaders {
-			if !isValidExtension(ext) {
+			if ext != "" && !isValidExtension(ext) {
 				log.AddError(nil, logger.Range{}, fmt.Sprintf("Invalid file extension: %q", ext))
 			}
 			result[ext] = validateLoader(loader)
@@ -490,6 +566,7 @@ func validateDefines(
 	defines map[string]string,
 	pureFns []string,
 	platform config.Platform,
+	isBuildAPI bool,
 	minify bool,
 	drop Drop,
 ) (*config.ProcessedDefines, []config.InjectedDefine) {
@@ -500,7 +577,7 @@ func validateDefines(
 	for key, value := range defines {
 		// The key must be a dot-separated identifier list
 		for _, part := range strings.Split(key, ".") {
-			if !js_lexer.IsIdentifier(part) {
+			if !js_ast.IsIdentifier(part) {
 				if part == key {
 					log.AddError(nil, logger.Range{}, fmt.Sprintf("The define key %q must be a valid identifier", key))
 				} else {
@@ -516,6 +593,51 @@ func validateDefines(
 		// Define simple expressions
 		if defineExpr.Constant != nil || len(defineExpr.Parts) > 0 {
 			rawDefines[key] = config.DefineData{DefineExpr: &defineExpr}
+
+			// Try to be helpful for common mistakes
+			if len(defineExpr.Parts) == 1 && key == "process.env.NODE_ENV" {
+				data := logger.MsgData{
+					Text: fmt.Sprintf("%q is defined as an identifier instead of a string (surround %q with quotes to get a string)", key, value),
+				}
+				part := defineExpr.Parts[0]
+
+				switch logger.API {
+				case logger.CLIAPI:
+					data.Location = &logger.MsgLocation{
+						File:       "<cli>",
+						Line:       1,
+						Column:     30,
+						Length:     len(part),
+						LineText:   fmt.Sprintf("--define:process.env.NODE_ENV=%s", part),
+						Suggestion: fmt.Sprintf("\\\"%s\\\"", part),
+					}
+
+				case logger.JSAPI:
+					data.Location = &logger.MsgLocation{
+						File:       "<js>",
+						Line:       1,
+						Column:     34,
+						Length:     len(part) + 2,
+						LineText:   fmt.Sprintf("define: { 'process.env.NODE_ENV': '%s' }", part),
+						Suggestion: fmt.Sprintf("'\"%s\"'", part),
+					}
+
+				case logger.GoAPI:
+					data.Location = &logger.MsgLocation{
+						File:       "<go>",
+						Line:       1,
+						Column:     50,
+						Length:     len(part) + 2,
+						LineText:   fmt.Sprintf("Define: map[string]string{\"process.env.NODE_ENV\": \"%s\"}", part),
+						Suggestion: fmt.Sprintf("\"\\\"%s\\\"\"", part),
+					}
+				}
+
+				log.AddMsgID(logger.MsgID_JS_SuspiciousDefine, logger.Msg{
+					Kind: logger.Warning,
+					Data: data,
+				})
+			}
 			continue
 		}
 
@@ -555,7 +677,7 @@ func validateDefines(
 	// that must be handled to avoid all React code crashing instantly. This
 	// is only done if it's not already defined so that you can override it if
 	// necessary.
-	if platform == config.PlatformBrowser {
+	if isBuildAPI && platform == config.PlatformBrowser {
 		if _, process := rawDefines["process"]; !process {
 			if _, processEnv := rawDefines["process.env"]; !processEnv {
 				if _, processEnvNodeEnv := rawDefines["process.env.NODE_ENV"]; !processEnvNodeEnv {
@@ -581,7 +703,7 @@ func validateDefines(
 	for _, key := range pureFns {
 		// The key must be a dot-separated identifier list
 		for _, part := range strings.Split(key, ".") {
-			if !js_lexer.IsIdentifier(part) {
+			if !js_ast.IsIdentifier(part) {
 				log.AddError(nil, logger.Range{}, fmt.Sprintf("Invalid pure function: %q", key))
 				continue
 			}
@@ -731,6 +853,17 @@ func convertMessagesToInternal(msgs []logger.Msg, kind logger.MsgKind, messages 
 	return msgs
 }
 
+func convertErrorsAndWarningsToInternal(errors []Message, warnings []Message) []logger.Msg {
+	if len(errors)+len(warnings) > 0 {
+		msgs := make(logger.SortableMsgs, 0, len(errors)+len(warnings))
+		msgs = convertMessagesToInternal(msgs, logger.Error, errors)
+		msgs = convertMessagesToInternal(msgs, logger.Warning, warnings)
+		sort.Stable(msgs)
+		return msgs
+	}
+	return nil
+}
+
 func cloneMangleCache(log logger.Log, mangleCache map[string]interface{}) map[string]interface{} {
 	if mangleCache == nil {
 		return nil
@@ -755,14 +888,7 @@ func cloneMangleCache(log logger.Log, mangleCache map[string]interface{}) map[st
 ////////////////////////////////////////////////////////////////////////////////
 // Build API
 
-type internalBuildResult struct {
-	result    BuildResult
-	watchData fs.WatchData
-	options   config.Options
-}
-
-func buildImpl(buildOpts BuildOptions) internalBuildResult {
-	start := time.Now()
+func contextImpl(buildOpts BuildOptions) (*internalContext, []Message) {
 	logOptions := logger.OutputOptions{
 		IncludeSource: true,
 		MessageLimit:  buildOpts.LogLimit,
@@ -770,11 +896,11 @@ func buildImpl(buildOpts BuildOptions) internalBuildResult {
 		LogLevel:      validateLogLevel(buildOpts.LogLevel),
 		Overrides:     validateLogOverrides(buildOpts.LogOverride),
 	}
-	log := logger.NewStderrLog(logOptions)
 
 	// Validate that the current working directory is an absolute path
+	absWorkingDir := buildOpts.AbsWorkingDir
 	realFS, err := fs.RealFS(fs.RealFSOptions{
-		AbsWorkingDir: buildOpts.AbsWorkingDir,
+		AbsWorkingDir: absWorkingDir,
 
 		// This is a long-lived file system object so do not cache calls to
 		// ReadDirectory() (they are normally cached for the duration of a build
@@ -782,30 +908,280 @@ func buildImpl(buildOpts BuildOptions) internalBuildResult {
 		DoNotCache: true,
 	})
 	if err != nil {
+		log := logger.NewStderrLog(logOptions)
 		log.AddError(nil, logger.Range{}, err.Error())
-		return internalBuildResult{result: BuildResult{Errors: convertMessagesToPublic(logger.Error, log.Done())}}
+		return nil, convertMessagesToPublic(logger.Error, log.Done())
 	}
 
 	// Do not re-evaluate plugins when rebuilding. Also make sure the working
 	// directory doesn't change, since breaking that invariant would break the
 	// validation that we just did above.
 	caches := cache.MakeCacheSet()
-	oldAbsWorkingDir := buildOpts.AbsWorkingDir
-	plugins, onEndCallbacks, finalizeBuildOptions := loadPlugins(&buildOpts, realFS, log, caches)
-	if buildOpts.AbsWorkingDir != oldAbsWorkingDir {
+	log := logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug, logOptions.Overrides)
+	onEndCallbacks, onDisposeCallbacks, finalizeBuildOptions := loadPlugins(&buildOpts, realFS, log, caches)
+	options, entryPoints := validateBuildOptions(buildOpts, log, realFS)
+	finalizeBuildOptions(&options)
+	if buildOpts.AbsWorkingDir != absWorkingDir {
 		panic("Mutating \"AbsWorkingDir\" is not allowed")
 	}
 
-	internalResult := rebuildImpl(buildOpts, caches, plugins, finalizeBuildOptions, onEndCallbacks, logOptions, log, false /* isRebuild */)
-
-	// Print a summary of the generated files to stderr. Except don't do
-	// this if the terminal is already being used for something else.
-	if logOptions.LogLevel <= logger.LevelInfo && len(internalResult.result.OutputFiles) > 0 &&
-		buildOpts.Watch == nil && !buildOpts.Incremental && !internalResult.options.WriteToStdout {
-		printSummary(logOptions, internalResult.result.OutputFiles, start)
+	// If we have errors already, then refuse to build any further. This only
+	// happens when the build options themselves contain validation errors.
+	msgs := log.Done()
+	if log.HasErrors() {
+		if logOptions.LogLevel < logger.LevelSilent {
+			// Print all deferred validation log messages to stderr. We defer all log
+			// messages that are generated above because warnings are re-printed for
+			// every rebuild and we don't want to double-print these warnings for the
+			// first build.
+			stderr := logger.NewStderrLog(logOptions)
+			for _, msg := range msgs {
+				stderr.AddMsg(msg)
+			}
+			stderr.Done()
+		}
+		return nil, convertMessagesToPublic(logger.Error, msgs)
 	}
 
-	return internalResult
+	args := rebuildArgs{
+		caches:             caches,
+		onEndCallbacks:     onEndCallbacks,
+		onDisposeCallbacks: onDisposeCallbacks,
+		logOptions:         logOptions,
+		logWarnings:        msgs,
+		entryPoints:        entryPoints,
+		options:            options,
+		mangleCache:        buildOpts.MangleCache,
+		absWorkingDir:      absWorkingDir,
+		write:              buildOpts.Write,
+	}
+
+	return &internalContext{
+		args:          args,
+		realFS:        realFS,
+		absWorkingDir: absWorkingDir,
+	}, nil
+}
+
+type buildInProgress struct {
+	state     rebuildState
+	waitGroup sync.WaitGroup
+	cancel    config.CancelFlag
+}
+
+type internalContext struct {
+	mutex         sync.Mutex
+	args          rebuildArgs
+	activeBuild   *buildInProgress
+	recentBuild   *BuildResult
+	realFS        fs.FS
+	absWorkingDir string
+	watcher       *watcher
+	handler       *apiHandler
+	didDispose    bool
+
+	// This saves just enough information to be able to compute a useful diff
+	// between two sets of output files. That way we don't need to hold both
+	// sets of output files in memory at once to compute a diff.
+	latestHashes map[string]string
+}
+
+func (ctx *internalContext) rebuild() rebuildState {
+	ctx.mutex.Lock()
+
+	// Ignore disposed contexts
+	if ctx.didDispose {
+		ctx.mutex.Unlock()
+		return rebuildState{}
+	}
+
+	// If there's already an active build, just return that build's result
+	if build := ctx.activeBuild; build != nil {
+		ctx.mutex.Unlock()
+		build.waitGroup.Wait()
+		return build.state
+	}
+
+	// Otherwise, start a new build
+	build := &buildInProgress{}
+	build.waitGroup.Add(1)
+	ctx.activeBuild = build
+	args := ctx.args
+	watcher := ctx.watcher
+	handler := ctx.handler
+	oldHashes := ctx.latestHashes
+	args.options.CancelFlag = &build.cancel
+	ctx.mutex.Unlock()
+
+	// Do the build without holding the mutex
+	var newHashes map[string]string
+	build.state, newHashes = rebuildImpl(args, oldHashes)
+	if handler != nil {
+		handler.broadcastBuildResult(build.state.result, newHashes)
+	}
+	if watcher != nil {
+		watcher.setWatchData(build.state.watchData)
+	}
+
+	// Store the recent build for the dev server
+	recentBuild := &build.state.result
+	ctx.mutex.Lock()
+	ctx.activeBuild = nil
+	ctx.recentBuild = recentBuild
+	ctx.latestHashes = newHashes
+	ctx.mutex.Unlock()
+
+	// Clear the recent build after it goes stale
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		ctx.mutex.Lock()
+		if ctx.recentBuild == recentBuild {
+			ctx.recentBuild = nil
+		}
+		ctx.mutex.Unlock()
+	}()
+
+	build.waitGroup.Done()
+	return build.state
+}
+
+// This is used by the dev server. The dev server does a rebuild on each
+// incoming request since a) we want incoming requests to always be up to
+// date and b) we don't necessarily know what output paths to even serve
+// without running another build (e.g. the hashes may have changed).
+//
+// However, there is a small period of time where we reuse old build results
+// instead of generating new ones. This is because page loads likely involve
+// multiple requests, and don't want to rebuild separately for each of those
+// requests.
+func (ctx *internalContext) activeBuildOrRecentBuildOrRebuild() BuildResult {
+	ctx.mutex.Lock()
+
+	// If there's already an active build, wait for it and return that
+	if build := ctx.activeBuild; build != nil {
+		ctx.mutex.Unlock()
+		build.waitGroup.Wait()
+		return build.state.result
+	}
+
+	// Then try to return a recentl already-completed build
+	if build := ctx.recentBuild; build != nil {
+		ctx.mutex.Unlock()
+		return *build
+	}
+
+	// Otherwise, fall back to rebuilding
+	ctx.mutex.Unlock()
+	return ctx.Rebuild()
+}
+
+func (ctx *internalContext) Rebuild() BuildResult {
+	return ctx.rebuild().result
+}
+
+func (ctx *internalContext) Watch(options WatchOptions) error {
+	ctx.mutex.Lock()
+	defer ctx.mutex.Unlock()
+
+	// Ignore disposed contexts
+	if ctx.didDispose {
+		return errors.New("Cannot watch a disposed context")
+	}
+
+	// Don't allow starting watch mode multiple times
+	if ctx.watcher != nil {
+		return errors.New("Watch mode has already been enabled")
+	}
+
+	logLevel := ctx.args.logOptions.LogLevel
+	ctx.watcher = &watcher{
+		fs:        ctx.realFS,
+		shouldLog: logLevel == logger.LevelInfo || logLevel == logger.LevelDebug || logLevel == logger.LevelVerbose,
+		useColor:  ctx.args.logOptions.Color,
+		rebuild: func() fs.WatchData {
+			return ctx.rebuild().watchData
+		},
+	}
+
+	// All subsequent builds will be watch mode builds
+	ctx.args.options.WatchMode = true
+
+	// Start the file watcher goroutine
+	ctx.watcher.start()
+
+	// Do the first watch mode build on another goroutine
+	go func() {
+		ctx.mutex.Lock()
+		build := ctx.activeBuild
+		ctx.mutex.Unlock()
+
+		// If there's an active build, then it's not a watch build. Wait for it to
+		// finish first so we don't just get this build when we call "Rebuild()".
+		if build != nil {
+			build.waitGroup.Wait()
+		}
+
+		// Trigger a rebuild now that we know all future builds will pick up on
+		// our watcher. This build will populate the initial watch data, which is
+		// necessary to be able to know what file system changes are relevant.
+		ctx.Rebuild()
+	}()
+	return nil
+}
+
+func (ctx *internalContext) Cancel() {
+	ctx.mutex.Lock()
+
+	// Ignore disposed contexts
+	if ctx.didDispose {
+		ctx.mutex.Unlock()
+		return
+	}
+
+	build := ctx.activeBuild
+	ctx.mutex.Unlock()
+
+	if build != nil {
+		// Tell observers to cut this build short
+		build.cancel.Cancel()
+
+		// Wait for the build to finish before returning
+		build.waitGroup.Wait()
+	}
+}
+
+func (ctx *internalContext) Dispose() {
+	// Only dispose once
+	ctx.mutex.Lock()
+	if ctx.didDispose {
+		ctx.mutex.Unlock()
+		return
+	}
+	ctx.didDispose = true
+	ctx.recentBuild = nil
+	build := ctx.activeBuild
+	ctx.mutex.Unlock()
+
+	if ctx.watcher != nil {
+		ctx.watcher.stop()
+	}
+	if ctx.handler != nil {
+		ctx.handler.stop()
+	}
+
+	// It's important to wait for the build to finish before returning. The JS
+	// API will unregister its callbacks when it returns. If that happens while
+	// the build is still in progress, that might cause the JS API to generate
+	// errors when we send it events (e.g. when it runs "onEnd" callbacks) that
+	// we then print to the terminal, which would be confusing.
+	if build != nil {
+		build.waitGroup.Wait()
+	}
+
+	// Run each "OnDispose" callback on its own goroutine
+	for _, fn := range ctx.args.onDisposeCallbacks {
+		go fn()
+	}
 }
 
 func prettyPrintByteCount(n int) string {
@@ -822,26 +1198,28 @@ func prettyPrintByteCount(n int) string {
 	return size
 }
 
-func printSummary(logOptions logger.OutputOptions, outputFiles []OutputFile, start time.Time) {
+func printSummary(color logger.UseColor, outputFiles []OutputFile, start time.Time) {
+	if len(outputFiles) == 0 {
+		return
+	}
+
 	var table logger.SummaryTable = make([]logger.SummaryTableEntry, len(outputFiles))
 
-	if len(outputFiles) > 0 {
-		if cwd, err := os.Getwd(); err == nil {
-			if realFS, err := fs.RealFS(fs.RealFSOptions{AbsWorkingDir: cwd}); err == nil {
-				for i, file := range outputFiles {
-					path, ok := realFS.Rel(realFS.Cwd(), file.Path)
-					if !ok {
-						path = file.Path
-					}
-					base := realFS.Base(path)
-					n := len(file.Contents)
-					table[i] = logger.SummaryTableEntry{
-						Dir:         path[:len(path)-len(base)],
-						Base:        base,
-						Size:        prettyPrintByteCount(n),
-						Bytes:       n,
-						IsSourceMap: strings.HasSuffix(base, ".map"),
-					}
+	if cwd, err := os.Getwd(); err == nil {
+		if realFS, err := fs.RealFS(fs.RealFSOptions{AbsWorkingDir: cwd}); err == nil {
+			for i, file := range outputFiles {
+				path, ok := realFS.Rel(realFS.Cwd(), file.Path)
+				if !ok {
+					path = file.Path
+				}
+				base := realFS.Base(path)
+				n := len(file.Contents)
+				table[i] = logger.SummaryTableEntry{
+					Dir:         path[:len(path)-len(base)],
+					Base:        base,
+					Size:        prettyPrintByteCount(n),
+					Bytes:       n,
+					IsSourceMap: strings.HasSuffix(base, ".map"),
 				}
 			}
 		}
@@ -849,46 +1227,34 @@ func printSummary(logOptions logger.OutputOptions, outputFiles []OutputFile, sta
 
 	// Don't print the time taken by the build if we're running under Yarn 1
 	// since Yarn 1 always prints its own copy of the time taken by each command
-	for _, env := range os.Environ() {
-		if strings.HasPrefix(env, "npm_config_user_agent=") && strings.Contains(env, "yarn/1.") {
-			logger.PrintSummary(logOptions.Color, table, nil)
+	if userAgent, ok := os.LookupEnv("npm_config_user_agent"); ok {
+		if strings.Contains(userAgent, "yarn/1.") {
+			logger.PrintSummary(color, table, nil)
 			return
 		}
 	}
 
-	logger.PrintSummary(logOptions.Color, table, &start)
+	logger.PrintSummary(color, table, &start)
 }
 
-func rebuildImpl(
+func validateBuildOptions(
 	buildOpts BuildOptions,
-	caches *cache.CacheSet,
-	plugins []config.Plugin,
-	finalizeBuildOptions func(*config.Options),
-	onEndCallbacks []func(*BuildResult),
-	logOptions logger.OutputOptions,
 	log logger.Log,
-	isRebuild bool,
-) internalBuildResult {
-	// Convert and validate the buildOpts
-	realFS, err := fs.RealFS(fs.RealFSOptions{
-		AbsWorkingDir: buildOpts.AbsWorkingDir,
-		WantWatchData: buildOpts.Watch != nil,
-	})
-	if err != nil {
-		// This should already have been checked above
-		panic(err.Error())
-	}
-	targetFromAPI, jsFeatures, cssFeatures, targetEnv := validateFeatures(log, buildOpts.Target, buildOpts.Engines)
+	realFS fs.FS,
+) (
+	options config.Options,
+	entryPoints []bundler.EntryPoint,
+) {
+	jsFeatures, cssFeatures, cssPrefixData, targetEnv := validateFeatures(log, buildOpts.Target, buildOpts.Engines)
 	jsOverrides, jsMask, cssOverrides, cssMask := validateSupported(log, buildOpts.Supported)
-	outJS, outCSS := validateOutputExtensions(log, buildOpts.OutExtensions)
+	outJS, outCSS := validateOutputExtensions(log, buildOpts.OutExtension)
 	bannerJS, bannerCSS := validateBannerOrFooter(log, "banner", buildOpts.Banner)
 	footerJS, footerCSS := validateBannerOrFooter(log, "footer", buildOpts.Footer)
 	minify := buildOpts.MinifyWhitespace && buildOpts.MinifyIdentifiers && buildOpts.MinifySyntax
-	platform := validatePlatform(buildOpts.Platform, config.PlatformBrowser)
-	defines, injectedDefines := validateDefines(log, buildOpts.Define, buildOpts.Pure, platform, minify, buildOpts.Drop)
-	mangleCache := cloneMangleCache(log, buildOpts.MangleCache)
-	options := config.Options{
-		TargetFromAPI:                      targetFromAPI,
+	platform := validatePlatform(buildOpts.Platform)
+	defines, injectedDefines := validateDefines(log, buildOpts.Define, buildOpts.Pure, platform, true /* isBuildAPI */, minify, buildOpts.Drop)
+	options = config.Options{
+		CSSPrefixData:                      cssPrefixData,
 		UnsupportedJSFeatures:              jsFeatures.ApplyOverrides(jsOverrides, jsMask),
 		UnsupportedCSSFeatures:             cssFeatures.ApplyOverrides(cssOverrides, cssMask),
 		UnsupportedJSFeatureOverrides:      jsOverrides,
@@ -897,12 +1263,13 @@ func rebuildImpl(
 		UnsupportedCSSFeatureOverridesMask: cssMask,
 		OriginalTargetEnv:                  targetEnv,
 		JSX: config.JSXOptions{
-			Preserve:         buildOpts.JSXMode == JSXModePreserve,
-			AutomaticRuntime: buildOpts.JSXMode == JSXModeAutomatic,
+			Preserve:         buildOpts.JSX == JSXPreserve,
+			AutomaticRuntime: buildOpts.JSX == JSXAutomatic,
 			Factory:          validateJSXExpr(log, buildOpts.JSXFactory, "factory"),
 			Fragment:         validateJSXExpr(log, buildOpts.JSXFragment, "fragment"),
 			Development:      buildOpts.JSXDev,
 			ImportSource:     buildOpts.JSXImportSource,
+			SideEffects:      buildOpts.JSXSideEffects,
 		},
 		Defines:               defines,
 		InjectedDefines:       injectedDefines,
@@ -914,9 +1281,11 @@ func rebuildImpl(
 		MinifySyntax:          buildOpts.MinifySyntax,
 		MinifyWhitespace:      buildOpts.MinifyWhitespace,
 		MinifyIdentifiers:     buildOpts.MinifyIdentifiers,
+		LineLimit:             buildOpts.LineLimit,
 		MangleProps:           validateRegex(log, "mangle props", buildOpts.MangleProps),
 		ReserveProps:          validateRegex(log, "reserve props", buildOpts.ReserveProps),
 		MangleQuoted:          buildOpts.MangleQuoted == MangleQuotedTrue,
+		DropLabels:            append([]string{}, buildOpts.DropLabels...),
 		DropDebugger:          (buildOpts.Drop & DropDebugger) != 0,
 		AllowOverwrite:        buildOpts.AllowOverwrite,
 		ASCIIOnly:             validateASCIIOnly(buildOpts.Charset),
@@ -937,36 +1306,43 @@ func rebuildImpl(
 		ExtensionToLoader:     validateLoaders(log, buildOpts.Loader),
 		ExtensionOrder:        validateResolveExtensions(log, buildOpts.ResolveExtensions),
 		ExternalSettings:      validateExternals(log, realFS, buildOpts.External),
-		TsConfigOverride:      validatePath(log, realFS, buildOpts.Tsconfig, "tsconfig path"),
+		ExternalPackages:      buildOpts.Packages == PackagesExternal,
+		PackageAliases:        validateAlias(log, realFS, buildOpts.Alias),
+		TSConfigPath:          validatePath(log, realFS, buildOpts.Tsconfig, "tsconfig path"),
+		TSConfigRaw:           buildOpts.TsconfigRaw,
 		MainFields:            buildOpts.MainFields,
-		Conditions:            append([]string{}, buildOpts.Conditions...),
 		PublicPath:            buildOpts.PublicPath,
 		KeepNames:             buildOpts.KeepNames,
-		InjectAbsPaths:        make([]string, len(buildOpts.Inject)),
+		InjectPaths:           append([]string{}, buildOpts.Inject...),
 		AbsNodePaths:          make([]string, len(buildOpts.NodePaths)),
 		JSBanner:              bannerJS,
 		JSFooter:              footerJS,
 		CSSBanner:             bannerCSS,
 		CSSFooter:             footerCSS,
 		PreserveSymlinks:      buildOpts.PreserveSymlinks,
-		WatchMode:             buildOpts.Watch != nil,
-		Plugins:               plugins,
+	}
+	if buildOpts.Conditions != nil {
+		options.Conditions = append([]string{}, buildOpts.Conditions...)
 	}
 	if options.MainFields != nil {
 		options.MainFields = append([]string{}, options.MainFields...)
 	}
-	for i, path := range buildOpts.Inject {
-		options.InjectAbsPaths[i] = validatePath(log, realFS, path, "inject path")
-	}
 	for i, path := range buildOpts.NodePaths {
 		options.AbsNodePaths[i] = validatePath(log, realFS, path, "node path")
 	}
-	entryPoints := make([]bundler.EntryPoint, 0, len(buildOpts.EntryPoints)+len(buildOpts.EntryPointsAdvanced))
+	entryPoints = make([]bundler.EntryPoint, 0, len(buildOpts.EntryPoints)+len(buildOpts.EntryPointsAdvanced))
+	hasEntryPointWithWildcard := false
 	for _, ep := range buildOpts.EntryPoints {
 		entryPoints = append(entryPoints, bundler.EntryPoint{InputPath: ep})
+		if strings.ContainsRune(ep, '*') {
+			hasEntryPointWithWildcard = true
+		}
 	}
 	for _, ep := range buildOpts.EntryPointsAdvanced {
 		entryPoints = append(entryPoints, bundler.EntryPoint{InputPath: ep.InputPath, OutputPath: ep.OutputPath})
+		if strings.ContainsRune(ep.InputPath, '*') {
+			hasEntryPointWithWildcard = true
+		}
 	}
 	entryPointCount := len(entryPoints)
 	if buildOpts.Stdin != nil {
@@ -979,7 +1355,7 @@ func rebuildImpl(
 		}
 	}
 
-	if options.AbsOutputDir == "" && entryPointCount > 1 {
+	if options.AbsOutputDir == "" && (entryPointCount > 1 || hasEntryPointWithWildcard) {
 		log.AddError(nil, logger.Range{},
 			"Must use \"outdir\" when there are multiple input files")
 	} else if options.AbsOutputDir == "" && options.CodeSplitting {
@@ -1021,6 +1397,9 @@ func rebuildImpl(
 		if options.ExternalSettings.PreResolve.HasMatchers() || options.ExternalSettings.PostResolve.HasMatchers() {
 			log.AddError(nil, logger.Range{}, "Cannot use \"external\" without \"bundle\"")
 		}
+		if len(options.PackageAliases) > 0 {
+			log.AddError(nil, logger.Range{}, "Cannot use \"alias\" without \"bundle\"")
+		}
 	} else if options.OutputFormat == config.FormatPreserve {
 		// If the format isn't specified, set the default format using the platform
 		switch options.Platform {
@@ -1040,307 +1419,265 @@ func rebuildImpl(
 		options.Mode = config.ModeConvertFormat
 	}
 
+	// Automatically enable the "module" condition for better tree shaking
+	if options.Conditions == nil && options.Platform != config.PlatformNeutral {
+		options.Conditions = []string{"module"}
+	}
+
 	// Code splitting is experimental and currently only enabled for ES6 modules
 	if options.CodeSplitting && options.OutputFormat != config.FormatESModule {
 		log.AddError(nil, logger.Range{}, "Splitting currently only works with the \"esm\" format")
 	}
 
-	var outputFiles []OutputFile
-	var metafileJSON string
+	// Code splitting is experimental and currently only enabled for ES6 modules
+	if options.TSConfigPath != "" && options.TSConfigRaw != "" {
+		log.AddError(nil, logger.Range{}, "Cannot provide \"tsconfig\" as both a raw string and a path")
+	}
+
+	// If we aren't writing the output to the file system, then we can allow the
+	// output paths to be the same as the input paths. This helps when serving.
+	if !buildOpts.Write {
+		options.AllowOverwrite = true
+	}
+
+	return
+}
+
+type onEndCallback struct {
+	pluginName string
+	fn         func(*BuildResult) (OnEndResult, error)
+}
+
+type rebuildArgs struct {
+	caches             *cache.CacheSet
+	onEndCallbacks     []onEndCallback
+	onDisposeCallbacks []func()
+	logOptions         logger.OutputOptions
+	logWarnings        []logger.Msg
+	entryPoints        []bundler.EntryPoint
+	options            config.Options
+	mangleCache        map[string]interface{}
+	absWorkingDir      string
+	write              bool
+}
+
+type rebuildState struct {
+	result    BuildResult
+	watchData fs.WatchData
+	options   config.Options
+}
+
+func rebuildImpl(args rebuildArgs, oldHashes map[string]string) (rebuildState, map[string]string) {
+	log := logger.NewStderrLog(args.logOptions)
+
+	// All validation warnings are repeated for every rebuild
+	for _, msg := range args.logWarnings {
+		log.AddMsg(msg)
+	}
+
+	// Convert and validate the buildOpts
+	realFS, err := fs.RealFS(fs.RealFSOptions{
+		AbsWorkingDir: args.absWorkingDir,
+		WantWatchData: args.options.WatchMode,
+	})
+	if err != nil {
+		// This should already have been checked by the caller
+		panic(err.Error())
+	}
+
+	var result BuildResult
 	var watchData fs.WatchData
+	var toWriteToStdout []byte
+
+	var timer *helpers.Timer
+	if api_helpers.UseTimer {
+		timer = &helpers.Timer{}
+	}
+
+	// Scan over the bundle
+	bundle := bundler.ScanBundle(config.BuildCall, log, realFS, args.caches, args.entryPoints, args.options, timer)
+	watchData = realFS.WatchData()
+
+	// The new build summary remains the same as the old one when there are
+	// errors. A failed build shouldn't erase the previous successful build.
+	newHashes := oldHashes
 
 	// Stop now if there were errors
-	resolver := resolver.NewResolver(realFS, log, caches, options)
 	if !log.HasErrors() {
-		var timer *helpers.Timer
-		if api_helpers.UseTimer {
-			timer = &helpers.Timer{}
-		}
+		// Compile the bundle
+		result.MangleCache = cloneMangleCache(log, args.mangleCache)
+		results, metafile := bundle.Compile(log, timer, result.MangleCache, linker.Link)
 
-		// Finalize the build options, which will enable API methods that need them such as the "resolve" API
-		if finalizeBuildOptions != nil {
-			finalizeBuildOptions(&options)
+		// Canceling a build generates a single error at the end of the build
+		if args.options.CancelFlag.DidCancel() {
+			log.AddError(nil, logger.Range{}, "The build was canceled")
 		}
-
-		// Scan over the bundle
-		bundle := bundler.ScanBundle(log, realFS, resolver, caches, entryPoints, options, timer)
-		watchData = realFS.WatchData()
 
 		// Stop now if there were errors
 		if !log.HasErrors() {
-			// Compile the bundle
-			results, metafile := bundle.Compile(log, options, timer, mangleCache)
+			result.Metafile = metafile
 
-			// Stop now if there were errors
-			if !log.HasErrors() {
-				metafileJSON = metafile
+			// Populate the results to return
+			var hashBytes [8]byte
+			result.OutputFiles = make([]OutputFile, len(results))
+			newHashes = make(map[string]string)
+			for i, item := range results {
+				if args.options.WriteToStdout {
+					item.AbsPath = "<stdout>"
+				}
+				hasher := xxhash.New()
+				hasher.Write(item.Contents)
+				binary.LittleEndian.PutUint64(hashBytes[:], hasher.Sum64())
+				hash := base64.RawStdEncoding.EncodeToString(hashBytes[:])
+				result.OutputFiles[i] = OutputFile{
+					Path:     item.AbsPath,
+					Contents: item.Contents,
+					Hash:     hash,
+				}
+				newHashes[item.AbsPath] = hash
+			}
 
-				// Flush any deferred warnings now
-				log.AlmostDone()
-
-				if buildOpts.Write {
-					timer.Begin("Write output files")
-					if options.WriteToStdout {
-						// Special-case writing to stdout
-						if len(results) != 1 {
-							log.AddError(nil, logger.Range{}, fmt.Sprintf(
-								"Internal error: did not expect to generate %d files when writing to stdout", len(results)))
-						} else if _, err := os.Stdout.Write(results[0].Contents); err != nil {
-							log.AddError(nil, logger.Range{}, fmt.Sprintf(
-								"Failed to write to stdout: %s", err.Error()))
-						}
+			// Write output files before "OnEnd" callbacks run so they can expect
+			// output files to exist on the file system. "OnEnd" callbacks can be
+			// used to move output files to a different location after the build.
+			if args.write {
+				timer.Begin("Write output files")
+				if args.options.WriteToStdout {
+					// Special-case writing to stdout
+					if len(results) != 1 {
+						log.AddError(nil, logger.Range{}, fmt.Sprintf(
+							"Internal error: did not expect to generate %d files when writing to stdout", len(results)))
 					} else {
-						// Write out files in parallel
-						waitGroup := sync.WaitGroup{}
-						waitGroup.Add(len(results))
-						for _, result := range results {
-							go func(result graph.OutputFile) {
-								fs.BeforeFileOpen()
-								defer fs.AfterFileClose()
-								if err := fs.MkdirAll(realFS, realFS.Dir(result.AbsPath), 0755); err != nil {
-									log.AddError(nil, logger.Range{}, fmt.Sprintf(
-										"Failed to create output directory: %s", err.Error()))
-								} else {
-									var mode os.FileMode = 0644
-									if result.IsExecutable {
-										mode = 0755
-									}
-									if err := ioutil.WriteFile(result.AbsPath, result.Contents, mode); err != nil {
-										log.AddError(nil, logger.Range{}, fmt.Sprintf(
-											"Failed to write to output file: %s", err.Error()))
-									}
-								}
-								waitGroup.Done()
-							}(result)
+						// Print this later on, at the end of the current function
+						toWriteToStdout = results[0].Contents
+					}
+				} else {
+					// Delete old files that are no longer relevant
+					var toDelete []string
+					for absPath := range oldHashes {
+						if _, ok := newHashes[absPath]; !ok {
+							toDelete = append(toDelete, absPath)
 						}
-						waitGroup.Wait()
 					}
-					timer.End("Write output files")
-				}
 
-				// Return the results
-				outputFiles = make([]OutputFile, len(results))
-				for i, result := range results {
-					if options.WriteToStdout {
-						result.AbsPath = "<stdout>"
+					// Process all file operations in parallel
+					waitGroup := sync.WaitGroup{}
+					waitGroup.Add(len(results) + len(toDelete))
+					for _, result := range results {
+						go func(result graph.OutputFile) {
+							defer waitGroup.Done()
+							fs.BeforeFileOpen()
+							defer fs.AfterFileClose()
+							if oldHash, ok := oldHashes[result.AbsPath]; ok && oldHash == newHashes[result.AbsPath] {
+								if contents, err := ioutil.ReadFile(result.AbsPath); err == nil && bytes.Equal(contents, result.Contents) {
+									// Skip writing out files that haven't changed since last time
+									return
+								}
+							}
+							if err := fs.MkdirAll(realFS, realFS.Dir(result.AbsPath), 0755); err != nil {
+								log.AddError(nil, logger.Range{}, fmt.Sprintf(
+									"Failed to create output directory: %s", err.Error()))
+							} else {
+								var mode os.FileMode = 0666
+								if result.IsExecutable {
+									mode = 0777
+								}
+								if err := ioutil.WriteFile(result.AbsPath, result.Contents, mode); err != nil {
+									log.AddError(nil, logger.Range{}, fmt.Sprintf(
+										"Failed to write to output file: %s", err.Error()))
+								}
+							}
+						}(result)
 					}
-					outputFiles[i] = OutputFile{
-						Path:     result.AbsPath,
-						Contents: result.Contents,
+					for _, absPath := range toDelete {
+						go func(absPath string) {
+							defer waitGroup.Done()
+							fs.BeforeFileOpen()
+							defer fs.AfterFileClose()
+							os.Remove(absPath)
+						}(absPath)
 					}
+					waitGroup.Wait()
 				}
+				timer.End("Write output files")
 			}
-		}
-
-		timer.Log(log)
-	}
-
-	// End the log now, which may print a message
-	msgs := log.Done()
-
-	// Start watching, but only for the top-level build
-	var watch *watcher
-	var stop func()
-	if buildOpts.Watch != nil && !isRebuild {
-		onRebuild := buildOpts.Watch.OnRebuild
-		watch = &watcher{
-			data:     watchData,
-			resolver: resolver,
-			rebuild: func() fs.WatchData {
-				value := rebuildImpl(buildOpts, caches, plugins, nil, onEndCallbacks, logOptions, logger.NewStderrLog(logOptions), true /* isRebuild */)
-				if onRebuild != nil {
-					go onRebuild(value.result)
-				}
-				return value.watchData
-			},
-		}
-		mode := *buildOpts.Watch
-		watch.start(buildOpts.LogLevel, buildOpts.Color, mode)
-		stop = func() {
-			watch.stop()
-		}
-	}
-
-	var rebuild func() BuildResult
-	if buildOpts.Incremental {
-		rebuild = func() BuildResult {
-			value := rebuildImpl(buildOpts, caches, plugins, nil, onEndCallbacks, logOptions, logger.NewStderrLog(logOptions), true /* isRebuild */)
-			if watch != nil {
-				watch.setWatchData(value.watchData)
-			}
-			return value.result
 		}
 	}
 
 	// Only return the mangle cache for a successful build
 	if log.HasErrors() {
-		mangleCache = nil
+		result.MangleCache = nil
 	}
 
-	result := BuildResult{
-		Errors:      convertMessagesToPublic(logger.Error, msgs),
-		Warnings:    convertMessagesToPublic(logger.Warning, msgs),
-		OutputFiles: outputFiles,
-		Metafile:    metafileJSON,
-		Rebuild:     rebuild,
-		Stop:        stop,
-		MangleCache: mangleCache,
-	}
+	// Populate the result object with the messages so far
+	msgs := log.Peek()
+	result.Errors = convertMessagesToPublic(logger.Error, msgs)
+	result.Warnings = convertMessagesToPublic(logger.Warning, msgs)
 
-	for _, onEnd := range onEndCallbacks {
-		onEnd(&result)
-	}
+	// Run any registered "OnEnd" callbacks now. These always run regardless of
+	// whether the current build has bee canceled or not. They can check for
+	// errors by checking the error array in the build result, and canceled
+	// builds should always have at least one error.
+	timer.Begin("On-end callbacks")
+	for _, onEnd := range args.onEndCallbacks {
+		fromPlugin, thrown := onEnd.fn(&result)
 
-	return internalBuildResult{
-		result:    result,
-		options:   options,
-		watchData: watchData,
-	}
-}
-
-type watcher struct {
-	data              fs.WatchData
-	resolver          resolver.Resolver
-	rebuild           func() fs.WatchData
-	recentItems       []string
-	itemsToScan       []string
-	mutex             sync.Mutex
-	itemsPerIteration int
-	shouldStop        int32
-}
-
-func (w *watcher) setWatchData(data fs.WatchData) {
-	defer w.mutex.Unlock()
-	w.mutex.Lock()
-	w.data = data
-	w.itemsToScan = w.itemsToScan[:0] // Reuse memory
-
-	// Remove any recent items that weren't a part of the latest build
-	end := 0
-	for _, path := range w.recentItems {
-		if data.Paths[path] != nil {
-			w.recentItems[end] = path
-			end++
+		// Report errors and warnings generated by the plugin
+		for i := range fromPlugin.Errors {
+			if fromPlugin.Errors[i].PluginName == "" {
+				fromPlugin.Errors[i].PluginName = onEnd.pluginName
+			}
 		}
-	}
-	w.recentItems = w.recentItems[:end]
-}
+		for i := range fromPlugin.Warnings {
+			if fromPlugin.Warnings[i].PluginName == "" {
+				fromPlugin.Warnings[i].PluginName = onEnd.pluginName
+			}
+		}
 
-// The time to wait between watch intervals
-const watchIntervalSleep = 100 * time.Millisecond
-
-// The maximum number of recently-edited items to check every interval
-const maxRecentItemCount = 16
-
-// The minimum number of non-recent items to check every interval
-const minItemCountPerIter = 64
-
-// The maximum number of intervals before a change is detected
-const maxIntervalsBeforeUpdate = 20
-
-func (w *watcher) start(logLevel LogLevel, color StderrColor, mode WatchMode) {
-	useColor := validateColor(color)
-
-	go func() {
-		shouldLog := logLevel == LogLevelInfo || logLevel == LogLevelDebug
-
-		// Note: Do not change these log messages without a breaking version change.
-		// People want to run regexes over esbuild's stderr stream to look for these
-		// messages instead of using esbuild's API.
-
-		if shouldLog {
-			logger.PrintTextWithColor(os.Stderr, useColor, func(colors logger.Colors) string {
-				return fmt.Sprintf("%s[watch] build finished, watching for changes...%s\n", colors.Dim, colors.Reset)
+		// Report errors thrown by the plugin itself
+		if thrown != nil {
+			fromPlugin.Errors = append(fromPlugin.Errors, Message{
+				PluginName: onEnd.pluginName,
+				Text:       thrown.Error(),
 			})
 		}
 
-		for atomic.LoadInt32(&w.shouldStop) == 0 {
-			// Sleep for the watch interval
-			time.Sleep(watchIntervalSleep)
-
-			// Rebuild if we're dirty
-			if absPath := w.tryToFindDirtyPath(); absPath != "" {
-				if shouldLog {
-					logger.PrintTextWithColor(os.Stderr, useColor, func(colors logger.Colors) string {
-						prettyPath := w.resolver.PrettyPath(logger.Path{Text: absPath, Namespace: "file"})
-						return fmt.Sprintf("%s[watch] build started (change: %q)%s\n", colors.Dim, prettyPath, colors.Reset)
-					})
-				}
-
-				// Run the build
-				w.setWatchData(w.rebuild())
-
-				if shouldLog {
-					logger.PrintTextWithColor(os.Stderr, useColor, func(colors logger.Colors) string {
-						return fmt.Sprintf("%s[watch] build finished%s\n", colors.Dim, colors.Reset)
-					})
-				}
-			}
+		// Log any errors and warnings generated above
+		for _, msg := range convertErrorsAndWarningsToInternal(fromPlugin.Errors, fromPlugin.Warnings) {
+			log.AddMsg(msg)
 		}
-	}()
-}
 
-func (w *watcher) stop() {
-	atomic.StoreInt32(&w.shouldStop, 1)
-}
+		// Add the errors and warnings to the result object
+		result.Errors = append(result.Errors, fromPlugin.Errors...)
+		result.Warnings = append(result.Warnings, fromPlugin.Warnings...)
 
-func (w *watcher) tryToFindDirtyPath() string {
-	defer w.mutex.Unlock()
-	w.mutex.Lock()
-
-	// If we ran out of items to scan, fill the items back up in a random order
-	if len(w.itemsToScan) == 0 {
-		items := w.itemsToScan[:0] // Reuse memory
-		for path := range w.data.Paths {
-			items = append(items, path)
-		}
-		rand.Seed(time.Now().UnixNano())
-		for i := int32(len(items) - 1); i > 0; i-- { // Fisher-Yates shuffle
-			j := rand.Int31n(i + 1)
-			items[i], items[j] = items[j], items[i]
-		}
-		w.itemsToScan = items
-
-		// Determine how many items to check every iteration, rounded up
-		perIter := (len(items) + maxIntervalsBeforeUpdate - 1) / maxIntervalsBeforeUpdate
-		if perIter < minItemCountPerIter {
-			perIter = minItemCountPerIter
-		}
-		w.itemsPerIteration = perIter
-	}
-
-	// Always check all recent items every iteration
-	for i, path := range w.recentItems {
-		if dirtyPath := w.data.Paths[path](); dirtyPath != "" {
-			// Move this path to the back of the list (i.e. the "most recent" position)
-			copy(w.recentItems[i:], w.recentItems[i+1:])
-			w.recentItems[len(w.recentItems)-1] = path
-			return dirtyPath
+		// Stop if an "onEnd" callback failed. This counts as a build failure.
+		if len(fromPlugin.Errors) > 0 {
+			break
 		}
 	}
+	timer.End("On-end callbacks")
 
-	// Check a constant number of items every iteration
-	remainingCount := len(w.itemsToScan) - w.itemsPerIteration
-	if remainingCount < 0 {
-		remainingCount = 0
-	}
-	toCheck, remaining := w.itemsToScan[remainingCount:], w.itemsToScan[:remainingCount]
-	w.itemsToScan = remaining
+	// Log timing information now that we're all done
+	timer.Log(log)
 
-	// Check if any of the entries in this iteration have been modified
-	for _, path := range toCheck {
-		if dirtyPath := w.data.Paths[path](); dirtyPath != "" {
-			// Mark this item as recent by adding it to the back of the list
-			w.recentItems = append(w.recentItems, path)
-			if len(w.recentItems) > maxRecentItemCount {
-				// Remove items from the front of the list when we hit the limit
-				copy(w.recentItems, w.recentItems[1:])
-				w.recentItems = w.recentItems[:maxRecentItemCount]
-			}
-			return dirtyPath
-		}
+	// End the log after "OnEnd" callbacks have added any additional errors and/or
+	// warnings. This may may print any warnings that were deferred up until this
+	// point, as well as a message with the number of errors and/or warnings
+	// omitted due to the configured log limit.
+	log.Done()
+
+	// Only write to stdout after the log has been finalized. We want this output
+	// to show up in the terminal after the message that was printed above.
+	if toWriteToStdout != nil {
+		os.Stdout.Write(toWriteToStdout)
 	}
-	return ""
+
+	return rebuildState{
+		result:    result,
+		options:   args.options,
+		watchData: watchData,
+	}, newHashes
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1354,53 +1691,7 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 		LogLevel:      validateLogLevel(transformOpts.LogLevel),
 		Overrides:     validateLogOverrides(transformOpts.LogOverride),
 	})
-
-	// Settings from the user come first
-	var unusedImportFlagsTS config.UnusedImportFlagsTS
-	useDefineForClassFieldsTS := config.Unspecified
-	jsx := config.JSXOptions{
-		Preserve:         transformOpts.JSXMode == JSXModePreserve,
-		AutomaticRuntime: transformOpts.JSXMode == JSXModeAutomatic,
-		Factory:          validateJSXExpr(log, transformOpts.JSXFactory, "factory"),
-		Fragment:         validateJSXExpr(log, transformOpts.JSXFragment, "fragment"),
-		Development:      transformOpts.JSXDev,
-		ImportSource:     transformOpts.JSXImportSource,
-	}
-
-	// Settings from "tsconfig.json" override those
-	var tsTarget *config.TSTarget
-	var tsAlwaysStrict *config.TSAlwaysStrict
 	caches := cache.MakeCacheSet()
-	if transformOpts.TsconfigRaw != "" {
-		source := logger.Source{
-			KeyPath:    logger.Path{Text: "tsconfig.json"},
-			PrettyPath: "tsconfig.json",
-			Contents:   transformOpts.TsconfigRaw,
-		}
-		if result := resolver.ParseTSConfigJSON(log, source, &caches.JSONCache, nil); result != nil {
-			if result.JSX != config.TSJSXNone {
-				jsx.SetOptionsFromTSJSX(result.JSX)
-			}
-			if len(result.JSXFactory) > 0 {
-				jsx.Factory = config.DefineExpr{Parts: result.JSXFactory}
-			}
-			if len(result.JSXFragmentFactory) > 0 {
-				jsx.Fragment = config.DefineExpr{Parts: result.JSXFragmentFactory}
-			}
-			if len(result.JSXImportSource) > 0 {
-				jsx.ImportSource = result.JSXImportSource
-			}
-			if result.UseDefineForClassFields != config.Unspecified {
-				useDefineForClassFieldsTS = result.UseDefineForClassFields
-			}
-			unusedImportFlagsTS = config.UnusedImportFlagsFromTsconfigValues(
-				result.PreserveImportsNotUsedAsValues,
-				result.PreserveValueImports,
-			)
-			tsTarget = result.TSTarget
-			tsAlwaysStrict = result.TSAlwaysStrict
-		}
-	}
 
 	// Apply default values
 	if transformOpts.Sourcefile == "" {
@@ -1411,13 +1702,13 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 	}
 
 	// Convert and validate the transformOpts
-	targetFromAPI, jsFeatures, cssFeatures, targetEnv := validateFeatures(log, transformOpts.Target, transformOpts.Engines)
+	jsFeatures, cssFeatures, cssPrefixData, targetEnv := validateFeatures(log, transformOpts.Target, transformOpts.Engines)
 	jsOverrides, jsMask, cssOverrides, cssMask := validateSupported(log, transformOpts.Supported)
-	platform := validatePlatform(transformOpts.Platform, config.PlatformNeutral)
-	defines, injectedDefines := validateDefines(log, transformOpts.Define, transformOpts.Pure, platform, false /* minify */, transformOpts.Drop)
+	platform := validatePlatform(transformOpts.Platform)
+	defines, injectedDefines := validateDefines(log, transformOpts.Define, transformOpts.Pure, platform, false /* isBuildAPI */, false /* minify */, transformOpts.Drop)
 	mangleCache := cloneMangleCache(log, transformOpts.MangleCache)
 	options := config.Options{
-		TargetFromAPI:                      targetFromAPI,
+		CSSPrefixData:                      cssPrefixData,
 		UnsupportedJSFeatures:              jsFeatures.ApplyOverrides(jsOverrides, jsMask),
 		UnsupportedCSSFeatures:             cssFeatures.ApplyOverrides(cssOverrides, cssMask),
 		UnsupportedJSFeatureOverrides:      jsOverrides,
@@ -1425,39 +1716,46 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 		UnsupportedCSSFeatureOverrides:     cssOverrides,
 		UnsupportedCSSFeatureOverridesMask: cssMask,
 		OriginalTargetEnv:                  targetEnv,
-		TSTarget:                           tsTarget,
-		TSAlwaysStrict:                     tsAlwaysStrict,
-		JSX:                                jsx,
-		Defines:                            defines,
-		InjectedDefines:                    injectedDefines,
-		Platform:                           platform,
-		SourceMap:                          validateSourceMap(transformOpts.Sourcemap),
-		LegalComments:                      validateLegalComments(transformOpts.LegalComments, false /* bundle */),
-		SourceRoot:                         transformOpts.SourceRoot,
-		ExcludeSourcesContent:              transformOpts.SourcesContent == SourcesContentExclude,
-		OutputFormat:                       validateFormat(transformOpts.Format),
-		GlobalName:                         validateGlobalName(log, transformOpts.GlobalName),
-		MinifySyntax:                       transformOpts.MinifySyntax,
-		MinifyWhitespace:                   transformOpts.MinifyWhitespace,
-		MinifyIdentifiers:                  transformOpts.MinifyIdentifiers,
-		MangleProps:                        validateRegex(log, "mangle props", transformOpts.MangleProps),
-		ReserveProps:                       validateRegex(log, "reserve props", transformOpts.ReserveProps),
-		MangleQuoted:                       transformOpts.MangleQuoted == MangleQuotedTrue,
-		DropDebugger:                       (transformOpts.Drop & DropDebugger) != 0,
-		ASCIIOnly:                          validateASCIIOnly(transformOpts.Charset),
-		IgnoreDCEAnnotations:               transformOpts.IgnoreAnnotations,
-		TreeShaking:                        validateTreeShaking(transformOpts.TreeShaking, false /* bundle */, transformOpts.Format),
-		AbsOutputFile:                      transformOpts.Sourcefile + "-out",
-		KeepNames:                          transformOpts.KeepNames,
-		UseDefineForClassFields:            useDefineForClassFieldsTS,
-		UnusedImportFlagsTS:                unusedImportFlagsTS,
+		TSConfigRaw:                        transformOpts.TsconfigRaw,
+		JSX: config.JSXOptions{
+			Preserve:         transformOpts.JSX == JSXPreserve,
+			AutomaticRuntime: transformOpts.JSX == JSXAutomatic,
+			Factory:          validateJSXExpr(log, transformOpts.JSXFactory, "factory"),
+			Fragment:         validateJSXExpr(log, transformOpts.JSXFragment, "fragment"),
+			Development:      transformOpts.JSXDev,
+			ImportSource:     transformOpts.JSXImportSource,
+			SideEffects:      transformOpts.JSXSideEffects,
+		},
+		Defines:               defines,
+		InjectedDefines:       injectedDefines,
+		Platform:              platform,
+		SourceMap:             validateSourceMap(transformOpts.Sourcemap),
+		LegalComments:         validateLegalComments(transformOpts.LegalComments, false /* bundle */),
+		SourceRoot:            transformOpts.SourceRoot,
+		ExcludeSourcesContent: transformOpts.SourcesContent == SourcesContentExclude,
+		OutputFormat:          validateFormat(transformOpts.Format),
+		GlobalName:            validateGlobalName(log, transformOpts.GlobalName),
+		MinifySyntax:          transformOpts.MinifySyntax,
+		MinifyWhitespace:      transformOpts.MinifyWhitespace,
+		MinifyIdentifiers:     transformOpts.MinifyIdentifiers,
+		LineLimit:             transformOpts.LineLimit,
+		MangleProps:           validateRegex(log, "mangle props", transformOpts.MangleProps),
+		ReserveProps:          validateRegex(log, "reserve props", transformOpts.ReserveProps),
+		MangleQuoted:          transformOpts.MangleQuoted == MangleQuotedTrue,
+		DropLabels:            append([]string{}, transformOpts.DropLabels...),
+		DropDebugger:          (transformOpts.Drop & DropDebugger) != 0,
+		ASCIIOnly:             validateASCIIOnly(transformOpts.Charset),
+		IgnoreDCEAnnotations:  transformOpts.IgnoreAnnotations,
+		TreeShaking:           validateTreeShaking(transformOpts.TreeShaking, false /* bundle */, transformOpts.Format),
+		AbsOutputFile:         transformOpts.Sourcefile + "-out",
+		KeepNames:             transformOpts.KeepNames,
 		Stdin: &config.StdinInfo{
 			Loader:     validateLoader(transformOpts.Loader),
 			Contents:   input,
 			SourceFile: transformOpts.Sourcefile,
 		},
 	}
-	if options.Stdin.Loader == config.LoaderCSS {
+	if options.Stdin.Loader.IsCSS() {
 		options.CSSBanner = transformOpts.Banner
 		options.CSSFooter = transformOpts.Footer
 	} else {
@@ -1472,8 +1770,12 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 		log.AddError(nil, logger.Range{},
 			"Must use \"sourcefile\" with \"sourcemap\" to set the original file name")
 	}
-	if options.LegalComments.HasExternalFile() {
-		log.AddError(nil, logger.Range{}, "Cannot transform with linked or external legal comments")
+	if logger.API == logger.CLIAPI {
+		if options.LegalComments.HasExternalFile() {
+			log.AddError(nil, logger.Range{}, "Cannot transform with linked or external legal comments")
+		}
+	} else if options.LegalComments == config.LegalCommentsLinkedWithComment {
+		log.AddError(nil, logger.Range{}, "Cannot transform with linked legal comments")
 	}
 
 	// Set the output mode using other settings
@@ -1491,14 +1793,13 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 		}
 
 		// Scan over the bundle
-		mockFS := fs.MockFS(make(map[string]string))
-		resolver := resolver.NewResolver(mockFS, log, caches, options)
-		bundle := bundler.ScanBundle(log, mockFS, resolver, caches, nil, options, timer)
+		mockFS := fs.MockFS(make(map[string]string), fs.MockUnix, "/")
+		bundle := bundler.ScanBundle(config.TransformCall, log, mockFS, caches, nil, options, timer)
 
 		// Stop now if there were errors
 		if !log.HasErrors() {
 			// Compile the bundle
-			results, _ = bundle.Compile(log, options, timer, mangleCache)
+			results, _ = bundle.Compile(log, timer, mangleCache, linker.Link)
 		}
 
 		timer.Log(log)
@@ -1507,16 +1808,24 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 	// Return the results
 	var code []byte
 	var sourceMap []byte
+	var legalComments []byte
 
-	// Unpack the JavaScript file and the source map file
-	if len(results) == 1 {
-		code = results[0].Contents
-	} else if len(results) == 2 {
-		a, b := results[0], results[1]
-		if a.AbsPath == b.AbsPath+".map" {
-			sourceMap, code = a.Contents, b.Contents
-		} else if a.AbsPath+".map" == b.AbsPath {
-			code, sourceMap = a.Contents, b.Contents
+	var shortestAbsPath string
+	for _, result := range results {
+		if shortestAbsPath == "" || len(result.AbsPath) < len(shortestAbsPath) {
+			shortestAbsPath = result.AbsPath
+		}
+	}
+
+	// Unpack the JavaScript file, the source map file, and the legal comments file
+	for _, result := range results {
+		switch result.AbsPath {
+		case shortestAbsPath:
+			code = result.Contents
+		case shortestAbsPath + ".map":
+			sourceMap = result.Contents
+		case shortestAbsPath + ".LEGAL.txt":
+			legalComments = result.Contents
 		}
 	}
 
@@ -1527,11 +1836,12 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 
 	msgs := log.Done()
 	return TransformResult{
-		Errors:      convertMessagesToPublic(logger.Error, msgs),
-		Warnings:    convertMessagesToPublic(logger.Warning, msgs),
-		Code:        code,
-		Map:         sourceMap,
-		MangleCache: mangleCache,
+		Errors:        convertMessagesToPublic(logger.Error, msgs),
+		Warnings:      convertMessagesToPublic(logger.Warning, msgs),
+		Code:          code,
+		Map:           sourceMap,
+		LegalComments: legalComments,
+		MangleCache:   mangleCache,
 	}
 }
 
@@ -1556,13 +1866,7 @@ func (impl *pluginImpl) onStart(callback func() (OnStartResult, error)) {
 			}
 
 			// Convert log messages
-			if len(response.Errors)+len(response.Warnings) > 0 {
-				msgs := make(logger.SortableMsgs, 0, len(response.Errors)+len(response.Warnings))
-				msgs = convertMessagesToInternal(msgs, logger.Error, response.Errors)
-				msgs = convertMessagesToInternal(msgs, logger.Warning, response.Warnings)
-				sort.Stable(msgs)
-				result.Msgs = msgs
-			}
+			result.Msgs = convertErrorsAndWarningsToInternal(response.Errors, response.Warnings)
 			return
 		},
 	})
@@ -1580,8 +1884,10 @@ func importKindToResolveKind(kind ast.ImportKind) ResolveKind {
 		return ResolveJSDynamicImport
 	case ast.ImportRequireResolve:
 		return ResolveJSRequireResolve
-	case ast.ImportAt, ast.ImportAtConditional:
+	case ast.ImportAt:
 		return ResolveCSSImportRule
+	case ast.ImportComposesFrom:
+		return ResolveCSSComposesFrom
 	case ast.ImportURL:
 		return ResolveCSSURLToken
 	default:
@@ -1603,6 +1909,8 @@ func resolveKindToImportKind(kind ResolveKind) ast.ImportKind {
 		return ast.ImportRequireResolve
 	case ResolveCSSImportRule:
 		return ast.ImportAt
+	case ResolveCSSComposesFrom:
+		return ast.ImportComposesFrom
 	case ResolveCSSURLToken:
 		return ast.ImportURL
 	default:
@@ -1654,13 +1962,7 @@ func (impl *pluginImpl) onResolve(options OnResolveOptions, callback func(OnReso
 			result.PluginData = response.PluginData
 
 			// Convert log messages
-			if len(response.Errors)+len(response.Warnings) > 0 {
-				msgs := make(logger.SortableMsgs, 0, len(response.Errors)+len(response.Warnings))
-				msgs = convertMessagesToInternal(msgs, logger.Error, response.Errors)
-				msgs = convertMessagesToInternal(msgs, logger.Warning, response.Warnings)
-				sort.Stable(msgs)
-				result.Msgs = msgs
-			}
+			result.Msgs = convertErrorsAndWarningsToInternal(response.Errors, response.Warnings)
 			return
 		},
 	})
@@ -1701,13 +2003,7 @@ func (impl *pluginImpl) onLoad(options OnLoadOptions, callback func(OnLoadArgs) 
 			}
 
 			// Convert log messages
-			if len(response.Errors)+len(response.Warnings) > 0 {
-				msgs := make(logger.SortableMsgs, 0, len(response.Errors)+len(response.Warnings))
-				msgs = convertMessagesToInternal(msgs, logger.Error, response.Errors)
-				msgs = convertMessagesToInternal(msgs, logger.Warning, response.Warnings)
-				sort.Stable(msgs)
-				result.Msgs = msgs
-			}
+			result.Msgs = convertErrorsAndWarningsToInternal(response.Errors, response.Warnings)
 			return
 		},
 	})
@@ -1726,27 +2022,20 @@ func (impl *pluginImpl) validatePathsArray(pathsIn []string, name string) (paths
 }
 
 func loadPlugins(initialOptions *BuildOptions, fs fs.FS, log logger.Log, caches *cache.CacheSet) (
-	plugins []config.Plugin,
-	onEndCallbacks []func(*BuildResult),
+	onEndCallbacks []onEndCallback,
+	onDisposeCallbacks []func(),
 	finalizeBuildOptions func(*config.Options),
 ) {
-	onEnd := func(callback func(*BuildResult)) {
-		onEndCallbacks = append(onEndCallbacks, callback)
-	}
-
 	// Clone the plugin array to guard against mutation during iteration
 	clone := append(make([]Plugin, 0, len(initialOptions.Plugins)), initialOptions.Plugins...)
 
-	var resolveMutex sync.Mutex
 	var optionsForResolve *config.Options
+	var plugins []config.Plugin
 
-	// This is called when the build options are finalized
+	// This is called after the build options have been validated
 	finalizeBuildOptions = func(options *config.Options) {
-		resolveMutex.Lock()
-		if optionsForResolve == nil {
-			optionsForResolve = options
-		}
-		resolveMutex.Unlock()
+		options.Plugins = plugins
+		optionsForResolve = options
 	}
 
 	for i, item := range clone {
@@ -1762,21 +2051,21 @@ func loadPlugins(initialOptions *BuildOptions, fs fs.FS, log logger.Log, caches 
 		}
 
 		resolve := func(path string, options ResolveOptions) (result ResolveResult) {
-			// Try to grab the resolver options
-			resolveMutex.Lock()
-			buildOptions := optionsForResolve
-			resolveMutex.Unlock()
-
-			// If we couldn't grab them, then this is being called before plugin setup
+			// If options are missing, then this is being called before plugin setup
 			// has finished. That isn't allowed because plugin setup is allowed to
 			// change the initial options object, which can affect path resolution.
-			if buildOptions == nil {
+			if optionsForResolve == nil {
 				return ResolveResult{Errors: []Message{{Text: "Cannot call \"resolve\" before plugin setup has completed"}}}
+			}
+
+			if options.Kind == ResolveNone {
+				return ResolveResult{Errors: []Message{{Text: "Must specify \"kind\" when calling \"resolve\""}}}
 			}
 
 			// Make a new resolver so it has its own log
 			log := logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug, validateLogOverrides(initialOptions.LogOverride))
-			resolver := resolver.NewResolver(fs, log, caches, *buildOptions)
+			optionsClone := *optionsForResolve
+			resolver := resolver.NewResolver(config.BuildCall, fs, log, caches, &optionsClone)
 
 			// Make sure the resolve directory is an absolute path, which can fail
 			absResolveDir := validatePath(log, fs, options.ResolveDir, "resolve directory")
@@ -1821,7 +2110,7 @@ func loadPlugins(initialOptions *BuildOptions, fs fs.FS, log logger.Log, caches 
 				if options.PluginName != "" {
 					pluginName = options.PluginName
 				}
-				text, _, notes := bundler.ResolveFailureErrorTextSuggestionNotes(resolver, path, kind, pluginName, fs, absResolveDir, buildOptions.Platform, "")
+				text, _, notes := bundler.ResolveFailureErrorTextSuggestionNotes(resolver, path, kind, pluginName, fs, absResolveDir, optionsForResolve.Platform, "", "")
 				result.Errors = append(result.Errors, convertMessagesToPublic(logger.Error, []logger.Msg{{
 					Data:  logger.MsgData{Text: text},
 					Notes: notes,
@@ -1830,11 +2119,23 @@ func loadPlugins(initialOptions *BuildOptions, fs fs.FS, log logger.Log, caches 
 			return
 		}
 
+		onEnd := func(fn func(*BuildResult) (OnEndResult, error)) {
+			onEndCallbacks = append(onEndCallbacks, onEndCallback{
+				pluginName: item.Name,
+				fn:         fn,
+			})
+		}
+
+		onDispose := func(fn func()) {
+			onDisposeCallbacks = append(onDisposeCallbacks, fn)
+		}
+
 		item.Setup(PluginBuild{
 			InitialOptions: initialOptions,
 			Resolve:        resolve,
 			OnStart:        impl.onStart,
 			OnEnd:          onEnd,
+			OnDispose:      onDispose,
 			OnResolve:      impl.onResolve,
 			OnLoad:         impl.onLoad,
 		})
@@ -1879,6 +2180,7 @@ type metafileEntry struct {
 	size       int
 }
 
+// This type is just so we can use Go's native sort function
 type metafileArray []metafileEntry
 
 func (a metafileArray) Len() int          { return len(a) }
@@ -2178,4 +2480,39 @@ func analyzeMetafileImpl(metafile string, opts AnalyzeMetafileOptions) string {
 	}
 
 	return ""
+}
+
+func stripDirPrefix(path string, prefix string, allowedSlashes string) (string, bool) {
+	if strings.HasPrefix(path, prefix) {
+		pathLen := len(path)
+		prefixLen := len(prefix)
+
+		// Just return the path if there is no prefix
+		if prefixLen == 0 {
+			return path, true
+		}
+
+		// Return the empty string if the path equals the prefix
+		if pathLen == prefixLen {
+			return "", true
+		}
+
+		if strings.IndexByte(allowedSlashes, prefix[prefixLen-1]) >= 0 {
+			// Return the suffix if the prefix ends in a slash. Examples:
+			//
+			//   stripDirPrefix(`/foo`, `/`, `/`) => `foo`
+			//   stripDirPrefix(`C:\foo`, `C:\`, `\/`) => `foo`
+			//
+			return path[prefixLen:], true
+		} else if strings.IndexByte(allowedSlashes, path[prefixLen]) >= 0 {
+			// Return the suffix if there's a slash after the prefix. Examples:
+			//
+			//   stripDirPrefix(`/foo/bar`, `/foo`, `/`) => `bar`
+			//   stripDirPrefix(`C:\foo\bar`, `C:\foo`, `\/`) => `bar`
+			//
+			return path[prefixLen+1:], true
+		}
+	}
+
+	return "", false
 }

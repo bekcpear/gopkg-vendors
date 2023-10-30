@@ -81,7 +81,9 @@ var knownGlobals = [][]string{
 
 	// Symbol: Static properties
 	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol#static_properties
+	{"Symbol", "asyncDispose"},
 	{"Symbol", "asyncIterator"},
+	{"Symbol", "dispose"},
 	{"Symbol", "hasInstance"},
 	{"Symbol", "isConcatSpreadable"},
 	{"Symbol", "iterator"},
@@ -159,6 +161,11 @@ var knownGlobals = [][]string{
 	{"Reflect", "preventExtensions"},
 	{"Reflect", "set"},
 	{"Reflect", "setPrototypeOf"},
+
+	// JSON: Static Methods
+	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON#static_methods
+	{"JSON", "parse"},
+	{"JSON", "stringify"},
 
 	// Other globals present in both the browser and node (except "eval" because
 	// it has special behavior)

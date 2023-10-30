@@ -281,7 +281,7 @@ func (p *parser) lowerColor(token css_ast.Token) css_ast.Token {
 
 	switch token.Kind {
 	case css_lexer.THash:
-		if p.options.UnsupportedCSSFeatures.Has(compat.HexRGBA) {
+		if p.options.unsupportedCSSFeatures.Has(compat.HexRGBA) {
 			switch len(text) {
 			case 4:
 				// "#1234" => "rgba(1, 2, 3, 0.004)"
@@ -289,12 +289,12 @@ func (p *parser) lowerColor(token css_ast.Token) css_ast.Token {
 					hex = expandHex(hex)
 					token.Kind = css_lexer.TFunction
 					token.Text = "rgba"
-					commaToken := p.commaToken()
+					commaToken := p.commaToken(token.Loc)
 					token.Children = &[]css_ast.Token{
-						{Kind: css_lexer.TNumber, Text: strconv.Itoa(hexR(hex))}, commaToken,
-						{Kind: css_lexer.TNumber, Text: strconv.Itoa(hexG(hex))}, commaToken,
-						{Kind: css_lexer.TNumber, Text: strconv.Itoa(hexB(hex))}, commaToken,
-						{Kind: css_lexer.TNumber, Text: floatToStringForColor(float64(hexA(hex)) / 255)},
+						{Loc: token.Loc, Kind: css_lexer.TNumber, Text: strconv.Itoa(hexR(hex))}, commaToken,
+						{Loc: token.Loc, Kind: css_lexer.TNumber, Text: strconv.Itoa(hexG(hex))}, commaToken,
+						{Loc: token.Loc, Kind: css_lexer.TNumber, Text: strconv.Itoa(hexB(hex))}, commaToken,
+						{Loc: token.Loc, Kind: css_lexer.TNumber, Text: floatToStringForColor(float64(hexA(hex)) / 255)},
 					}
 				}
 
@@ -303,19 +303,19 @@ func (p *parser) lowerColor(token css_ast.Token) css_ast.Token {
 				if hex, ok := parseHex(text); ok {
 					token.Kind = css_lexer.TFunction
 					token.Text = "rgba"
-					commaToken := p.commaToken()
+					commaToken := p.commaToken(token.Loc)
 					token.Children = &[]css_ast.Token{
-						{Kind: css_lexer.TNumber, Text: strconv.Itoa(hexR(hex))}, commaToken,
-						{Kind: css_lexer.TNumber, Text: strconv.Itoa(hexG(hex))}, commaToken,
-						{Kind: css_lexer.TNumber, Text: strconv.Itoa(hexB(hex))}, commaToken,
-						{Kind: css_lexer.TNumber, Text: floatToStringForColor(float64(hexA(hex)) / 255)},
+						{Loc: token.Loc, Kind: css_lexer.TNumber, Text: strconv.Itoa(hexR(hex))}, commaToken,
+						{Loc: token.Loc, Kind: css_lexer.TNumber, Text: strconv.Itoa(hexG(hex))}, commaToken,
+						{Loc: token.Loc, Kind: css_lexer.TNumber, Text: strconv.Itoa(hexB(hex))}, commaToken,
+						{Loc: token.Loc, Kind: css_lexer.TNumber, Text: floatToStringForColor(float64(hexA(hex)) / 255)},
 					}
 				}
 			}
 		}
 
 	case css_lexer.TIdent:
-		if text == "rebeccapurple" && p.options.UnsupportedCSSFeatures.Has(compat.RebeccaPurple) {
+		if text == "rebeccapurple" && p.options.unsupportedCSSFeatures.Has(compat.RebeccaPurple) {
 			token.Kind = css_lexer.THash
 			token.Text = "663399"
 		}
@@ -323,7 +323,7 @@ func (p *parser) lowerColor(token css_ast.Token) css_ast.Token {
 	case css_lexer.TFunction:
 		switch text {
 		case "rgb", "rgba", "hsl", "hsla":
-			if p.options.UnsupportedCSSFeatures.Has(compat.Modern_RGB_HSL) {
+			if p.options.unsupportedCSSFeatures.Has(compat.Modern_RGB_HSL) {
 				args := *token.Children
 				removeAlpha := false
 				addAlpha := false
@@ -346,7 +346,7 @@ func (p *parser) lowerColor(token css_ast.Token) css_ast.Token {
 						removeAlpha = true
 						args[0].Whitespace = 0
 						args[1].Whitespace = 0
-						commaToken := p.commaToken()
+						commaToken := p.commaToken(token.Loc)
 						token.Children = &[]css_ast.Token{
 							args[0], commaToken,
 							args[1], commaToken,
@@ -372,7 +372,7 @@ func (p *parser) lowerColor(token css_ast.Token) css_ast.Token {
 						args[0].Whitespace = 0
 						args[1].Whitespace = 0
 						args[2].Whitespace = 0
-						commaToken := p.commaToken()
+						commaToken := p.commaToken(token.Loc)
 						token.Children = &[]css_ast.Token{
 							args[0], commaToken,
 							args[1], commaToken,
@@ -620,7 +620,7 @@ func (p *parser) mangleColor(token css_ast.Token, hex uint32) css_ast.Token {
 				token.Text = fmt.Sprintf("%06x", hex)
 			}
 		}
-	} else if !p.options.UnsupportedCSSFeatures.Has(compat.HexRGBA) {
+	} else if !p.options.unsupportedCSSFeatures.Has(compat.HexRGBA) {
 		token.Children = nil
 		token.Kind = css_lexer.THash
 		compact := compactHex(hex)
@@ -632,17 +632,17 @@ func (p *parser) mangleColor(token css_ast.Token, hex uint32) css_ast.Token {
 	} else {
 		token.Kind = css_lexer.TFunction
 		token.Text = "rgba"
-		commaToken := p.commaToken()
+		commaToken := p.commaToken(token.Loc)
 		index := hexA(hex) * 4
 		alpha := alphaFractionTable[index : index+4]
 		if space := strings.IndexByte(alpha, ' '); space != -1 {
 			alpha = alpha[:space]
 		}
 		token.Children = &[]css_ast.Token{
-			{Kind: css_lexer.TNumber, Text: strconv.Itoa(hexR(hex))}, commaToken,
-			{Kind: css_lexer.TNumber, Text: strconv.Itoa(hexG(hex))}, commaToken,
-			{Kind: css_lexer.TNumber, Text: strconv.Itoa(hexB(hex))}, commaToken,
-			{Kind: css_lexer.TNumber, Text: alpha},
+			{Loc: token.Loc, Kind: css_lexer.TNumber, Text: strconv.Itoa(hexR(hex))}, commaToken,
+			{Loc: token.Loc, Kind: css_lexer.TNumber, Text: strconv.Itoa(hexG(hex))}, commaToken,
+			{Loc: token.Loc, Kind: css_lexer.TNumber, Text: strconv.Itoa(hexB(hex))}, commaToken,
+			{Loc: token.Loc, Kind: css_lexer.TNumber, Text: alpha},
 		}
 	}
 

@@ -5,9 +5,11 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/evanw/esbuild/internal/ast"
 	"github.com/evanw/esbuild/internal/compat"
+	"github.com/evanw/esbuild/internal/css_ast"
 	"github.com/evanw/esbuild/internal/js_ast"
 	"github.com/evanw/esbuild/internal/logger"
 )
@@ -20,6 +22,7 @@ type JSXOptions struct {
 	AutomaticRuntime bool
 	ImportSource     string
 	Development      bool
+	SideEffects      bool
 }
 
 type TSJSX uint8
@@ -27,30 +30,123 @@ type TSJSX uint8
 const (
 	TSJSXNone TSJSX = iota
 	TSJSXPreserve
+	TSJSXReactNative
 	TSJSXReact
 	TSJSXReactJSX
 	TSJSXReactJSXDev
 )
 
-func (jsxOptions *JSXOptions) SetOptionsFromTSJSX(tsx TSJSX) {
-	switch tsx {
-	case TSJSXPreserve:
-		jsxOptions.Preserve = true
+type TSOptions struct {
+	Config              TSConfig
+	Parse               bool
+	NoAmbiguousLessThan bool
+}
+
+type TSConfigJSX struct {
+	// If not empty, these should override the default values
+	JSXFactory         []string // Default if empty: "React.createElement"
+	JSXFragmentFactory []string // Default if empty: "React.Fragment"
+	JSXImportSource    *string  // Default if empty: "react"
+	JSX                TSJSX
+}
+
+// This is used for "extends" in "tsconfig.json"
+func (derived *TSConfigJSX) ApplyExtendedConfig(base TSConfigJSX) {
+	if base.JSXFactory != nil {
+		derived.JSXFactory = base.JSXFactory
+	}
+	if base.JSXFragmentFactory != nil {
+		derived.JSXFragmentFactory = base.JSXFragmentFactory
+	}
+	if base.JSXImportSource != nil {
+		derived.JSXImportSource = base.JSXImportSource
+	}
+	if base.JSX != TSJSXNone {
+		derived.JSX = base.JSX
+	}
+}
+
+func (tsConfig *TSConfigJSX) ApplyTo(jsxOptions *JSXOptions) {
+	switch tsConfig.JSX {
+	case TSJSXPreserve, TSJSXReactNative:
+		// Deliberately don't set "Preserve = true" here. Some tools from Vercel
+		// apparently automatically set "jsx": "preserve" in "tsconfig.json" and
+		// people are then confused when esbuild preserves their JSX. Ignoring this
+		// value means you now have to explicitly pass "--jsx=preserve" to esbuild
+		// to get this behavior.
+
 	case TSJSXReact:
 		jsxOptions.AutomaticRuntime = false
 		jsxOptions.Development = false
+
 	case TSJSXReactJSX:
 		jsxOptions.AutomaticRuntime = true
-		// Don't set Development = false implicitly
+		// Deliberately don't set "Development = false" here. People want to be
+		// able to have "react-jsx" in their "tsconfig.json" file and then swap
+		// that to "react-jsxdev" by passing "--jsx-dev" to esbuild.
+
 	case TSJSXReactJSXDev:
 		jsxOptions.AutomaticRuntime = true
 		jsxOptions.Development = true
 	}
+
+	if len(tsConfig.JSXFactory) > 0 {
+		jsxOptions.Factory = DefineExpr{Parts: tsConfig.JSXFactory}
+	}
+
+	if len(tsConfig.JSXFragmentFactory) > 0 {
+		jsxOptions.Fragment = DefineExpr{Parts: tsConfig.JSXFragmentFactory}
+	}
+
+	if tsConfig.JSXImportSource != nil {
+		jsxOptions.ImportSource = *tsConfig.JSXImportSource
+	}
 }
 
-type TSOptions struct {
-	Parse               bool
-	NoAmbiguousLessThan bool
+// Note: This can currently only contain primitive values. It's compared
+// for equality using a structural equality comparison by the JS parser.
+type TSConfig struct {
+	ExperimentalDecorators  MaybeBool
+	ImportsNotUsedAsValues  TSImportsNotUsedAsValues
+	PreserveValueImports    MaybeBool
+	Target                  TSTarget
+	UseDefineForClassFields MaybeBool
+	VerbatimModuleSyntax    MaybeBool
+}
+
+// This is used for "extends" in "tsconfig.json"
+func (derived *TSConfig) ApplyExtendedConfig(base TSConfig) {
+	if base.ExperimentalDecorators != Unspecified {
+		derived.ExperimentalDecorators = base.ExperimentalDecorators
+	}
+	if base.ImportsNotUsedAsValues != TSImportsNotUsedAsValues_None {
+		derived.ImportsNotUsedAsValues = base.ImportsNotUsedAsValues
+	}
+	if base.PreserveValueImports != Unspecified {
+		derived.PreserveValueImports = base.PreserveValueImports
+	}
+	if base.Target != TSTargetUnspecified {
+		derived.Target = base.Target
+	}
+	if base.UseDefineForClassFields != Unspecified {
+		derived.UseDefineForClassFields = base.UseDefineForClassFields
+	}
+	if base.VerbatimModuleSyntax != Unspecified {
+		derived.VerbatimModuleSyntax = base.VerbatimModuleSyntax
+	}
+}
+
+func (cfg *TSConfig) UnusedImportFlags() (flags TSUnusedImportFlags) {
+	if cfg.VerbatimModuleSyntax == True {
+		return TSUnusedImport_KeepStmt | TSUnusedImport_KeepValues
+	}
+	if cfg.PreserveValueImports == True {
+		flags |= TSUnusedImport_KeepValues
+	}
+	if cfg.ImportsNotUsedAsValues == TSImportsNotUsedAsValues_Preserve || cfg.ImportsNotUsedAsValues == TSImportsNotUsedAsValues_Error {
+		flags |= TSUnusedImport_KeepStmt
+	}
+	return
 }
 
 type Platform uint8
@@ -95,32 +191,67 @@ const (
 	LoaderCSS
 	LoaderDataURL
 	LoaderDefault
+	LoaderEmpty
 	LoaderFile
+	LoaderGlobalCSS
 	LoaderJS
 	LoaderJSON
 	LoaderJSX
+	LoaderLocalCSS
 	LoaderText
 	LoaderTS
 	LoaderTSNoAmbiguousLessThan // Used with ".mts" and ".cts"
 	LoaderTSX
 )
 
+var LoaderToString = []string{
+	"none",
+	"base64",
+	"binary",
+	"copy",
+	"css",
+	"dataurl",
+	"default",
+	"empty",
+	"file",
+	"global-css",
+	"js",
+	"json",
+	"jsx",
+	"local-css",
+	"text",
+	"ts",
+	"ts",
+	"tsx",
+}
+
 func (loader Loader) IsTypeScript() bool {
 	switch loader {
 	case LoaderTS, LoaderTSNoAmbiguousLessThan, LoaderTSX:
 		return true
-	default:
-		return false
 	}
+	return false
+}
+
+func (loader Loader) IsCSS() bool {
+	switch loader {
+	case
+		LoaderCSS, LoaderGlobalCSS, LoaderLocalCSS:
+		return true
+	}
+	return false
 }
 
 func (loader Loader) CanHaveSourceMap() bool {
 	switch loader {
-	case LoaderJS, LoaderJSX, LoaderTS, LoaderTSNoAmbiguousLessThan, LoaderTSX, LoaderCSS:
+	case
+		LoaderJS, LoaderJSX,
+		LoaderTS, LoaderTSNoAmbiguousLessThan, LoaderTSX,
+		LoaderCSS, LoaderGlobalCSS, LoaderLocalCSS,
+		LoaderJSON, LoaderText:
 		return true
-	default:
-		return false
 	}
+	return false
 }
 
 type Format uint8
@@ -162,7 +293,7 @@ const (
 	FormatESModule
 )
 
-func (f Format) KeepES6ImportExportSyntax() bool {
+func (f Format) KeepESMImportExportSyntax() bool {
 	return f == FormatPreserve || f == FormatESModule
 }
 
@@ -204,6 +335,13 @@ type ExternalSettings struct {
 	PostResolve ExternalMatchers
 }
 
+type APICall uint8
+
+const (
+	BuildCall APICall = iota
+	TransformCall
+)
+
 type Mode uint8
 
 const (
@@ -220,13 +358,26 @@ const (
 	False
 )
 
+type CancelFlag struct {
+	uint32
+}
+
+func (flag *CancelFlag) Cancel() {
+	atomic.StoreUint32(&flag.uint32, 1)
+}
+
+// This checks for nil in one place so we don't have to do that everywhere
+func (flag *CancelFlag) DidCancel() bool {
+	return flag != nil && atomic.LoadUint32(&flag.uint32) != 0
+}
+
 type Options struct {
 	ModuleTypeData js_ast.ModuleTypeData
 	Defines        *ProcessedDefines
-	TSTarget       *TSTarget
 	TSAlwaysStrict *TSAlwaysStrict
 	MangleProps    *regexp.Regexp
 	ReserveProps   *regexp.Regexp
+	CancelFlag     *CancelFlag
 
 	// When mangling property names, call this function with a callback and do
 	// the property name mangling inside the callback. The callback takes an
@@ -241,17 +392,23 @@ type Options struct {
 	// parallel so only property mangling is serialized, which is implemented by
 	// this function blocking until the previous entry point's property mangling
 	// has finished.
-	ExclusiveMangleCacheUpdate func(cb func(mangleCache map[string]interface{}))
+	ExclusiveMangleCacheUpdate func(cb func(
+		mangleCache map[string]interface{},
+		cssUsedLocalNames map[string]bool,
+	))
 
 	// This is the original information that was used to generate the
 	// unsupported feature sets above. It's used for error messages.
 	OriginalTargetEnv string
 
+	DropLabels       []string
 	ExtensionOrder   []string
 	MainFields       []string
 	Conditions       []string
 	AbsNodePaths     []string // The "NODE_PATH" variable from Node.js
 	ExternalSettings ExternalSettings
+	ExternalPackages bool
+	PackageAliases   map[string]string
 
 	AbsOutputFile      string
 	AbsOutputDir       string
@@ -259,11 +416,12 @@ type Options struct {
 	OutputExtensionJS  string
 	OutputExtensionCSS string
 	GlobalName         []string
-	TsConfigOverride   string
+	TSConfigPath       string
+	TSConfigRaw        string
 	ExtensionToLoader  map[string]Loader
 
 	PublicPath      string
-	InjectAbsPaths  []string
+	InjectPaths     []string
 	InjectedDefines []InjectedDefine
 	InjectedFiles   []InjectedFile
 
@@ -280,7 +438,9 @@ type Options struct {
 	SourceRoot string
 	Stdin      *StdinInfo
 	JSX        JSXOptions
+	LineLimit  int
 
+	CSSPrefixData          map[css_ast.D]compat.CSSPrefix
 	UnsupportedJSFeatures  compat.JSFeature
 	UnsupportedCSSFeatures compat.CSSFeature
 
@@ -304,91 +464,80 @@ type Options struct {
 	// If true, make sure to generate a single file that can be written to stdout
 	WriteToStdout bool
 
-	OmitRuntimeForTests     bool
-	OmitJSXRuntimeForTests  bool
-	UnusedImportFlagsTS     UnusedImportFlagsTS
-	UseDefineForClassFields MaybeBool
-	ASCIIOnly               bool
-	KeepNames               bool
-	IgnoreDCEAnnotations    bool
-	TreeShaking             bool
-	DropDebugger            bool
-	MangleQuoted            bool
-	Platform                Platform
-	TargetFromAPI           TargetFromAPI
-	OutputFormat            Format
-	NeedsMetafile           bool
-	SourceMap               SourceMap
-	ExcludeSourcesContent   bool
+	OmitRuntimeForTests    bool
+	OmitJSXRuntimeForTests bool
+	ASCIIOnly              bool
+	KeepNames              bool
+	IgnoreDCEAnnotations   bool
+	TreeShaking            bool
+	DropDebugger           bool
+	MangleQuoted           bool
+	Platform               Platform
+	OutputFormat           Format
+	NeedsMetafile          bool
+	SourceMap              SourceMap
+	ExcludeSourcesContent  bool
 }
 
-type TargetFromAPI uint8
+type TSImportsNotUsedAsValues uint8
 
 const (
-	// In this state, the "target" field in "tsconfig.json" is respected
-	TargetWasUnconfigured TargetFromAPI = iota
-
-	// In this state, the "target" field in "tsconfig.json" is overridden
-	TargetWasConfigured
-
-	// In this state, "useDefineForClassFields" is true unless overridden
-	TargetWasConfiguredAndAtLeastES2022
+	TSImportsNotUsedAsValues_None TSImportsNotUsedAsValues = iota
+	TSImportsNotUsedAsValues_Remove
+	TSImportsNotUsedAsValues_Preserve
+	TSImportsNotUsedAsValues_Error
 )
 
-type UnusedImportFlagsTS uint8
+// These flags represent the following separate "tsconfig.json" settings:
+//
+// - importsNotUsedAsValues
+// - preserveValueImports
+// - verbatimModuleSyntax
+//
+// TypeScript prefers for people to use "verbatimModuleSyntax" and has
+// deprecated the other two settings, but we must still support them.
+// All settings are combined into these two behavioral flags for us.
+type TSUnusedImportFlags uint8
 
-// With !UnusedImportKeepStmt && !UnusedImportKeepValues:
+// With !TSUnusedImport_KeepStmt && !TSUnusedImport_KeepValues:
 //
 //	"import 'foo'"                      => "import 'foo'"
 //	"import * as unused from 'foo'"     => ""
 //	"import { unused } from 'foo'"      => ""
 //	"import { type unused } from 'foo'" => ""
 //
-// With UnusedImportKeepStmt && !UnusedImportKeepValues:
+// With TSUnusedImport_KeepStmt && !TSUnusedImport_KeepValues:
 //
 //	"import 'foo'"                      => "import 'foo'"
 //	"import * as unused from 'foo'"     => "import 'foo'"
 //	"import { unused } from 'foo'"      => "import 'foo'"
 //	"import { type unused } from 'foo'" => "import 'foo'"
 //
-// With !UnusedImportKeepStmt && UnusedImportKeepValues:
+// With !TSUnusedImport_KeepStmt && TSUnusedImport_KeepValues:
 //
 //	"import 'foo'"                      => "import 'foo'"
 //	"import * as unused from 'foo'"     => "import * as unused from 'foo'"
 //	"import { unused } from 'foo'"      => "import { unused } from 'foo'"
 //	"import { type unused } from 'foo'" => ""
 //
-// With UnusedImportKeepStmt && UnusedImportKeepValues:
+// With TSUnusedImport_KeepStmt && TSUnusedImport_KeepValues:
 //
 //	"import 'foo'"                      => "import 'foo'"
 //	"import * as unused from 'foo'"     => "import * as unused from 'foo'"
 //	"import { unused } from 'foo'"      => "import { unused } from 'foo'"
 //	"import { type unused } from 'foo'" => "import {} from 'foo'"
 const (
-	UnusedImportKeepStmt   UnusedImportFlagsTS = 1 << iota // "importsNotUsedAsValues" != "remove"
-	UnusedImportKeepValues                                 // "preserveValueImports" == true
+	TSUnusedImport_KeepStmt   TSUnusedImportFlags = 1 << iota // "importsNotUsedAsValues" != "remove"
+	TSUnusedImport_KeepValues                                 // "preserveValueImports" == true
 )
 
-func UnusedImportFlagsFromTsconfigValues(preserveImportsNotUsedAsValues bool, preserveValueImports bool) (flags UnusedImportFlagsTS) {
-	if preserveValueImports {
-		flags |= UnusedImportKeepValues
-	}
-	if preserveImportsNotUsedAsValues {
-		flags |= UnusedImportKeepStmt
-	}
-	return
-}
+type TSTarget uint8
 
-type TSTarget struct {
-	// This information is only used for error messages
-	Target string
-	Source logger.Source
-	Range  logger.Range
-
-	// This information can affect code transformation
-	UnsupportedJSFeatures compat.JSFeature
-	TargetIsAtLeastES2022 bool
-}
+const (
+	TSTargetUnspecified     TSTarget = iota
+	TSTargetBelowES2022              // "useDefineForClassFields" defaults to false
+	TSTargetAtOrAboveES2022          // "useDefineForClassFields" defaults to true
+)
 
 type TSAlwaysStrict struct {
 	// This information is only used for error messages
@@ -521,9 +670,10 @@ type InjectedDefine struct {
 }
 
 type InjectedFile struct {
-	Exports    []InjectableExport
-	DefineName string
-	Source     logger.Source
+	Exports      []InjectableExport
+	DefineName   string // For injected files generated when you "--define" a non-literal
+	Source       logger.Source
+	IsCopyLoader bool // If you set the loader to "copy" (see https://github.com/evanw/esbuild/issues/3041)
 }
 
 type InjectableExport struct {

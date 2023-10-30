@@ -1,9 +1,9 @@
+package runtime
+
 // This is esbuild's runtime code. It contains helper functions that are
 // automatically injected into output files to implement certain features. For
 // example, the "**" operator is replaced with a call to "__pow" when targeting
 // ES2015. Tree shaking automatically removes unused code from the runtime.
-
-package runtime
 
 import (
 	"github.com/evanw/esbuild/internal/compat"
@@ -15,11 +15,7 @@ import (
 // all code that references this index can be discovered easily.
 const SourceIndex = uint32(0)
 
-func CanUseES6(unsupportedFeatures compat.JSFeature) bool {
-	return !unsupportedFeatures.Has(compat.ConstAndLet) && !unsupportedFeatures.Has(compat.ForOf)
-}
-
-func code(isES6 bool) string {
+func Source(unsupportedJSFeatures compat.JSFeature) logger.Source {
 	// Note: These helper functions used to be named similar things to the helper
 	// functions from the TypeScript compiler. However, people sometimes use these
 	// two projects in combination and TypeScript's implementation of these helpers
@@ -79,6 +75,11 @@ func code(isES6 bool) string {
 		var __reflectGet = Reflect.get
 		var __reflectSet = Reflect.set
 
+		var __knownSymbol = (name, symbol) => {
+			if (symbol = Symbol[name]) return symbol
+			throw Error('Symbol.' + name + ' is not defined')
+		}
+
 		export var __pow = Math.pow
 
 		var __defNormalProp = (obj, key, value) => key in obj
@@ -93,7 +94,7 @@ func code(isES6 bool) string {
 		`
 
 	// Avoid "of" when not using ES6
-	if isES6 {
+	if !unsupportedJSFeatures.Has(compat.ForOf) {
 		text += `
 				for (var prop of __getOwnPropSymbols(b)) {
 		`
@@ -129,8 +130,15 @@ func code(isES6 bool) string {
 				}) : x
 			)(function(x) {
 				if (typeof require !== 'undefined') return require.apply(this, arguments)
-				throw new Error('Dynamic require of "' + x + '" is not supported')
+				throw Error('Dynamic require of "' + x + '" is not supported')
 			})
+
+		// This is used for glob imports
+		export var __glob = map => path => {
+			var fn = map[path]
+			if (fn) return fn()
+			throw new Error('Module not found in bundle: ' + path)
+		}
 
 		// For object rest patterns
 		export var __restKey = key => typeof key === 'symbol' ? key : key + ''
@@ -143,7 +151,7 @@ func code(isES6 bool) string {
 	`
 
 	// Avoid "of" when not using ES6
-	if isES6 {
+	if !unsupportedJSFeatures.Has(compat.ForOf) {
 		text += `
 				for (var prop of __getOwnPropSymbols(source)) {
 		`
@@ -188,7 +196,7 @@ func code(isES6 bool) string {
 	`
 
 	// Avoid "let" when not using ES6
-	if isES6 {
+	if !unsupportedJSFeatures.Has(compat.ForOf) && !unsupportedJSFeatures.Has(compat.ConstAndLet) {
 		text += `
 				for (let key of __getOwnPropNames(from))
 					if (!__hasOwnProp.call(to, key) && key !== except)
@@ -280,12 +288,28 @@ func code(isES6 bool) string {
 			setter ? setter.call(obj, value) : member.set(obj, value)
 			return value
 		}
-		export var __privateWrapper = (obj, member, setter, getter) => {
-			return {
+		export var __earlyAccess = (name) => {
+			throw ReferenceError('Cannot access "' + name + '" before initialization')
+		}
+	`
+
+	if !unsupportedJSFeatures.Has(compat.ObjectAccessors) {
+		text += `
+			export var __privateWrapper = (obj, member, setter, getter) => ({
 				set _(value) { __privateSet(obj, member, value, setter) },
 				get _() { return __privateGet(obj, member, getter) },
-			}
-		}
+			})
+		`
+	} else {
+		text += `
+		export var __privateWrapper = (obj, member, setter, getter) => __defProp({}, '_', {
+			set: value => __privateSet(obj, member, value, setter),
+			get: () => __privateGet(obj, member, getter),
+		})
+		`
+	}
+
+	text += `
 		export var __privateMethod = (obj, member, method) => {
 			__accessCheck(obj, member, 'access private method')
 			return method
@@ -294,11 +318,25 @@ func code(isES6 bool) string {
 		// For "super" property accesses
 		export var __superGet = (cls, obj, key) => __reflectGet(__getProtoOf(cls), key, obj)
 		export var __superSet = (cls, obj, key, val) => (__reflectSet(__getProtoOf(cls), key, val, obj), val)
-		export var __superWrapper = (cls, obj, key) => ({
-			get _() { return __superGet(cls, obj, key) },
-			set _(val) { __superSet(cls, obj, key, val) },
-		})
+	`
 
+	if !unsupportedJSFeatures.Has(compat.ObjectAccessors) {
+		text += `
+			export var __superWrapper = (cls, obj, key) => ({
+				get _() { return __superGet(cls, obj, key) },
+				set _(val) { __superSet(cls, obj, key, val) },
+			})
+		`
+	} else {
+		text += `
+			export var __superWrapper = (cls, obj, key) => __defProp({}, '_', {
+				get: () => __superGet(cls, obj, key),
+				set: val => __superSet(cls, obj, key, val),
+			})
+		`
+	}
+
+	text += `
 		// For lowering tagged template literals
 		export var __template = (cooked, raw) => __freeze(__defProp(cooked, 'raw', { value: __freeze(raw || cooked.slice()) }))
 
@@ -324,6 +362,85 @@ func code(isES6 bool) string {
 			})
 		}
 
+		// These help for lowering async generator functions
+		export var __await = function (promise, isYieldStar) {
+			this[0] = promise
+			this[1] = isYieldStar
+		}
+		export var __asyncGenerator = (__this, __arguments, generator) => {
+			var resume = (k, v, yes, no) => {
+				try {
+					var x = generator[k](v), isAwait = (v = x.value) instanceof __await, done = x.done
+					Promise.resolve(isAwait ? v[0] : v)
+						.then(y => isAwait
+							? resume(k === 'return' ? k : 'next', v[1] ? { done: y.done, value: y.value } : y, yes, no)
+							: yes({ value: y, done }))
+						.catch(e => resume('throw', e, yes, no))
+				} catch (e) {
+					no(e)
+				}
+			}
+			var method = k => it[k] = x => new Promise((yes, no) => resume(k, x, yes, no))
+			var it = {}
+			return generator = generator.apply(__this, __arguments),
+				it[Symbol.asyncIterator] = () => it,
+				method('next'),
+				method('throw'),
+				method('return'),
+				it
+		}
+		export var __yieldStar = value => {
+			var obj = value[__knownSymbol('asyncIterator')]
+			var isAwait = false
+			var method
+			var it = {}
+			if (obj == null) {
+				obj = value[__knownSymbol('iterator')]()
+				method = k => it[k] = x => obj[k](x)
+			} else {
+				obj = obj.call(value)
+				method = k => it[k] = v => {
+					if (isAwait) {
+						isAwait = false
+						if (k === 'throw') throw v
+						return v
+					}
+					isAwait = true
+					return {
+						done: false,
+						value: new __await(new Promise(resolve => {
+							var x = obj[k](v)
+							if (!(x instanceof Object)) throw TypeError('Object expected')
+							resolve(x)
+						}), 1),
+					}
+				}
+			}
+			return it[__knownSymbol('iterator')] = () => it,
+				method('next'),
+				'throw' in obj ? method('throw') : it.throw = x => { throw x },
+				'return' in obj && method('return'),
+				it
+		}
+
+		// This helps for lowering for-await loops
+		export var __forAwait = (obj, it, method) =>
+			(it = obj[__knownSymbol('asyncIterator')])
+				? it.call(obj)
+				: (obj = obj[__knownSymbol('iterator')](),
+					it = {},
+					method = (key, fn) =>
+						(fn = obj[key]) && (it[key] = arg =>
+							new Promise((yes, no, done) => (
+								arg = fn.call(obj, arg),
+								done = arg.done,
+								Promise.resolve(arg.value)
+									.then(value => yes({ value, done }), no)
+							))),
+					method('next'),
+					method('return'),
+					it)
+
 		// This is for the "binary" loader (custom code is ~2x faster than "atob")
 		export var __toBinaryNode = base64 => new Uint8Array(Buffer.from(base64, 'base64'))
 		export var __toBinary = /* @__PURE__ */ (() => {
@@ -341,25 +458,47 @@ func code(isES6 bool) string {
 				return bytes
 			}
 		})()
+
+		// These are for the "using" statement in TypeScript 5.2+
+		export var __using = (stack, value, async) => {
+			if (value != null) {
+				if (typeof value !== 'object' && typeof value !== 'function') throw TypeError('Object expected')
+				var dispose
+				if (async) dispose = value[__knownSymbol('asyncDispose')]
+				if (dispose === void 0) dispose = value[__knownSymbol('dispose')]
+				if (typeof dispose !== 'function') throw TypeError('Object not disposable')
+				stack.push([async, dispose, value])
+			} else if (async) {
+				stack.push([async])
+			}
+			return value
+		}
+		export var __callDispose = (stack, error, hasError) => {
+			var E = typeof SuppressedError === 'function' ? SuppressedError :
+				function (e, s, m, _) { return _ = Error(m), _.name = 'SuppressedError', _.error = e, _.suppressed = s, _ }
+			var fail = e => error = hasError ? new E(e, error, 'An error was suppressed during disposal') : (hasError = true, e)
+			var next = (it) => {
+				while (it = stack.pop()) {
+					try {
+						var result = it[1] && it[1].call(it[2])
+						if (it[0]) return Promise.resolve(result).then(next, (e) => (fail(e), next()))
+					} catch (e) {
+						fail(e)
+					}
+				}
+				if (hasError) throw error
+			}
+			return next()
+		}
 	`
 
-	return text
-}
-
-var ES6Source = logger.Source{
-	Index:          SourceIndex,
-	KeyPath:        logger.Path{Text: "<runtime>"},
-	PrettyPath:     "<runtime>",
-	IdentifierName: "runtime",
-	Contents:       code(true /* isES6 */),
-}
-
-var ES5Source = logger.Source{
-	Index:          SourceIndex,
-	KeyPath:        logger.Path{Text: "<runtime>"},
-	PrettyPath:     "<runtime>",
-	IdentifierName: "runtime",
-	Contents:       code(false /* isES6 */),
+	return logger.Source{
+		Index:          SourceIndex,
+		KeyPath:        logger.Path{Text: "<runtime>"},
+		PrettyPath:     "<runtime>",
+		IdentifierName: "runtime",
+		Contents:       text,
+	}
 }
 
 // The TypeScript decorator transform behaves similar to the official

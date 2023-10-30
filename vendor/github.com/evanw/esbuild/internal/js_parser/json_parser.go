@@ -23,7 +23,7 @@ func (p *jsonParser) parseMaybeTrailingComma(closeToken js_lexer.T) bool {
 	p.lexer.Expect(js_lexer.TComma)
 
 	if p.lexer.Token == closeToken {
-		if !p.options.AllowTrailingCommas {
+		if p.options.Flavor == js_lexer.JSON {
 			p.log.AddError(&p.tracker, commaRange, "JSON does not support trailing commas")
 		}
 		return false
@@ -89,10 +89,12 @@ func (p *jsonParser) parseExpr() js_ast.Expr {
 		if p.lexer.HasNewlineBefore {
 			isSingleLine = false
 		}
+		closeBracketLoc := p.lexer.Loc()
 		p.lexer.Expect(js_lexer.TCloseBracket)
 		return js_ast.Expr{Loc: loc, Data: &js_ast.EArray{
-			Items:        items,
-			IsSingleLine: isSingleLine,
+			Items:           items,
+			IsSingleLine:    isSingleLine,
+			CloseBracketLoc: closeBracketLoc,
 		}}
 
 	case js_lexer.TOpenBrace:
@@ -146,10 +148,12 @@ func (p *jsonParser) parseExpr() js_ast.Expr {
 		if p.lexer.HasNewlineBefore {
 			isSingleLine = false
 		}
+		closeBraceLoc := p.lexer.Loc()
 		p.lexer.Expect(js_lexer.TCloseBrace)
 		return js_ast.Expr{Loc: loc, Data: &js_ast.EObject{
-			Properties:   properties,
-			IsSingleLine: isSingleLine,
+			Properties:    properties,
+			IsSingleLine:  isSingleLine,
+			CloseBraceLoc: closeBraceLoc,
 		}}
 
 	default:
@@ -159,8 +163,8 @@ func (p *jsonParser) parseExpr() js_ast.Expr {
 }
 
 type JSONOptions struct {
-	AllowComments       bool
-	AllowTrailingCommas bool
+	Flavor      js_lexer.JSONFlavor
+	ErrorSuffix string
 }
 
 func ParseJSON(log logger.Log, source logger.Source, options JSONOptions) (result js_ast.Expr, ok bool) {
@@ -174,16 +178,51 @@ func ParseJSON(log logger.Log, source logger.Source, options JSONOptions) (resul
 		}
 	}()
 
+	if options.ErrorSuffix == "" {
+		options.ErrorSuffix = " in JSON"
+	}
+
 	p := &jsonParser{
 		log:                            log,
 		source:                         source,
 		tracker:                        logger.MakeLineColumnTracker(&source),
 		options:                        options,
-		lexer:                          js_lexer.NewLexerJSON(log, source, options.AllowComments),
+		lexer:                          js_lexer.NewLexerJSON(log, source, options.Flavor, options.ErrorSuffix),
 		suppressWarningsAboutWeirdCode: helpers.IsInsideNodeModules(source.KeyPath.Text),
 	}
 
 	result = p.parseExpr()
 	p.lexer.Expect(js_lexer.TEndOfFile)
 	return
+}
+
+func isValidJSON(value js_ast.Expr) bool {
+	switch e := value.Data.(type) {
+	case *js_ast.ENull, *js_ast.EBoolean, *js_ast.EString, *js_ast.ENumber:
+		return true
+
+	case *js_ast.EArray:
+		for _, item := range e.Items {
+			if !isValidJSON(item) {
+				return false
+			}
+		}
+		return true
+
+	case *js_ast.EObject:
+		for _, property := range e.Properties {
+			if property.Kind != js_ast.PropertyNormal || property.Flags&(js_ast.PropertyIsComputed|js_ast.PropertyIsMethod) != 0 {
+				return false
+			}
+			if _, ok := property.Key.Data.(*js_ast.EString); !ok {
+				return false
+			}
+			if !isValidJSON(property.ValueOrNil) {
+				return false
+			}
+		}
+		return true
+	}
+
+	return false
 }

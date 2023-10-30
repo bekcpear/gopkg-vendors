@@ -1,4 +1,4 @@
-# ff [![go.dev reference](https://img.shields.io/badge/go.dev-reference-007d9c?logo=go&logoColor=white&style=flat-square)](https://pkg.go.dev/github.com/peterbourgon/ff/v3) ![Latest Release](https://img.shields.io/github/v/release/peterbourgon/ff?style=flat-square) ![Build Status](https://github.com/peterbourgon/ff/actions/workflows/test.yml/badge.svg?branch=main)
+# ff [![go.dev reference](https://img.shields.io/badge/go.dev-reference-007d9c?logo=go&logoColor=white&style=flat-square)](https://pkg.go.dev/github.com/peterbourgon/ff/v3) [![Latest Release](https://img.shields.io/github/v/release/peterbourgon/ff?style=flat-square)](https://github.com/peterbourgon/ff/releases/latest) ![Build Status](https://github.com/peterbourgon/ff/actions/workflows/test.yml/badge.svg?branch=main)
 
 ff stands for flags-first, and provides an opinionated way to populate a
 [flag.FlagSet](https://golang.org/pkg/flag#FlagSet) with configuration data from
@@ -104,7 +104,7 @@ func main() {
 		port  = fs.Int("port", 8080, "listen port for server (also via PORT)")
 		debug = fs.Bool("debug", false, "log debug information (also via DEBUG)")
 	)
-	if err := ff.Parse(fs, os.Args[1:], ff.WithEnvVarNoPrefix()); err != nil {
+	if err := ff.Parse(fs, os.Args[1:], ff.WithEnvVars()); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
