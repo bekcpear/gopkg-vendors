@@ -344,7 +344,7 @@ github.com/docker/cli/cli/config/types
 # github.com/docker/distribution v2.8.2+incompatible
 ## explicit
 github.com/docker/distribution/registry/client/auth/challenge
-# github.com/docker/docker v24.0.6+incompatible
+# github.com/docker/docker v24.0.7+incompatible
 ## explicit
 github.com/docker/docker/pkg/homedir
 # github.com/docker/docker-credential-helpers v0.8.0
@@ -1121,6 +1121,9 @@ github.com/ryancurrah/gomodguard
 # github.com/ryanrolds/sqlclosecheck v0.4.0
 ## explicit; go 1.19
 github.com/ryanrolds/sqlclosecheck/pkg/analyzer
+# github.com/safchain/ethtool v0.3.0
+## explicit; go 1.16
+github.com/safchain/ethtool
 # github.com/sanposhiho/wastedassign/v2 v2.0.7
 ## explicit; go 1.14
 github.com/sanposhiho/wastedassign/v2
@@ -1260,10 +1263,10 @@ github.com/tailscale/mkctr
 # github.com/tailscale/netlink v1.1.1-0.20211101221916-cabfb018fe85
 ## explicit; go 1.12
 github.com/tailscale/netlink
-# github.com/tailscale/web-client-prebuilt v0.0.0-20230919211114-7bcd7bca7bc5
+# github.com/tailscale/web-client-prebuilt v0.0.0-20231114171715-25f8d12b3c2d
 ## explicit; go 1.21
 github.com/tailscale/web-client-prebuilt
-# github.com/tailscale/wireguard-go v0.0.0-20230929223258-2f6748dc88e7
+# github.com/tailscale/wireguard-go v0.0.0-20231101022006-db7604d1aa90
 ## explicit; go 1.20
 github.com/tailscale/wireguard-go/conn
 github.com/tailscale/wireguard-go/conn/winrio
@@ -1718,7 +1721,7 @@ howett.net/plist
 # inet.af/peercred v0.0.0-20210906144145-0893ea02156a
 ## explicit; go 1.14
 inet.af/peercred
-# inet.af/tcpproxy v0.0.0-20221017015627-91f861402626
+# inet.af/tcpproxy v0.0.0-20231102063150-2862066fc2a9
 ## explicit; go 1.16
 inet.af/tcpproxy
 # inet.af/wf v0.0.0-20221017222439-36129f591884
