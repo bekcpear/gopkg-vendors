@@ -24,6 +24,7 @@ type Dialector struct {
 type Config struct {
 	DriverName           string
 	DSN                  string
+	WithoutQuotingCheck  bool
 	PreferSimpleProtocol bool
 	WithoutReturning     bool
 	Conn                 gorm.ConnPool
@@ -44,14 +45,18 @@ func (dialector Dialector) Name() string {
 var timeZoneMatcher = regexp.MustCompile("(time_zone|TimeZone)=(.*?)($|&| )")
 
 func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
+	callbackConfig := &callbacks.Config{
+		CreateClauses: []string{"INSERT", "VALUES", "ON CONFLICT"},
+		UpdateClauses: []string{"UPDATE", "SET", "FROM", "WHERE"},
+		DeleteClauses: []string{"DELETE", "FROM", "WHERE"},
+	}
 	// register callbacks
 	if !dialector.WithoutReturning {
-		callbacks.RegisterDefaultCallbacks(db, &callbacks.Config{
-			CreateClauses: []string{"INSERT", "VALUES", "ON CONFLICT", "RETURNING"},
-			UpdateClauses: []string{"UPDATE", "SET", "WHERE", "RETURNING"},
-			DeleteClauses: []string{"DELETE", "FROM", "WHERE", "RETURNING"},
-		})
+		callbackConfig.CreateClauses = append(callbackConfig.CreateClauses, "RETURNING")
+		callbackConfig.UpdateClauses = append(callbackConfig.UpdateClauses, "RETURNING")
+		callbackConfig.DeleteClauses = append(callbackConfig.DeleteClauses, "RETURNING")
 	}
+	callbacks.RegisterDefaultCallbacks(db, callbackConfig)
 
 	if dialector.Conn != nil {
 		db.ConnPool = dialector.Conn
@@ -94,6 +99,11 @@ func (dialector Dialector) BindVarTo(writer clause.Writer, stmt *gorm.Statement,
 }
 
 func (dialector Dialector) QuoteTo(writer clause.Writer, str string) {
+	if dialector.WithoutQuotingCheck {
+		writer.WriteString(str)
+		return
+	}
+
 	var (
 		underQuoted, selfQuoted bool
 		continuousBacktick      int8
