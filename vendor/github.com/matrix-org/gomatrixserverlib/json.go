@@ -309,7 +309,7 @@ func compactUnicodeEscape(input, output []byte, index int) ([]byte, int) {
 	}
 	const (
 		ESCAPES = "uuuuuuuubtnufruuuuuuuuuuuuuuuuuu"
-		HEX     = "0123456789ABCDEF"
+		HEX     = "0123456789abcdef"
 	)
 	// If there aren't enough bytes to decode the hex escape then return.
 	if len(input)-index < 4 {
@@ -329,7 +329,7 @@ func compactUnicodeEscape(input, output []byte, index int) ([]byte, int) {
 		// Otherwise the character only needs escaping if it is a QUOTE '"' or BACKSLASH '\\'.
 		output = append(output, '\\', byte(c))
 	} else if utf16.IsSurrogate(c) {
-		if input[index] != '\\' && input[index+1] != 'u' {
+		if input[index] != '\\' || input[index+1] != 'u' {
 			return output, index
 		}
 		index += 2 // skip the \u"
