@@ -316,9 +316,28 @@ github.com/daixiang0/gci/pkg/parse
 github.com/daixiang0/gci/pkg/section
 github.com/daixiang0/gci/pkg/specificity
 github.com/daixiang0/gci/pkg/utils
+# github.com/dave/astrid v0.0.0-20170323122508-8c2895878b14
+## explicit
+github.com/dave/astrid
+# github.com/dave/brenda v1.1.0
+## explicit
+github.com/dave/brenda
+# github.com/dave/courtney v0.4.0
+## explicit; go 1.12
+github.com/dave/courtney/scanner
+github.com/dave/courtney/shared
+github.com/dave/courtney/tester
+github.com/dave/courtney/tester/logger
+github.com/dave/courtney/tester/merge
 # github.com/dave/jennifer v1.7.0
 ## explicit; go 1.20
 github.com/dave/jennifer/jen
+# github.com/dave/patsy v0.0.0-20210517141501-957256f50cba
+## explicit; go 1.12
+github.com/dave/patsy
+github.com/dave/patsy/vos
+github.com/dave/patsy/vos/mock
+github.com/dave/patsy/vos/os
 # github.com/davecgh/go-spew v1.1.1
 ## explicit
 github.com/davecgh/go-spew/spew
@@ -1223,7 +1242,7 @@ github.com/subosito/gotenv
 # github.com/t-yuki/gocover-cobertura v0.0.0-20180217150009-aaee18c8195c
 ## explicit
 github.com/t-yuki/gocover-cobertura
-# github.com/tailscale/certstore v0.1.1-0.20231020161753-77811a65f4ff
+# github.com/tailscale/certstore v0.1.1-0.20231202035212-d3fa0460f47e
 ## explicit; go 1.20
 github.com/tailscale/certstore
 # github.com/tailscale/depaware v0.0.0-20210622194025-720c4b409502
@@ -1263,10 +1282,10 @@ github.com/tailscale/mkctr
 # github.com/tailscale/netlink v1.1.1-0.20211101221916-cabfb018fe85
 ## explicit; go 1.12
 github.com/tailscale/netlink
-# github.com/tailscale/web-client-prebuilt v0.0.0-20231114171715-25f8d12b3c2d
+# github.com/tailscale/web-client-prebuilt v0.0.0-20231213172531-a4fa669015b2
 ## explicit; go 1.21
 github.com/tailscale/web-client-prebuilt
-# github.com/tailscale/wireguard-go v0.0.0-20231101022006-db7604d1aa90
+# github.com/tailscale/wireguard-go v0.0.0-20231121184858-cc193a0b3272
 ## explicit; go 1.20
 github.com/tailscale/wireguard-go/conn
 github.com/tailscale/wireguard-go/conn/winrio
@@ -1387,8 +1406,8 @@ go4.org/mem
 # go4.org/netipx v0.0.0-20230824141953-6213f710f925
 ## explicit; go 1.18
 go4.org/netipx
-# golang.org/x/crypto v0.14.0
-## explicit; go 1.17
+# golang.org/x/crypto v0.15.0
+## explicit; go 1.18
 golang.org/x/crypto/acme
 golang.org/x/crypto/acme/autocert
 golang.org/x/crypto/argon2
@@ -1428,14 +1447,14 @@ golang.org/x/exp/typeparams
 # golang.org/x/image v0.12.0
 ## explicit; go 1.12
 golang.org/x/image/bmp
-# golang.org/x/mod v0.12.0
-## explicit; go 1.17
+# golang.org/x/mod v0.14.0
+## explicit; go 1.18
 golang.org/x/mod/internal/lazyregexp
 golang.org/x/mod/modfile
 golang.org/x/mod/module
 golang.org/x/mod/semver
-# golang.org/x/net v0.17.0
-## explicit; go 1.17
+# golang.org/x/net v0.18.0
+## explicit; go 1.18
 golang.org/x/net/bpf
 golang.org/x/net/context
 golang.org/x/net/dns/dnsmessage
@@ -1459,12 +1478,12 @@ golang.org/x/net/route
 golang.org/x/oauth2
 golang.org/x/oauth2/clientcredentials
 golang.org/x/oauth2/internal
-# golang.org/x/sync v0.3.0
-## explicit; go 1.17
+# golang.org/x/sync v0.5.0
+## explicit; go 1.18
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
-# golang.org/x/sys v0.13.0
-## explicit; go 1.17
+# golang.org/x/sys v0.15.0
+## explicit; go 1.18
 golang.org/x/sys/cpu
 golang.org/x/sys/execabs
 golang.org/x/sys/plan9
@@ -1474,11 +1493,11 @@ golang.org/x/sys/windows/registry
 golang.org/x/sys/windows/svc
 golang.org/x/sys/windows/svc/eventlog
 golang.org/x/sys/windows/svc/mgr
-# golang.org/x/term v0.13.0
-## explicit; go 1.17
+# golang.org/x/term v0.14.0
+## explicit; go 1.18
 golang.org/x/term
-# golang.org/x/text v0.13.0
-## explicit; go 1.17
+# golang.org/x/text v0.14.0
+## explicit; go 1.18
 golang.org/x/text/runes
 golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
@@ -1488,10 +1507,11 @@ golang.org/x/text/width
 # golang.org/x/time v0.3.0
 ## explicit
 golang.org/x/time/rate
-# golang.org/x/tools v0.13.0
+# golang.org/x/tools v0.15.0
 ## explicit; go 1.18
 golang.org/x/tools/cmd/goimports
 golang.org/x/tools/cmd/stringer
+golang.org/x/tools/cover
 golang.org/x/tools/go/analysis
 golang.org/x/tools/go/analysis/passes/asmdecl
 golang.org/x/tools/go/analysis/passes/assign
@@ -1554,7 +1574,6 @@ golang.org/x/tools/internal/event/core
 golang.org/x/tools/internal/event/keys
 golang.org/x/tools/internal/event/label
 golang.org/x/tools/internal/event/tag
-golang.org/x/tools/internal/fastwalk
 golang.org/x/tools/internal/gcimporter
 golang.org/x/tools/internal/gocommand
 golang.org/x/tools/internal/gopathwalk
@@ -1619,6 +1638,12 @@ gopkg.in/inf.v0
 # gopkg.in/ini.v1 v1.67.0
 ## explicit
 gopkg.in/ini.v1
+# gopkg.in/square/go-jose.v2 v2.6.0
+## explicit
+gopkg.in/square/go-jose.v2
+gopkg.in/square/go-jose.v2/cipher
+gopkg.in/square/go-jose.v2/json
+gopkg.in/square/go-jose.v2/jwt
 # gopkg.in/warnings.v0 v0.1.2
 ## explicit
 gopkg.in/warnings.v0
@@ -1839,6 +1864,9 @@ k8s.io/apimachinery/pkg/version
 k8s.io/apimachinery/pkg/watch
 k8s.io/apimachinery/third_party/forked/golang/json
 k8s.io/apimachinery/third_party/forked/golang/reflect
+# k8s.io/apiserver v0.28.2
+## explicit; go 1.20
+k8s.io/apiserver/pkg/storage/names
 # k8s.io/client-go v0.28.2
 ## explicit; go 1.20
 k8s.io/client-go/applyconfigurations/admissionregistration/v1
