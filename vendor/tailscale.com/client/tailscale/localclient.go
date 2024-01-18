@@ -1332,6 +1332,15 @@ func (lc *LocalClient) DebugDERPRegion(ctx context.Context, regionIDOrCode strin
 	return decodeJSON[*ipnstate.DebugDERPRegionReport](body)
 }
 
+// DebugPacketFilterRules returns the packet filter rules for the current device.
+func (lc *LocalClient) DebugPacketFilterRules(ctx context.Context) ([]tailcfg.FilterRule, error) {
+	body, err := lc.send(ctx, "POST", "/localapi/v0/debug-packet-filter-rules", 200, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error %w: %s", err, body)
+	}
+	return decodeJSON[[]tailcfg.FilterRule](body)
+}
+
 // DebugSetExpireIn marks the current node key to expire in d.
 //
 // This is meant primarily for debug and testing.
@@ -1392,6 +1401,21 @@ func (lc *LocalClient) WatchIPNBus(ctx context.Context, mask ipn.NotifyWatchOpt)
 		httpRes: res,
 		dec:     dec,
 	}, nil
+}
+
+// CheckUpdate returns a tailcfg.ClientVersion indicating whether or not an update is available
+// to be installed via the LocalAPI. In case the LocalAPI can't install updates, it returns a
+// ClientVersion that says that we are up to date.
+func (lc *LocalClient) CheckUpdate(ctx context.Context) (*tailcfg.ClientVersion, error) {
+	body, err := lc.get200(ctx, "/localapi/v0/update/check")
+	if err != nil {
+		return nil, err
+	}
+	cv, err := decodeJSON[tailcfg.ClientVersion](body)
+	if err != nil {
+		return nil, err
+	}
+	return &cv, nil
 }
 
 // IPNBusWatcher is an active subscription (watch) of the local tailscaled IPN bus.
