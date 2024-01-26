@@ -76,6 +76,10 @@ func NewCreateContentFromAuthEvents(authEvents AuthEventProvider, userIDForSende
 		err = errorf("invalid sender userID: %s", err.Error())
 		return
 	}
+	if sender == nil {
+		err = errorf("userID not found for sender: %s in room %s", createEvent.SenderID(), createEvent.RoomID().String())
+		return
+	}
 	c.senderDomain = string(sender.Domain())
 	return
 }
@@ -209,6 +213,7 @@ func NewMemberContentFromEvent(event PDU) (c MemberContent, err error) {
 		c.Membership = partial.Membership
 		c.ThirdPartyInvite = partial.ThirdPartyInvite
 		c.AuthorisedVia = partial.AuthorizedVia
+		c.MXIDMapping = partial.MXIDMapping
 	}
 	return
 }

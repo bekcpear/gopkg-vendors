@@ -279,8 +279,8 @@ github.com/kardianos/minwinsvc
 # github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
 ## explicit
 github.com/kballard/go-shellquote
-# github.com/klauspost/compress v1.16.7
-## explicit; go 1.18
+# github.com/klauspost/compress v1.17.4
+## explicit; go 1.19
 github.com/klauspost/compress/flate
 github.com/klauspost/compress/s2
 # github.com/lib/pq v1.10.9
@@ -297,7 +297,7 @@ github.com/matrix-org/go-sqlite3-js
 # github.com/matrix-org/gomatrix v0.0.0-20220926102614-ceba4d9f7530
 ## explicit; go 1.12
 github.com/matrix-org/gomatrix
-# github.com/matrix-org/gomatrixserverlib v0.0.0-20231212115925-41497b7563eb
+# github.com/matrix-org/gomatrixserverlib v0.0.0-20240109180417-3495e573f2b7
 ## explicit; go 1.18
 github.com/matrix-org/gomatrixserverlib
 github.com/matrix-org/gomatrixserverlib/fclient
@@ -343,21 +343,22 @@ github.com/modern-go/reflect2
 # github.com/mschoch/smat v0.2.0
 ## explicit; go 1.13
 github.com/mschoch/smat
-# github.com/nats-io/jwt/v2 v2.5.0
+# github.com/nats-io/jwt/v2 v2.5.3
 ## explicit; go 1.18
 github.com/nats-io/jwt/v2
-# github.com/nats-io/nats-server/v2 v2.9.23
-## explicit; go 1.19
+# github.com/nats-io/nats-server/v2 v2.10.7
+## explicit; go 1.20
 github.com/nats-io/nats-server/v2/conf
 github.com/nats-io/nats-server/v2/internal/ldap
 github.com/nats-io/nats-server/v2/logger
 github.com/nats-io/nats-server/v2/server
+github.com/nats-io/nats-server/v2/server/avl
 github.com/nats-io/nats-server/v2/server/certidp
 github.com/nats-io/nats-server/v2/server/certstore
 github.com/nats-io/nats-server/v2/server/pse
 github.com/nats-io/nats-server/v2/server/sysmem
-# github.com/nats-io/nats.go v1.28.0
-## explicit; go 1.19
+# github.com/nats-io/nats.go v1.31.0
+## explicit; go 1.20
 github.com/nats-io/nats.go
 github.com/nats-io/nats.go/encoders/builtin
 github.com/nats-io/nats.go/internal/parser
@@ -435,7 +436,7 @@ github.com/prometheus/procfs/internal/util
 # github.com/quic-go/qtls-go1-20 v0.3.2
 ## explicit; go 1.20
 github.com/quic-go/qtls-go1-20
-# github.com/quic-go/quic-go v0.37.4
+# github.com/quic-go/quic-go v0.37.7
 ## explicit; go 1.20
 github.com/quic-go/quic-go
 github.com/quic-go/quic-go/internal/ackhandler
@@ -517,8 +518,8 @@ go.etcd.io/bbolt
 # go.uber.org/atomic v1.10.0
 ## explicit; go 1.18
 go.uber.org/atomic
-# golang.org/x/crypto v0.14.0
-## explicit; go 1.17
+# golang.org/x/crypto v0.17.0
+## explicit; go 1.18
 golang.org/x/crypto/bcrypt
 golang.org/x/crypto/blake2b
 golang.org/x/crypto/blowfish
@@ -574,8 +575,8 @@ golang.org/x/net/proxy
 # golang.org/x/sync v0.3.0
 ## explicit; go 1.17
 golang.org/x/sync/singleflight
-# golang.org/x/sys v0.13.0
-## explicit; go 1.17
+# golang.org/x/sys v0.15.0
+## explicit; go 1.18
 golang.org/x/sys/cpu
 golang.org/x/sys/execabs
 golang.org/x/sys/plan9
@@ -585,11 +586,11 @@ golang.org/x/sys/windows/registry
 golang.org/x/sys/windows/svc
 golang.org/x/sys/windows/svc/eventlog
 golang.org/x/sys/windows/svc/mgr
-# golang.org/x/term v0.13.0
-## explicit; go 1.17
+# golang.org/x/term v0.15.0
+## explicit; go 1.18
 golang.org/x/term
-# golang.org/x/text v0.13.0
-## explicit; go 1.17
+# golang.org/x/text v0.14.0
+## explicit; go 1.18
 golang.org/x/text/cases
 golang.org/x/text/internal
 golang.org/x/text/internal/language
@@ -598,8 +599,8 @@ golang.org/x/text/internal/tag
 golang.org/x/text/language
 golang.org/x/text/transform
 golang.org/x/text/unicode/norm
-# golang.org/x/time v0.3.0
-## explicit
+# golang.org/x/time v0.5.0
+## explicit; go 1.18
 golang.org/x/time/rate
 # golang.org/x/tools v0.12.0
 ## explicit; go 1.18
