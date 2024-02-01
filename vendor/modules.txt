@@ -43,7 +43,7 @@ github.com/adrg/xdg/internal/pathutil
 # github.com/andreaskoch/go-fswatch v1.0.0
 ## explicit
 github.com/andreaskoch/go-fswatch
-# github.com/cloudflare/circl v1.3.3
+# github.com/cloudflare/circl v1.3.7
 ## explicit; go 1.19
 github.com/cloudflare/circl/dh/x25519
 github.com/cloudflare/circl/dh/x448
@@ -57,7 +57,7 @@ github.com/cloudflare/circl/math/mlsbset
 github.com/cloudflare/circl/sign
 github.com/cloudflare/circl/sign/ed25519
 github.com/cloudflare/circl/sign/ed448
-# github.com/containerd/containerd v1.7.11
+# github.com/containerd/containerd v1.7.2
 ## explicit; go 1.19
 github.com/containerd/containerd/pkg/userns
 # github.com/creack/pty v1.1.21
@@ -266,7 +266,7 @@ github.com/mgutz/ansi
 # github.com/mitchellh/mapstructure v1.1.2
 ## explicit
 github.com/mitchellh/mapstructure
-# github.com/moby/buildkit v0.12.4
+# github.com/moby/buildkit v0.12.5
 ## explicit; go 1.20
 github.com/moby/buildkit/frontend/dockerfile/dockerignore
 # github.com/moby/patternmatcher v0.6.0
@@ -281,11 +281,11 @@ github.com/moby/sys/sequential
 ## explicit; go 1.13
 github.com/opencontainers/go-digest
 github.com/opencontainers/go-digest/digestset
-# github.com/opencontainers/image-spec v1.1.0-rc5
+# github.com/opencontainers/image-spec v1.1.0-rc3
 ## explicit; go 1.18
 github.com/opencontainers/image-spec/specs-go
 github.com/opencontainers/image-spec/specs-go/v1
-# github.com/opencontainers/runc v1.1.7
+# github.com/opencontainers/runc v1.1.12
 ## explicit; go 1.17
 github.com/opencontainers/runc/libcontainer/user
 # github.com/opencontainers/selinux v1.11.0
@@ -386,14 +386,14 @@ golang.org/x/net/proxy
 ## explicit; go 1.17
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
-# golang.org/x/sys v0.15.0
+# golang.org/x/sys v0.16.0
 ## explicit; go 1.18
 golang.org/x/sys/cpu
 golang.org/x/sys/execabs
 golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
-# golang.org/x/term v0.15.0
+# golang.org/x/term v0.16.0
 ## explicit; go 1.18
 golang.org/x/term
 # golang.org/x/text v0.14.0
