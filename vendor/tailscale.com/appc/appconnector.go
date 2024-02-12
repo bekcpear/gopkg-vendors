@@ -10,6 +10,7 @@
 package appc
 
 import (
+	"context"
 	"net/netip"
 	"slices"
 	"strings"
@@ -20,14 +21,18 @@ import (
 	"tailscale.com/types/logger"
 	"tailscale.com/types/views"
 	"tailscale.com/util/dnsname"
+	"tailscale.com/util/execqueue"
 )
 
 // RouteAdvertiser is an interface that allows the AppConnector to advertise
 // newly discovered routes that need to be served through the AppConnector.
 type RouteAdvertiser interface {
-	// AdvertiseRoute adds a new route advertisement if the route is not already
-	// being advertised.
-	AdvertiseRoute(netip.Prefix) error
+	// AdvertiseRoute adds one or more route advertisements skipping any that
+	// are already advertised.
+	AdvertiseRoute(...netip.Prefix) error
+
+	// UnadvertiseRoute removes any matching route advertisements.
+	UnadvertiseRoute(...netip.Prefix) error
 }
 
 // AppConnector is an implementation of an AppConnector that performs
@@ -45,12 +50,19 @@ type AppConnector struct {
 
 	// mu guards the fields that follow
 	mu sync.Mutex
+
 	// domains is a map of lower case domain names with no trailing dot, to a
 	// list of resolved IP addresses.
 	domains map[string][]netip.Addr
 
+	// controlRoutes is the list of routes that were last supplied by control.
+	controlRoutes []netip.Prefix
+
 	// wildcards is the list of domain strings that match subdomains.
 	wildcards []string
+
+	// queue provides ordering for update operations
+	queue execqueue.ExecQueue
 }
 
 // NewAppConnector creates a new AppConnector.
@@ -61,11 +73,33 @@ func NewAppConnector(logf logger.Logf, routeAdvertiser RouteAdvertiser) *AppConn
 	}
 }
 
-// UpdateDomains replaces the current set of configured domains with the
-// supplied set of domains. Domains must not contain a trailing dot, and should
-// be lower case. If the domain contains a leading '*' label it matches all
-// subdomains of a domain.
+// UpdateDomainsAndRoutes starts an asynchronous update of the configuration
+// given the new domains and routes.
+func (e *AppConnector) UpdateDomainsAndRoutes(domains []string, routes []netip.Prefix) {
+	e.queue.Add(func() {
+		// Add the new routes first.
+		e.updateRoutes(routes)
+		e.updateDomains(domains)
+	})
+}
+
+// UpdateDomains asynchronously replaces the current set of configured domains
+// with the supplied set of domains. Domains must not contain a trailing dot,
+// and should be lower case. If the domain contains a leading '*' label it
+// matches all subdomains of a domain.
 func (e *AppConnector) UpdateDomains(domains []string) {
+	e.queue.Add(func() {
+		e.updateDomains(domains)
+	})
+}
+
+// Wait waits for the currently scheduled asynchronous configuration changes to
+// complete.
+func (e *AppConnector) Wait(ctx context.Context) {
+	e.queue.Wait(ctx)
+}
+
+func (e *AppConnector) updateDomains(domains []string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -95,6 +129,46 @@ func (e *AppConnector) UpdateDomains(domains []string) {
 		}
 	}
 	e.logf("handling domains: %v and wildcards: %v", xmaps.Keys(e.domains), e.wildcards)
+}
+
+// updateRoutes merges the supplied routes into the currently configured routes. The routes supplied
+// by control for UpdateRoutes are supplemental to the routes discovered by DNS resolution, but are
+// also more often whole ranges. UpdateRoutes will remove any single address routes that are now
+// covered by new ranges.
+func (e *AppConnector) updateRoutes(routes []netip.Prefix) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// If there was no change since the last update, no work to do.
+	if slices.Equal(e.controlRoutes, routes) {
+		return
+	}
+
+	if err := e.routeAdvertiser.AdvertiseRoute(routes...); err != nil {
+		e.logf("failed to advertise routes: %v: %v", routes, err)
+		return
+	}
+
+	var toRemove []netip.Prefix
+
+nextRoute:
+	for _, r := range routes {
+		for _, addr := range e.domains {
+			for _, a := range addr {
+				if r.Contains(a) && netip.PrefixFrom(a, a.BitLen()) != r {
+					pfx := netip.PrefixFrom(a, a.BitLen())
+					toRemove = append(toRemove, pfx)
+					continue nextRoute
+				}
+			}
+		}
+	}
+
+	if err := e.routeAdvertiser.UnadvertiseRoute(toRemove...); err != nil {
+		e.logf("failed to unadvertise routes: %v: %v", toRemove, err)
+	}
+
+	e.controlRoutes = routes
 }
 
 // Domains returns the currently configured domain list.
@@ -132,6 +206,7 @@ func (e *AppConnector) ObserveDNSResponse(res []byte) {
 		return
 	}
 
+nextAnswer:
 	for {
 		h, err := p.AnswerHeader()
 		if err == dnsmessage.ErrSectionDone {
@@ -206,9 +281,18 @@ func (e *AppConnector) ObserveDNSResponse(res []byte) {
 		if slices.Contains(addrs, addr) {
 			continue
 		}
-		// TODO(raggi): check for existing prefixes
+		for _, route := range e.controlRoutes {
+			if route.Contains(addr) {
+				// record the new address associated with the domain for faster matching in subsequent
+				// requests and for diagnostic records.
+				e.mu.Lock()
+				e.domains[domain] = append(addrs, addr)
+				e.mu.Unlock()
+				continue nextAnswer
+			}
+		}
 		if err := e.routeAdvertiser.AdvertiseRoute(netip.PrefixFrom(addr, addr.BitLen())); err != nil {
-			e.logf("failed to advertise route for %v: %v", addr, err)
+			e.logf("failed to advertise route for %s: %v: %v", domain, addr, err)
 			continue
 		}
 		e.logf("[v2] advertised route for %v: %v", domain, addr)
@@ -217,5 +301,4 @@ func (e *AppConnector) ObserveDNSResponse(res []byte) {
 		e.domains[domain] = append(addrs, addr)
 		e.mu.Unlock()
 	}
-
 }

@@ -169,6 +169,8 @@ type Conn struct {
 	port atomic.Uint32
 
 	// peerMTUEnabled is whether path MTU discovery to peers is enabled.
+	//
+	//lint:ignore U1000 used on Linux/Darwin only
 	peerMTUEnabled atomic.Bool
 
 	// stats maintains per-connection counters.
@@ -628,7 +630,17 @@ func (c *Conn) updateNetInfo(ctx context.Context) (*netcheck.Report, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	report, err := c.netChecker.GetReport(ctx, dm)
+	report, err := c.netChecker.GetReport(ctx, dm, &netcheck.GetReportOpts{
+		// Pass information about the last time that we received a
+		// frame from a DERP server to our netchecker to help avoid
+		// flapping the home region while there's still active
+		// communication.
+		//
+		// NOTE(andrew-d): I don't love that we're depending on the
+		// health package here, but I'd rather do that and not store
+		// the exact same state in two different places.
+		GetLastDERPActivity: health.GetDERPRegionReceivedTime,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -2923,7 +2935,9 @@ var (
 	metricDERPHomeChange = clientmetric.NewCounter("derp_home_change")
 
 	// Disco packets received bpf read path
+	//lint:ignore U1000 used on Linux only
 	metricRecvDiscoPacketIPv4 = clientmetric.NewCounter("magicsock_disco_recv_bpf_ipv4")
+	//lint:ignore U1000 used on Linux only
 	metricRecvDiscoPacketIPv6 = clientmetric.NewCounter("magicsock_disco_recv_bpf_ipv6")
 
 	// metricMaxPeerMTUProbed is the largest peer path MTU we successfully probed.

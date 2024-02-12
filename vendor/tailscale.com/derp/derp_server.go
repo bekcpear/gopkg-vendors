@@ -712,7 +712,6 @@ func (s *Server) accept(ctx context.Context, nc Conn, brw *bufio.ReadWriter, rem
 		bw:             bw,
 		logf:           logger.WithPrefix(s.logf, fmt.Sprintf("derp client %v%s: ", remoteAddr, clientKey.ShortString())),
 		done:           ctx.Done(),
-		remoteAddr:     remoteAddr,
 		remoteIPPort:   remoteIPPort,
 		connectedAt:    s.clock.Now(),
 		sendQueue:      make(chan pkt, perClientSendQueueDepth),
@@ -752,12 +751,6 @@ func (s *Server) debugLogf(format string, v ...any) {
 		s.logf(format, v...)
 	}
 }
-
-// for testing
-var (
-	timeSleep = time.Sleep
-	timeNow   = time.Now
-)
 
 // run serves the client until there's an error.
 // If the client hangs up or the server is closed, run returns nil, otherwise run returns an error.
@@ -1323,7 +1316,6 @@ type sclient struct {
 	info           clientInfo
 	logf           logger.Logf
 	done           <-chan struct{}  // closed when connection closes
-	remoteAddr     string           // usually ip:port from net.Conn.RemoteAddr().String()
 	remoteIPPort   netip.AddrPort   // zero if remoteAddr is not ip:port.
 	sendQueue      chan pkt         // packets queued to this client; never closed
 	discoSendQueue chan pkt         // important packets queued to this client; never closed
@@ -1360,16 +1352,13 @@ type sclient struct {
 // peerConnState represents whether a peer is connected to the server
 // or not.
 type peerConnState struct {
+	ipPort  netip.AddrPort // if present, the peer's IP:port
 	peer    key.NodePublic
 	present bool
-	ipPort  netip.AddrPort // if present, the peer's IP:port
 }
 
 // pkt is a request to write a data frame to an sclient.
 type pkt struct {
-	// src is the who's the sender of the packet.
-	src key.NodePublic
-
 	// enqueuedAt is when a packet was put onto a queue before it was sent,
 	// and is used for reporting metrics on the duration of packets in the queue.
 	enqueuedAt time.Time
@@ -1377,6 +1366,9 @@ type pkt struct {
 	// bs is the data packet bytes.
 	// The memory is owned by pkt.
 	bs []byte
+
+	// src is the who's the sender of the packet.
+	src key.NodePublic
 }
 
 // peerGoneMsg is a request to write a peerGone frame to an sclient
@@ -1578,6 +1570,17 @@ func (c *sclient) sendPeerPresent(peer key.NodePublic, ipPort netip.AddrPort) er
 func (c *sclient) sendMeshUpdates() error {
 	c.s.mu.Lock()
 	defer c.s.mu.Unlock()
+
+	// allow all happened-before mesh update request goroutines to complete, if
+	// we don't finish the task we'll queue another below.
+drainUpdates:
+	for {
+		select {
+		case <-c.meshUpdate:
+		default:
+			break drainUpdates
+		}
+	}
 
 	writes := 0
 	for _, pcs := range c.peerStateChange {
