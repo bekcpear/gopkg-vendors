@@ -30,11 +30,6 @@ type Config struct {
 	Conn                 gorm.ConnPool
 }
 
-var (
-	timeZoneMatcher         = regexp.MustCompile("(time_zone|TimeZone)=(.*?)($|&| )")
-	defaultIdentifierLength = 63 //maximum identifier length for postgres
-)
-
 func Open(dsn string) gorm.Dialector {
 	return &Dialector{&Config{DSN: dsn}}
 }
@@ -47,22 +42,7 @@ func (dialector Dialector) Name() string {
 	return "postgres"
 }
 
-func (dialector Dialector) Apply(config *gorm.Config) error {
-	var namingStartegy *schema.NamingStrategy
-	switch v := config.NamingStrategy.(type) {
-	case *schema.NamingStrategy:
-		namingStartegy = v
-	case schema.NamingStrategy:
-		namingStartegy = &v
-	case nil:
-		namingStartegy = &schema.NamingStrategy{}
-	}
-	if namingStartegy.IdentifierMaxLength <= 0 {
-		namingStartegy.IdentifierMaxLength = defaultIdentifierLength
-	}
-	config.NamingStrategy = namingStartegy
-	return nil
-}
+var timeZoneMatcher = regexp.MustCompile("(time_zone|TimeZone)=(.*?)($|&| )")
 
 func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 	callbackConfig := &callbacks.Config{
@@ -115,15 +95,7 @@ func (dialector Dialector) DefaultValueOf(field *schema.Field) clause.Expression
 
 func (dialector Dialector) BindVarTo(writer clause.Writer, stmt *gorm.Statement, v interface{}) {
 	writer.WriteByte('$')
-	index := 0
-	varLen := len(stmt.Vars)
-	if varLen > 0 {
-		switch stmt.Vars[0].(type) {
-		case pgx.QueryExecMode:
-			index++
-		}
-	}
-	writer.WriteString(strconv.Itoa(varLen - index))
+	writer.WriteString(strconv.Itoa(len(stmt.Vars)))
 }
 
 func (dialector Dialector) QuoteTo(writer clause.Writer, str string) {
