@@ -236,11 +236,8 @@ github.com/pires/go-proxyproto
 # github.com/pmezard/go-difflib v1.0.0
 ## explicit
 github.com/pmezard/go-difflib/difflib
-# github.com/quic-go/qtls-go1-20 v0.4.1
-## explicit; go 1.20
-github.com/quic-go/qtls-go1-20
-# github.com/quic-go/quic-go v0.40.0
-## explicit; go 1.20
+# github.com/quic-go/quic-go v0.41.0
+## explicit; go 1.21
 github.com/quic-go/quic-go
 github.com/quic-go/quic-go/internal/ackhandler
 github.com/quic-go/quic-go/internal/congestion
@@ -367,7 +364,6 @@ golang.org/x/crypto/internal/poly1305
 golang.org/x/crypto/sha3
 # golang.org/x/exp v0.0.0-20230725093048-515e97ebf090
 ## explicit; go 1.20
-golang.org/x/exp/constraints
 golang.org/x/exp/rand
 # golang.org/x/mod v0.13.0
 ## explicit; go 1.18
