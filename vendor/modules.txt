@@ -18,7 +18,7 @@ github.com/boljen/go-bitmap
 # github.com/bufbuild/protocompile v0.6.0
 ## explicit; go 1.18
 github.com/bufbuild/protocompile/protoutil
-# github.com/cloudflare/circl v1.3.3
+# github.com/cloudflare/circl v1.3.7
 ## explicit; go 1.19
 github.com/cloudflare/circl/dh/x25519
 github.com/cloudflare/circl/dh/x448
@@ -57,6 +57,7 @@ github.com/cloudflare/circl/sign/eddilithium3
 github.com/cloudflare/circl/sign/schemes
 github.com/cloudflare/circl/simd/keccakf1600
 github.com/cloudflare/circl/xof
+github.com/cloudflare/circl/xof/k12
 # github.com/davecgh/go-spew v1.1.1
 ## explicit
 github.com/davecgh/go-spew/spew
@@ -347,7 +348,7 @@ go.uber.org/mock/mockgen/model
 # go4.org/netipx v0.0.0-20230303233057-f1b76eb4bb35
 ## explicit; go 1.18
 go4.org/netipx
-# golang.org/x/crypto v0.16.0
+# golang.org/x/crypto v0.17.0
 ## explicit; go 1.18
 golang.org/x/crypto/blake2b
 golang.org/x/crypto/blake2s
