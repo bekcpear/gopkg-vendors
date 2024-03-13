@@ -45,16 +45,16 @@ const (
 
 type transportProtocolState struct {
 	proto          TransportProtocol
-	defaultHandler func(id TransportEndpointID, pkt PacketBufferPtr) bool
+	defaultHandler func(id TransportEndpointID, pkt *PacketBuffer) bool
 }
 
-// ResumableEndpoint is an endpoint that needs to be resumed after restore.
-type ResumableEndpoint interface {
-	// Resume resumes an endpoint after restore. This can be used to restart
-	// background workers such as protocol goroutines. This must be called after
-	// all indirect dependencies of the endpoint has been restored, which
+// RestoredEndpoint is an endpoint that needs to be restored.
+type RestoredEndpoint interface {
+	// Restore restores an endpoint. This can be used to restart background
+	// workers such as protocol goroutines. This must be called after all
+	// indirect dependencies of the endpoint has been restored, which
 	// generally implies at the end of the restore process.
-	Resume(*Stack)
+	Restore(*Stack)
 }
 
 // uniqueIDGenerator is a default unique ID generator.
@@ -115,9 +115,9 @@ type Stack struct {
 	// TODO(gvisor.dev/issue/4595): S/R this field.
 	tables *IPTables
 
-	// resumableEndpoints is a list of endpoints that need to be resumed if the
+	// restoredEndpoints is a list of endpoints that need to be restored if the
 	// stack is being restored.
-	resumableEndpoints []ResumableEndpoint
+	restoredEndpoints []RestoredEndpoint
 
 	// icmpRateLimiter is a global rate limiter for all ICMP messages generated
 	// by the stack.
@@ -490,7 +490,7 @@ func (s *Stack) TransportProtocolOption(transport tcpip.TransportProtocolNumber,
 //
 // It must be called only during initialization of the stack. Changing it as the
 // stack is operating is not supported.
-func (s *Stack) SetTransportProtocolHandler(p tcpip.TransportProtocolNumber, h func(TransportEndpointID, PacketBufferPtr) bool) {
+func (s *Stack) SetTransportProtocolHandler(p tcpip.TransportProtocolNumber, h func(TransportEndpointID, *PacketBuffer) bool) {
 	state := s.transportProtocols[p]
 	if state != nil {
 		state.defaultHandler = h
@@ -1713,9 +1713,9 @@ func (s *Stack) UnregisterRawTransportEndpoint(netProto tcpip.NetworkProtocolNum
 
 // RegisterRestoredEndpoint records e as an endpoint that has been restored on
 // this stack.
-func (s *Stack) RegisterRestoredEndpoint(e ResumableEndpoint) {
+func (s *Stack) RegisterRestoredEndpoint(e RestoredEndpoint) {
 	s.mu.Lock()
-	s.resumableEndpoints = append(s.resumableEndpoints, e)
+	s.restoredEndpoints = append(s.restoredEndpoints, e)
 	s.mu.Unlock()
 }
 
@@ -1811,17 +1811,17 @@ func (s *Stack) Pause() {
 	}
 }
 
-// Resume restarts the stack after a restore. This must be called after the
+// Restore restarts the stack after a restore. This must be called after the
 // entire system has been restored.
-func (s *Stack) Resume() {
-	// ResumableEndpoint.Resume() may call other methods on s, so we can't hold
-	// s.mu while resuming the endpoints.
+func (s *Stack) Restore() {
+	// RestoredEndpoint.Restore() may call other methods on s, so we can't hold
+	// s.mu while restoring the endpoints.
 	s.mu.Lock()
-	eps := s.resumableEndpoints
-	s.resumableEndpoints = nil
+	eps := s.restoredEndpoints
+	s.restoredEndpoints = nil
 	s.mu.Unlock()
 	for _, e := range eps {
-		e.Resume(s)
+		e.Restore(s)
 	}
 	// Now resume any protocol level background workers.
 	for _, p := range s.transportProtocols {
@@ -1840,10 +1840,7 @@ func (s *Stack) RegisterPacketEndpoint(nicID tcpip.NICID, netProto tcpip.Network
 	if nicID == 0 {
 		// Register with each NIC.
 		for _, nic := range s.nics {
-			if err := nic.registerPacketEndpoint(netProto, ep); err != nil {
-				s.unregisterPacketEndpointLocked(0, netProto, ep)
-				return err
-			}
+			nic.registerPacketEndpoint(netProto, ep)
 		}
 		return nil
 	}
@@ -1853,9 +1850,7 @@ func (s *Stack) RegisterPacketEndpoint(nicID tcpip.NICID, netProto tcpip.Network
 	if !ok {
 		return &tcpip.ErrUnknownNICID{}
 	}
-	if err := nic.registerPacketEndpoint(netProto, ep); err != nil {
-		return err
-	}
+	nic.registerPacketEndpoint(netProto, ep)
 
 	return nil
 }
@@ -2141,7 +2136,7 @@ const (
 
 // ParsePacketBufferTransport parses the provided packet buffer's transport
 // header.
-func (s *Stack) ParsePacketBufferTransport(protocol tcpip.TransportProtocolNumber, pkt PacketBufferPtr) ParseResult {
+func (s *Stack) ParsePacketBufferTransport(protocol tcpip.TransportProtocolNumber, pkt *PacketBuffer) ParseResult {
 	pkt.TransportProtocolNumber = protocol
 	// Parse the transport header if present.
 	state, ok := s.transportProtocols[protocol]
