@@ -15,11 +15,11 @@
 package search
 
 import (
-	"encoding/json"
 	"reflect"
 	"sort"
 
 	"github.com/blevesearch/bleve/v2/size"
+	"github.com/blevesearch/bleve/v2/util"
 	index "github.com/blevesearch/bleve_index_api"
 )
 
@@ -176,12 +176,12 @@ func (tf *TermFacets) Less(i, j int) bool {
 // To maintain backwards compatibility, we have to implement custom
 // JSON marshalling.
 func (tf *TermFacets) MarshalJSON() ([]byte, error) {
-	return json.Marshal(tf.termFacets)
+	return util.MarshalJSON(tf.termFacets)
 }
 
 func (tf *TermFacets) UnmarshalJSON(b []byte) error {
 	termFacets := []*TermFacet{}
-	err := json.Unmarshal(b, &termFacets)
+	err := util.UnmarshalJSON(b, &termFacets)
 	if err != nil {
 		return err
 	}
@@ -321,17 +321,29 @@ func (fr *FacetResult) Merge(other *FacetResult) {
 	fr.Total += other.Total
 	fr.Missing += other.Missing
 	fr.Other += other.Other
-	if fr.Terms != nil && other.Terms != nil {
+	if other.Terms != nil {
+		if fr.Terms == nil {
+			fr.Terms = other.Terms
+			return
+		}
 		for _, term := range other.Terms.termFacets {
 			fr.Terms.Add(term)
 		}
 	}
-	if fr.NumericRanges != nil && other.NumericRanges != nil {
+	if other.NumericRanges != nil {
+		if fr.NumericRanges == nil {
+			fr.NumericRanges = other.NumericRanges
+			return
+		}
 		for _, nr := range other.NumericRanges {
 			fr.NumericRanges = fr.NumericRanges.Add(nr)
 		}
 	}
-	if fr.DateRanges != nil && other.DateRanges != nil {
+	if other.DateRanges != nil {
+		if fr.DateRanges == nil {
+			fr.DateRanges = other.DateRanges
+			return
+		}
 		for _, dr := range other.DateRanges {
 			fr.DateRanges = fr.DateRanges.Add(dr)
 		}

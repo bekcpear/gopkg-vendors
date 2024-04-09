@@ -17,13 +17,14 @@ package mapping
 import (
 	"encoding/json"
 	"fmt"
-	index "github.com/blevesearch/bleve_index_api"
 
 	"github.com/blevesearch/bleve/v2/analysis"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/standard"
 	"github.com/blevesearch/bleve/v2/analysis/datetime/optional"
 	"github.com/blevesearch/bleve/v2/document"
 	"github.com/blevesearch/bleve/v2/registry"
+	"github.com/blevesearch/bleve/v2/util"
+	index "github.com/blevesearch/bleve_index_api"
 )
 
 var MappingJSONStrict = false
@@ -173,12 +174,14 @@ func (im *IndexMappingImpl) Validate() error {
 	if err != nil {
 		return err
 	}
-	err = im.DefaultMapping.Validate(im.cache)
+
+	fieldAliasCtx := make(map[string]*FieldMapping)
+	err = im.DefaultMapping.Validate(im.cache, "", fieldAliasCtx)
 	if err != nil {
 		return err
 	}
 	for _, docMapping := range im.TypeMapping {
-		err = docMapping.Validate(im.cache)
+		err = docMapping.Validate(im.cache, "", fieldAliasCtx)
 		if err != nil {
 			return err
 		}
@@ -203,7 +206,7 @@ func (im *IndexMappingImpl) mappingForType(docType string) *DocumentMapping {
 func (im *IndexMappingImpl) UnmarshalJSON(data []byte) error {
 
 	var tmp map[string]json.RawMessage
-	err := json.Unmarshal(data, &tmp)
+	err := util.UnmarshalJSON(data, &tmp)
 	if err != nil {
 		return err
 	}
@@ -226,57 +229,57 @@ func (im *IndexMappingImpl) UnmarshalJSON(data []byte) error {
 	for k, v := range tmp {
 		switch k {
 		case "analysis":
-			err := json.Unmarshal(v, &im.CustomAnalysis)
+			err := util.UnmarshalJSON(v, &im.CustomAnalysis)
 			if err != nil {
 				return err
 			}
 		case "type_field":
-			err := json.Unmarshal(v, &im.TypeField)
+			err := util.UnmarshalJSON(v, &im.TypeField)
 			if err != nil {
 				return err
 			}
 		case "default_type":
-			err := json.Unmarshal(v, &im.DefaultType)
+			err := util.UnmarshalJSON(v, &im.DefaultType)
 			if err != nil {
 				return err
 			}
 		case "default_analyzer":
-			err := json.Unmarshal(v, &im.DefaultAnalyzer)
+			err := util.UnmarshalJSON(v, &im.DefaultAnalyzer)
 			if err != nil {
 				return err
 			}
 		case "default_datetime_parser":
-			err := json.Unmarshal(v, &im.DefaultDateTimeParser)
+			err := util.UnmarshalJSON(v, &im.DefaultDateTimeParser)
 			if err != nil {
 				return err
 			}
 		case "default_field":
-			err := json.Unmarshal(v, &im.DefaultField)
+			err := util.UnmarshalJSON(v, &im.DefaultField)
 			if err != nil {
 				return err
 			}
 		case "default_mapping":
-			err := json.Unmarshal(v, &im.DefaultMapping)
+			err := util.UnmarshalJSON(v, &im.DefaultMapping)
 			if err != nil {
 				return err
 			}
 		case "types":
-			err := json.Unmarshal(v, &im.TypeMapping)
+			err := util.UnmarshalJSON(v, &im.TypeMapping)
 			if err != nil {
 				return err
 			}
 		case "store_dynamic":
-			err := json.Unmarshal(v, &im.StoreDynamic)
+			err := util.UnmarshalJSON(v, &im.StoreDynamic)
 			if err != nil {
 				return err
 			}
 		case "index_dynamic":
-			err := json.Unmarshal(v, &im.IndexDynamic)
+			err := util.UnmarshalJSON(v, &im.IndexDynamic)
 			if err != nil {
 				return err
 			}
 		case "docvalues_dynamic":
-			err := json.Unmarshal(v, &im.DocValuesDynamic)
+			err := util.UnmarshalJSON(v, &im.DocValuesDynamic)
 			if err != nil {
 				return err
 			}
@@ -326,7 +329,7 @@ func (im *IndexMappingImpl) MapDocument(doc *document.Document, data interface{}
 		docMapping.walkDocument(data, []string{}, []uint64{}, walkContext)
 
 		// see if the _all field was disabled
-		allMapping := docMapping.documentMappingForPath("_all")
+		allMapping, _ := docMapping.documentMappingForPath("_all")
 		if allMapping == nil || allMapping.Enabled {
 			field := document.NewCompositeFieldWithIndexingOptions("_all", true, []string{}, walkContext.excludedFromAll, index.IndexField|index.IncludeTermVectors)
 			doc.AddField(field)
@@ -366,7 +369,7 @@ func (im *IndexMappingImpl) AnalyzerNameForPath(path string) string {
 	}
 
 	// now try the default mapping
-	pathMapping := im.DefaultMapping.documentMappingForPath(path)
+	pathMapping, _ := im.DefaultMapping.documentMappingForPath(path)
 	if pathMapping != nil {
 		if len(pathMapping.Fields) > 0 {
 			if pathMapping.Fields[0].Analyzer != "" {
@@ -417,23 +420,6 @@ func (im *IndexMappingImpl) DateTimeParserNamed(name string) analysis.DateTimePa
 	return dateTimeParser
 }
 
-func (im *IndexMappingImpl) datetimeParserNameForPath(path string) string {
-
-	// first we look for explicit mapping on the field
-	for _, docMapping := range im.TypeMapping {
-		pathMapping := docMapping.documentMappingForPath(path)
-		if pathMapping != nil {
-			if len(pathMapping.Fields) > 0 {
-				if pathMapping.Fields[0].Analyzer != "" {
-					return pathMapping.Fields[0].Analyzer
-				}
-			}
-		}
-	}
-
-	return im.DefaultDateTimeParser
-}
-
 func (im *IndexMappingImpl) AnalyzeText(analyzerName string, text []byte) (analysis.TokenStream, error) {
 	analyzer, err := im.cache.AnalyzerNamed(analyzerName)
 	if err != nil {
@@ -445,6 +431,33 @@ func (im *IndexMappingImpl) AnalyzeText(analyzerName string, text []byte) (analy
 // FieldAnalyzer returns the name of the analyzer used on a field.
 func (im *IndexMappingImpl) FieldAnalyzer(field string) string {
 	return im.AnalyzerNameForPath(field)
+}
+
+// FieldMappingForPath returns the mapping for a specific field 'path'.
+func (im *IndexMappingImpl) FieldMappingForPath(path string) FieldMapping {
+	if im.TypeMapping != nil {
+		for _, v := range im.TypeMapping {
+			for field, property := range v.Properties {
+				for _, v1 := range property.Fields {
+					if field == path {
+						// Return field mapping if the name matches the path param.
+						return *v1
+					}
+				}
+			}
+		}
+	}
+
+	for field, property := range im.DefaultMapping.Properties {
+		for _, v1 := range property.Fields {
+			if field == path {
+				// Return field mapping if the name matches the path param.
+				return *v1
+			}
+		}
+	}
+
+	return FieldMapping{}
 }
 
 // wrapper to satisfy new interface

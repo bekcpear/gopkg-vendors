@@ -15,9 +15,10 @@
 package scorch
 
 import (
-	"encoding/json"
 	"reflect"
 	"sync/atomic"
+
+	"github.com/blevesearch/bleve/v2/util"
 )
 
 // Stats tracks statistics about the index, fields that are
@@ -49,6 +50,8 @@ type Stats struct {
 
 	TotTermSearchersStarted  uint64
 	TotTermSearchersFinished uint64
+
+	TotKNNSearches uint64
 
 	TotEventTriggerStarted   uint64
 	TotEventTriggerCompleted uint64
@@ -151,5 +154,5 @@ func (s *Stats) ToMap() map[string]interface{} {
 // MarshalJSON implements json.Marshaler, and in contrast to standard
 // json marshaling provides atomic safety
 func (s *Stats) MarshalJSON() ([]byte, error) {
-	return json.Marshal(s.ToMap())
+	return util.MarshalJSON(s.ToMap())
 }

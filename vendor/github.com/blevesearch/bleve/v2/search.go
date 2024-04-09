@@ -15,7 +15,6 @@
 package bleve
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
@@ -29,6 +28,7 @@ import (
 	"github.com/blevesearch/bleve/v2/search/collector"
 	"github.com/blevesearch/bleve/v2/search/query"
 	"github.com/blevesearch/bleve/v2/size"
+	"github.com/blevesearch/bleve/v2/util"
 )
 
 var reflectStaticSizeSearchResult int
@@ -45,47 +45,44 @@ var cache = registry.NewCache()
 
 const defaultDateTimeParser = optional.Name
 
-type numericRange struct {
-	Name string   `json:"name,omitempty"`
-	Min  *float64 `json:"min,omitempty"`
-	Max  *float64 `json:"max,omitempty"`
-}
-
 type dateTimeRange struct {
-	Name        string    `json:"name,omitempty"`
-	Start       time.Time `json:"start,omitempty"`
-	End         time.Time `json:"end,omitempty"`
-	startString *string
-	endString   *string
+	Name           string    `json:"name,omitempty"`
+	Start          time.Time `json:"start,omitempty"`
+	End            time.Time `json:"end,omitempty"`
+	DateTimeParser string    `json:"datetime_parser,omitempty"`
+	startString    *string
+	endString      *string
 }
 
-func (dr *dateTimeRange) ParseDates(dateTimeParser analysis.DateTimeParser) (start, end time.Time) {
+func (dr *dateTimeRange) ParseDates(dateTimeParser analysis.DateTimeParser) (start, end time.Time, err error) {
 	start = dr.Start
 	if dr.Start.IsZero() && dr.startString != nil {
-		s, err := dateTimeParser.ParseDateTime(*dr.startString)
-		if err == nil {
-			start = s
+		s, _, parseError := dateTimeParser.ParseDateTime(*dr.startString)
+		if parseError != nil {
+			return start, end, fmt.Errorf("error parsing start date '%s' for date range name '%s': %v", *dr.startString, dr.Name, parseError)
 		}
+		start = s
 	}
 	end = dr.End
 	if dr.End.IsZero() && dr.endString != nil {
-		e, err := dateTimeParser.ParseDateTime(*dr.endString)
-		if err == nil {
-			end = e
+		e, _, parseError := dateTimeParser.ParseDateTime(*dr.endString)
+		if parseError != nil {
+			return start, end, fmt.Errorf("error parsing end date '%s' for date range name '%s': %v", *dr.endString, dr.Name, parseError)
 		}
+		end = e
 	}
-	return start, end
+	return start, end, err
 }
 
 func (dr *dateTimeRange) UnmarshalJSON(input []byte) error {
 	var temp struct {
-		Name  string  `json:"name,omitempty"`
-		Start *string `json:"start,omitempty"`
-		End   *string `json:"end,omitempty"`
+		Name           string  `json:"name,omitempty"`
+		Start          *string `json:"start,omitempty"`
+		End            *string `json:"end,omitempty"`
+		DateTimeParser string  `json:"datetime_parser,omitempty"`
 	}
 
-	err := json.Unmarshal(input, &temp)
-	if err != nil {
+	if err := util.UnmarshalJSON(input, &temp); err != nil {
 		return err
 	}
 
@@ -96,23 +93,40 @@ func (dr *dateTimeRange) UnmarshalJSON(input []byte) error {
 	if temp.End != nil {
 		dr.endString = temp.End
 	}
+	if temp.DateTimeParser != "" {
+		dr.DateTimeParser = temp.DateTimeParser
+	}
 
 	return nil
 }
 
 func (dr *dateTimeRange) MarshalJSON() ([]byte, error) {
 	rv := map[string]interface{}{
-		"name":  dr.Name,
-		"start": dr.Start,
-		"end":   dr.End,
+		"name": dr.Name,
 	}
-	if dr.Start.IsZero() && dr.startString != nil {
+
+	if !dr.Start.IsZero() {
+		rv["start"] = dr.Start
+	} else if dr.startString != nil {
 		rv["start"] = dr.startString
 	}
-	if dr.End.IsZero() && dr.endString != nil {
+
+	if !dr.End.IsZero() {
+		rv["end"] = dr.End
+	} else if dr.endString != nil {
 		rv["end"] = dr.endString
 	}
-	return json.Marshal(rv)
+
+	if dr.DateTimeParser != "" {
+		rv["datetime_parser"] = dr.DateTimeParser
+	}
+	return util.MarshalJSON(rv)
+}
+
+type numericRange struct {
+	Name string   `json:"name,omitempty"`
+	Min  *float64 `json:"min,omitempty"`
+	Max  *float64 `json:"max,omitempty"`
 }
 
 // A FacetRequest describes a facet or aggregation
@@ -125,11 +139,21 @@ type FacetRequest struct {
 	DateTimeRanges []*dateTimeRange `json:"date_ranges,omitempty"`
 }
 
+// NewFacetRequest creates a facet on the specified
+// field that limits the number of entries to the
+// specified size.
+func NewFacetRequest(field string, size int) *FacetRequest {
+	return &FacetRequest{
+		Field: field,
+		Size:  size,
+	}
+}
+
 func (fr *FacetRequest) Validate() error {
 	nrCount := len(fr.NumericRanges)
 	drCount := len(fr.DateTimeRanges)
 	if nrCount > 0 && drCount > 0 {
-		return fmt.Errorf("facet can only conain numeric ranges or date ranges, not both")
+		return fmt.Errorf("facet can only contain numeric ranges or date ranges, not both")
 	}
 
 	if nrCount > 0 {
@@ -155,23 +179,21 @@ func (fr *FacetRequest) Validate() error {
 				return fmt.Errorf("date ranges contains duplicate name '%s'", dr.Name)
 			}
 			drNames[dr.Name] = struct{}{}
-			start, end := dr.ParseDates(dateTimeParser)
-			if start.IsZero() && end.IsZero() {
-				return fmt.Errorf("date range query must specify either start, end or both for range name '%s'", dr.Name)
+			if dr.DateTimeParser == "" {
+				// cannot parse the date range dates as the defaultDateTimeParser is overridden
+				// so perform this validation at query time
+				start, end, err := dr.ParseDates(dateTimeParser)
+				if err != nil {
+					return fmt.Errorf("ParseDates err: %v, using date time parser named %s", err, defaultDateTimeParser)
+				}
+				if start.IsZero() && end.IsZero() {
+					return fmt.Errorf("date range query must specify either start, end or both for range name '%s'", dr.Name)
+				}
 			}
 		}
 	}
-	return nil
-}
 
-// NewFacetRequest creates a facet on the specified
-// field that limits the number of entries to the
-// specified size.
-func NewFacetRequest(field string, size int) *FacetRequest {
-	return &FacetRequest{
-		Field: field,
-		Size:  size,
-	}
+	return nil
 }
 
 // AddDateTimeRange adds a bucket to a field
@@ -186,13 +208,24 @@ func (fr *FacetRequest) AddDateTimeRange(name string, start, end time.Time) {
 }
 
 // AddDateTimeRangeString adds a bucket to a field
-// containing date values.
+// containing date values. Uses defaultDateTimeParser to parse the date strings.
 func (fr *FacetRequest) AddDateTimeRangeString(name string, start, end *string) {
 	if fr.DateTimeRanges == nil {
 		fr.DateTimeRanges = make([]*dateTimeRange, 0, 1)
 	}
 	fr.DateTimeRanges = append(fr.DateTimeRanges,
 		&dateTimeRange{Name: name, startString: start, endString: end})
+}
+
+// AddDateTimeRangeString adds a bucket to a field
+// containing date values. Uses the specified parser to parse the date strings.
+// provided the parser is registered in the index mapping.
+func (fr *FacetRequest) AddDateTimeRangeStringWithParser(name string, start, end *string, parser string) {
+	if fr.DateTimeRanges == nil {
+		fr.DateTimeRanges = make([]*dateTimeRange, 0, 1)
+	}
+	fr.DateTimeRanges = append(fr.DateTimeRanges,
+		&dateTimeRange{Name: name, startString: start, endString: end, DateTimeParser: parser})
 }
 
 // AddNumericRange adds a bucket to a field
@@ -212,8 +245,7 @@ type FacetsRequest map[string]*FacetRequest
 
 func (fr FacetsRequest) Validate() error {
 	for _, v := range fr {
-		err := v.Validate()
-		if err != nil {
+		if err := v.Validate(); err != nil {
 			return err
 		}
 	}
@@ -248,43 +280,6 @@ func (h *HighlightRequest) AddField(field string) {
 	h.Fields = append(h.Fields, field)
 }
 
-// A SearchRequest describes all the parameters
-// needed to search the index.
-// Query is required.
-// Size/From describe how much and which part of the
-// result set to return.
-// Highlight describes optional search result
-// highlighting.
-// Fields describes a list of field values which
-// should be retrieved for result documents, provided they
-// were stored while indexing.
-// Facets describe the set of facets to be computed.
-// Explain triggers inclusion of additional search
-// result score explanations.
-// Sort describes the desired order for the results to be returned.
-// Score controls the kind of scoring performed
-// SearchAfter supports deep paging by providing a minimum sort key
-// SearchBefore supports deep paging by providing a maximum sort key
-// sortFunc specifies the sort implementation to use for sorting results.
-//
-// A special field named "*" can be used to return all fields.
-type SearchRequest struct {
-	Query            query.Query       `json:"query"`
-	Size             int               `json:"size"`
-	From             int               `json:"from"`
-	Highlight        *HighlightRequest `json:"highlight"`
-	Fields           []string          `json:"fields"`
-	Facets           FacetsRequest     `json:"facets"`
-	Explain          bool              `json:"explain"`
-	Sort             search.SortOrder  `json:"sort"`
-	IncludeLocations bool              `json:"includeLocations"`
-	Score            string            `json:"score,omitempty"`
-	SearchAfter      []string          `json:"search_after"`
-	SearchBefore     []string          `json:"search_before"`
-
-	sortFunc func(sort.Interface)
-}
-
 func (r *SearchRequest) Validate() error {
 	if srq, ok := r.Query.(query.ValidatableQuery); ok {
 		err := srq.Validate()
@@ -314,6 +309,10 @@ func (r *SearchRequest) Validate() error {
 		}
 	}
 
+	err := validateKNN(r)
+	if err != nil {
+		return err
+	}
 	return r.Facets.Validate()
 }
 
@@ -352,67 +351,6 @@ func (r *SearchRequest) SetSearchBefore(before []string) {
 	r.SearchBefore = before
 }
 
-// UnmarshalJSON deserializes a JSON representation of
-// a SearchRequest
-func (r *SearchRequest) UnmarshalJSON(input []byte) error {
-	var temp struct {
-		Q                json.RawMessage   `json:"query"`
-		Size             *int              `json:"size"`
-		From             int               `json:"from"`
-		Highlight        *HighlightRequest `json:"highlight"`
-		Fields           []string          `json:"fields"`
-		Facets           FacetsRequest     `json:"facets"`
-		Explain          bool              `json:"explain"`
-		Sort             []json.RawMessage `json:"sort"`
-		IncludeLocations bool              `json:"includeLocations"`
-		Score            string            `json:"score"`
-		SearchAfter      []string          `json:"search_after"`
-		SearchBefore     []string          `json:"search_before"`
-	}
-
-	err := json.Unmarshal(input, &temp)
-	if err != nil {
-		return err
-	}
-
-	if temp.Size == nil {
-		r.Size = 10
-	} else {
-		r.Size = *temp.Size
-	}
-	if temp.Sort == nil {
-		r.Sort = search.SortOrder{&search.SortScore{Desc: true}}
-	} else {
-		r.Sort, err = search.ParseSortOrderJSON(temp.Sort)
-		if err != nil {
-			return err
-		}
-	}
-	r.From = temp.From
-	r.Explain = temp.Explain
-	r.Highlight = temp.Highlight
-	r.Fields = temp.Fields
-	r.Facets = temp.Facets
-	r.IncludeLocations = temp.IncludeLocations
-	r.Score = temp.Score
-	r.SearchAfter = temp.SearchAfter
-	r.SearchBefore = temp.SearchBefore
-	r.Query, err = query.ParseQuery(temp.Q)
-	if err != nil {
-		return err
-	}
-
-	if r.Size < 0 {
-		r.Size = 10
-	}
-	if r.From < 0 {
-		r.From = 0
-	}
-
-	return nil
-
-}
-
 // NewSearchRequest creates a new SearchRequest
 // for the Query, using default values for all
 // other search parameters.
@@ -443,12 +381,12 @@ func (iem IndexErrMap) MarshalJSON() ([]byte, error) {
 	for k, v := range iem {
 		tmp[k] = v.Error()
 	}
-	return json.Marshal(tmp)
+	return util.MarshalJSON(tmp)
 }
 
 func (iem IndexErrMap) UnmarshalJSON(data []byte) error {
 	var tmp map[string]string
-	err := json.Unmarshal(data, &tmp)
+	err := util.UnmarshalJSON(data, &tmp)
 	if err != nil {
 		return err
 	}
@@ -485,15 +423,27 @@ func (ss *SearchStatus) Merge(other *SearchStatus) {
 
 // A SearchResult describes the results of executing
 // a SearchRequest.
+//
+// Status - Whether the search was executed on the underlying indexes successfully
+// or failed, and the corresponding errors.
+// Request - The SearchRequest that was executed.
+// Hits - The list of documents that matched the query and their corresponding
+// scores, score explanation, location info and so on.
+// Total - The total number of documents that matched the query.
+// Cost - indicates how expensive was the query with respect to bytes read
+// from the mmaped index files.
+// MaxScore - The maximum score seen across all document hits seen for this query.
+// Took - The time taken to execute the search.
+// Facets - The facet results for the search.
 type SearchResult struct {
-	Status    *SearchStatus                  `json:"status"`
-	Request   *SearchRequest                 `json:"request"`
-	Hits      search.DocumentMatchCollection `json:"hits"`
-	Total     uint64                         `json:"total_hits"`
-	BytesRead uint64                         `json:"bytesRead"`
-	MaxScore  float64                        `json:"max_score"`
-	Took      time.Duration                  `json:"took"`
-	Facets    search.FacetResults            `json:"facets"`
+	Status   *SearchStatus                  `json:"status"`
+	Request  *SearchRequest                 `json:"request,omitempty"`
+	Hits     search.DocumentMatchCollection `json:"hits"`
+	Total    uint64                         `json:"total_hits"`
+	Cost     uint64                         `json:"cost"`
+	MaxScore float64                        `json:"max_score"`
+	Took     time.Duration                  `json:"took"`
+	Facets   search.FacetResults            `json:"facets"`
 }
 
 func (sr *SearchResult) Size() int {
@@ -517,7 +467,7 @@ func (sr *SearchResult) Size() int {
 func (sr *SearchResult) String() string {
 	rv := ""
 	if sr.Total > 0 {
-		if sr.Request.Size > 0 {
+		if sr.Request != nil && sr.Request.Size > 0 {
 			rv = fmt.Sprintf("%d matches, showing %d through %d, took %s\n", sr.Total, sr.Request.From+1, sr.Request.From+len(sr.Hits), sr.Took)
 			for i, hit := range sr.Hits {
 				rv += fmt.Sprintf("%5d. %s (%f)\n", i+sr.Request.From+1, hit.ID, hit.Score)
@@ -566,7 +516,7 @@ func (sr *SearchResult) Merge(other *SearchResult) {
 	sr.Status.Merge(other.Status)
 	sr.Hits = append(sr.Hits, other.Hits...)
 	sr.Total += other.Total
-	sr.BytesRead += other.BytesRead
+	sr.Cost += other.Cost
 	if other.MaxScore > sr.MaxScore {
 		sr.MaxScore = other.MaxScore
 	}
