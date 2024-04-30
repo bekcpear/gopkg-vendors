@@ -90,7 +90,7 @@ func (m *MaxDistanceToPointTarget) visitContainingShapes(index *ShapeIndex, v sh
 }
 
 func (m *MaxDistanceToPointTarget) setMaxError(maxErr s1.ChordAngle) bool { return false }
-func (m *MaxDistanceToPointTarget) maxBruteForceIndexSize() int           { return 300 }
+func (m *MaxDistanceToPointTarget) maxBruteForceIndexSize() int           { return 30 }
 func (m *MaxDistanceToPointTarget) distance() distance                    { return m.dist }
 
 // MaxDistanceToEdgeTarget is used for computing the maximum distance to an Edge.
@@ -148,7 +148,7 @@ func (m *MaxDistanceToEdgeTarget) visitContainingShapes(index *ShapeIndex, v sha
 }
 
 func (m *MaxDistanceToEdgeTarget) setMaxError(maxErr s1.ChordAngle) bool { return false }
-func (m *MaxDistanceToEdgeTarget) maxBruteForceIndexSize() int           { return 110 }
+func (m *MaxDistanceToEdgeTarget) maxBruteForceIndexSize() int           { return 30 }
 func (m *MaxDistanceToEdgeTarget) distance() distance                    { return m.dist }
 
 // MaxDistanceToCellTarget is used for computing the maximum distance to a Cell.
@@ -188,7 +188,7 @@ func (m *MaxDistanceToCellTarget) visitContainingShapes(index *ShapeIndex, v sha
 }
 
 func (m *MaxDistanceToCellTarget) setMaxError(maxErr s1.ChordAngle) bool { return false }
-func (m *MaxDistanceToCellTarget) maxBruteForceIndexSize() int           { return 100 }
+func (m *MaxDistanceToCellTarget) maxBruteForceIndexSize() int           { return 30 }
 func (m *MaxDistanceToCellTarget) distance() distance                    { return m.dist }
 
 // MaxDistanceToShapeIndexTarget is used for computing the maximum distance to a ShapeIndex.
@@ -211,10 +211,8 @@ func NewMaxDistanceToShapeIndexTarget(index *ShapeIndex) *MaxDistanceToShapeInde
 // capBound returns a Cap that bounds the antipode of the target. This
 // is the set of points whose maxDistance to the target is maxDistance.zero()
 func (m *MaxDistanceToShapeIndexTarget) capBound() Cap {
-	// TODO(roberts): Depends on ShapeIndexRegion
-	// c := makeShapeIndexRegion(m.index).CapBound()
-	// return CapFromCenterRadius(Point{c.Center.Mul(-1)}, c.Radius())
-	panic("not implemented yet")
+	c := m.index.Region().CapBound()
+	return CapFromCenterAngle(Point{c.Center().Mul(-1)}, c.Radius())
 }
 
 func (m *MaxDistanceToShapeIndexTarget) updateDistanceToPoint(p Point, dist distance) (distance, bool) {
@@ -293,7 +291,7 @@ func (m *MaxDistanceToShapeIndexTarget) setMaxError(maxErr s1.ChordAngle) bool {
 	m.query.opts.maxError = maxErr
 	return true
 }
-func (m *MaxDistanceToShapeIndexTarget) maxBruteForceIndexSize() int { return 70 }
+func (m *MaxDistanceToShapeIndexTarget) maxBruteForceIndexSize() int { return 30 }
 func (m *MaxDistanceToShapeIndexTarget) distance() distance          { return m.dist }
 func (m *MaxDistanceToShapeIndexTarget) setIncludeInteriors(b bool) {
 	m.query.opts.includeInteriors = b
@@ -302,5 +300,4 @@ func (m *MaxDistanceToShapeIndexTarget) setUseBruteForce(b bool) { m.query.opts.
 
 // TODO(roberts): Remaining methods
 //
-// func (m *MaxDistanceToShapeIndexTarget) capBound() Cap {
 // CellUnionTarget

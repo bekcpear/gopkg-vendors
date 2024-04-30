@@ -72,6 +72,7 @@ type Loop struct {
 func LoopFromPoints(pts []Point) *Loop {
 	l := &Loop{
 		vertices: pts,
+		index:    NewShapeIndex(),
 	}
 
 	l.initOriginAndBound()
@@ -96,6 +97,7 @@ func LoopFromCell(c Cell) *Loop {
 			c.Vertex(2),
 			c.Vertex(3),
 		},
+		index: NewShapeIndex(),
 	}
 
 	l.initOriginAndBound()
@@ -132,25 +134,31 @@ func (l *Loop) initOriginAndBound() {
 		// the vertex is in the southern hemisphere or not.
 		l.originInside = l.vertices[0].Z < 0
 	} else {
-		// Point containment testing is done by counting edge crossings starting
-		// at a fixed point on the sphere (OriginPoint). We need to know whether
-		// the reference point (OriginPoint) is inside or outside the loop before
-		// we can construct the ShapeIndex. We do this by first guessing that
-		// it is outside, and then seeing whether we get the correct containment
-		// result for vertex 1. If the result is incorrect, the origin must be
-		// inside the loop.
+		// The brute force point containment algorithm works by counting edge
+		// crossings starting at a fixed reference point (chosen as OriginPoint()
+		// for historical reasons).  Loop initialization would be more efficient
+		// if we used a loop vertex such as vertex(0) as the reference point
+		// instead, however making this change would be a lot of work because
+		// originInside is currently part of the Encode() format.
 		//
-		// A loop with consecutive vertices A,B,C contains vertex B if and only if
-		// the fixed vector R = B.Ortho is contained by the wedge ABC. The
-		// wedge is closed at A and open at C, i.e. the point B is inside the loop
-		// if A = R but not if C = R. This convention is required for compatibility
-		// with VertexCrossing. (Note that we can't use OriginPoint
-		// as the fixed vector because of the possibility that B == OriginPoint.)
+		// In any case, we initialize originInside by first guessing that it is
+		// outside, and then seeing whether we get the correct containment result
+		// for vertex 1.  If the result is incorrect, the origin must be inside
+		// the loop instead.  Note that the Loop is not necessarily valid and so
+		// we need to check the requirements of AngleContainsVertex first.
+		v1Inside := l.vertices[0] != l.vertices[1] &&
+			l.vertices[2] != l.vertices[1] &&
+			AngleContainsVertex(l.vertices[0], l.vertices[1], l.vertices[2])
+
+		// initialize before calling ContainsPoint
 		l.originInside = false
-		v1Inside := OrderedCCW(Point{l.vertices[1].Ortho()}, l.vertices[0], l.vertices[2], l.vertices[1])
+
+		// Note that ContainsPoint only does a bounds check once initIndex
+		// has been called, so it doesn't matter that bound is undefined here.
 		if v1Inside != l.ContainsPoint(l.vertices[1]) {
 			l.originInside = true
 		}
+
 	}
 
 	// We *must* call initBound before initializing the index, because
@@ -165,6 +173,10 @@ func (l *Loop) initOriginAndBound() {
 
 // initBound sets up the approximate bounding Rects for this loop.
 func (l *Loop) initBound() {
+	if len(l.vertices) == 0 {
+		*l = *EmptyLoop()
+		return
+	}
 	// Check for the special "empty" and "full" loops.
 	if l.isEmptyOrFull() {
 		if l.IsEmpty() {
@@ -407,12 +419,12 @@ func (l *Loop) BoundaryEqual(o *Loop) bool {
 // -1 if it excludes the boundary of the other, and 0 if the boundaries of the two
 // loops cross. Shared edges are handled as follows:
 //
-//   If XY is a shared edge, define Reversed(XY) to be true if XY
-//     appears in opposite directions in both loops.
-//   Then this loop contains XY if and only if Reversed(XY) == the other loop is a hole.
-//   (Intuitively, this checks whether this loop contains a vanishingly small region
-//   extending from the boundary of the other toward the interior of the polygon to
-//   which the other belongs.)
+//	If XY is a shared edge, define Reversed(XY) to be true if XY
+//	  appears in opposite directions in both loops.
+//	Then this loop contains XY if and only if Reversed(XY) == the other loop is a hole.
+//	(Intuitively, this checks whether this loop contains a vanishingly small region
+//	extending from the boundary of the other toward the interior of the polygon to
+//	which the other belongs.)
 //
 // This function is used for testing containment and intersection of
 // multi-loop polygons. Note that this method is not symmetric, since the
@@ -587,16 +599,24 @@ func (l *Loop) bruteForceContainsPoint(p Point) bool {
 
 // ContainsPoint returns true if the loop contains the point.
 func (l *Loop) ContainsPoint(p Point) bool {
-	// Empty and full loops don't need a special case, but invalid loops with
-	// zero vertices do, so we might as well handle them all at once.
-	if len(l.vertices) < 3 {
-		return l.originInside
+	if !l.index.IsFresh() && !l.bound.ContainsPoint(p) {
+		return false
 	}
 
-	// For small loops, and during initial construction, it is faster to just
-	// check all the crossing.
+	// For small loops it is faster to just check all the crossings.  We also
+	// use this method during loop initialization because InitOriginAndBound()
+	// calls Contains() before InitIndex().  Otherwise, we keep track of the
+	// number of calls to Contains() and only build the index when enough calls
+	// have been made so that we think it is worth the effort.  Note that the
+	// code below is structured so that if many calls are made in parallel only
+	// one thread builds the index, while the rest continue using brute force
+	// until the index is actually available.
+
 	const maxBruteForceVertices = 32
-	if len(l.vertices) < maxBruteForceVertices || l.index == nil {
+	// TODO(roberts): add unindexed contains calls tracking
+
+	if len(l.index.shapes) == 0 || // Index has not been initialized yet.
+		len(l.vertices) <= maxBruteForceVertices {
 		return l.bruteForceContainsPoint(p)
 	}
 
@@ -802,20 +822,23 @@ func (l *Loop) TurningAngle() float64 {
 		compensation = (oldSum - sum) + angle
 		n--
 	}
-	return float64(dir) * float64(sum+compensation)
+
+	const maxCurvature = 2*math.Pi - 4*dblEpsilon
+
+	return math.Max(-maxCurvature, math.Min(maxCurvature, float64(dir)*float64(sum+compensation)))
 }
 
 // turningAngleMaxError return the maximum error in TurningAngle. The value is not
 // constant; it depends on the loop.
 func (l *Loop) turningAngleMaxError() float64 {
 	// The maximum error can be bounded as follows:
-	//   2.24 * dblEpsilon    for RobustCrossProd(b, a)
-	//   2.24 * dblEpsilon    for RobustCrossProd(c, b)
+	//   3.00 * dblEpsilon    for RobustCrossProd(b, a)
+	//   3.00 * dblEpsilon    for RobustCrossProd(c, b)
 	//   3.25 * dblEpsilon    for Angle()
 	//   2.00 * dblEpsilon    for each addition in the Kahan summation
 	//   ------------------
-	//   9.73 * dblEpsilon
-	maxErrorPerVertex := 9.73 * dblEpsilon
+	//  11.25 * dblEpsilon
+	maxErrorPerVertex := 11.25 * dblEpsilon
 	return maxErrorPerVertex * float64(len(l.vertices))
 }
 
@@ -962,21 +985,23 @@ func (l *Loop) ContainsNested(other *Loop) bool {
 // surface integral" means:
 //
 // (1) f(A,B,C) must be the integral of f if ABC is counterclockwise,
-//     and the integral of -f if ABC is clockwise.
+//
+//	and the integral of -f if ABC is clockwise.
 //
 // (2) The result of this function is *either* the integral of f over the
-//     loop interior, or the integral of (-f) over the loop exterior.
+//
+//	loop interior, or the integral of (-f) over the loop exterior.
 //
 // Note that there are at least two common situations where it easy to work
 // around property (2) above:
 //
-//  - If the integral of f over the entire sphere is zero, then it doesn't
-//    matter which case is returned because they are always equal.
+//   - If the integral of f over the entire sphere is zero, then it doesn't
+//     matter which case is returned because they are always equal.
 //
-//  - If f is non-negative, then it is easy to detect when the integral over
-//    the loop exterior has been returned, and the integral over the loop
-//    interior can be obtained by adding the integral of f over the entire
-//    unit sphere (a constant) to the result.
+//   - If f is non-negative, then it is easy to detect when the integral over
+//     the loop exterior has been returned, and the integral over the loop
+//     interior can be obtained by adding the integral of f over the entire
+//     unit sphere (a constant) to the result.
 //
 // Any changes to this method may need corresponding changes to surfaceIntegralPoint as well.
 func (l *Loop) surfaceIntegralFloat64(f func(a, b, c Point) float64) float64 {
@@ -1275,12 +1300,12 @@ func (l *Loop) decode(d *decoder) {
 		l.vertices[i].Y = d.readFloat64()
 		l.vertices[i].Z = d.readFloat64()
 	}
+	l.index = NewShapeIndex()
 	l.originInside = d.readBool()
 	l.depth = int(d.readUint32())
 	l.bound.decode(d)
 	l.subregionBound = ExpandForSubregions(l.bound)
 
-	l.index = NewShapeIndex()
 	l.index.Add(l)
 }
 
@@ -1359,6 +1384,7 @@ func (l *Loop) decodeCompressed(d *decoder, snapLevel int) {
 		return
 	}
 
+	l.index = NewShapeIndex()
 	l.originInside = (properties & originInside) != 0
 
 	l.depth = int(d.readUvarint())
@@ -1373,7 +1399,6 @@ func (l *Loop) decodeCompressed(d *decoder, snapLevel int) {
 		l.initBound()
 	}
 
-	l.index = NewShapeIndex()
 	l.index.Add(l)
 }
 
@@ -1731,10 +1756,12 @@ func (i *intersectsRelation) wedgesCross(a0, ab1, a2, b0, b2 Point) bool {
 // so we return crossingTargetDontCare for both crossing targets.
 //
 // Aside: A possible early exit condition could be based on the following.
-//   If A contains a point of both B and ~B, then A intersects Boundary(B).
-//   If ~A contains a point of both B and ~B, then ~A intersects Boundary(B).
-//   So if the intersections of {A, ~A} with {B, ~B} are all non-empty,
-//   the return value is 0, i.e., Boundary(A) intersects Boundary(B).
+//
+//	If A contains a point of both B and ~B, then A intersects Boundary(B).
+//	If ~A contains a point of both B and ~B, then ~A intersects Boundary(B).
+//	So if the intersections of {A, ~A} with {B, ~B} are all non-empty,
+//	the return value is 0, i.e., Boundary(A) intersects Boundary(B).
+//
 // Unfortunately it isn't worth detecting this situation because by the
 // time we have seen a point in all four intersection regions, we are also
 // guaranteed to have seen at least one pair of crossing edges.

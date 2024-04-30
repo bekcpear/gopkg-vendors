@@ -156,11 +156,11 @@ type SignedRational struct {
 }
 
 func isPrintableText(s string) bool {
-
-	// TODO(dustin): Add text
-
 	for _, c := range s {
-		if unicode.IsPrint(rune(c)) == false {
+		// unicode.IsPrint() returns false for newline characters.
+		if c == 0x0d || c == 0x0a {
+			continue
+		} else if unicode.IsPrint(rune(c)) == false {
 			return false
 		}
 	}
@@ -186,6 +186,13 @@ func FormatFromType(value interface{}, justFirst bool) (phrase string, err error
 	case []byte:
 		return DumpBytesToString(t), nil
 	case string:
+		for i, c := range t {
+			if c == 0 {
+				t = t[:i]
+				break
+			}
+		}
+
 		if isPrintableText(t) == false {
 			phrase = fmt.Sprintf("string with binary data (%d bytes)", len(t))
 			return phrase, nil

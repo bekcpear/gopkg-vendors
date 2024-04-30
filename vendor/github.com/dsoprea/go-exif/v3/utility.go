@@ -2,9 +2,11 @@ package exif
 
 import (
 	"fmt"
+	"io"
 	"math"
 
 	"github.com/dsoprea/go-logging"
+	"github.com/dsoprea/go-utility/v2/filesystem"
 
 	"github.com/dsoprea/go-exif/v3/common"
 	"github.com/dsoprea/go-exif/v3/undefined"
@@ -76,7 +78,69 @@ func GetFlatExifData(exifData []byte, so *ScanOptions) (exifTags []ExifTag, med 
 		}
 	}()
 
-	eh, err := ParseExifHeader(exifData)
+	sb := rifs.NewSeekableBufferWithBytes(exifData)
+
+	exifTags, med, err = getFlatExifDataUniversalSearchWithReadSeeker(sb, so, false)
+	log.PanicIf(err)
+
+	return exifTags, med, nil
+}
+
+// RELEASE(dustin): GetFlatExifDataUniversalSearch is a kludge to allow univeral tag searching in a backwards-compatible manner. For the next release, undo this and simply add the flag to GetFlatExifData.
+
+// GetFlatExifDataUniversalSearch returns a simple, flat representation of all
+// tags.
+func GetFlatExifDataUniversalSearch(exifData []byte, so *ScanOptions, doUniversalSearch bool) (exifTags []ExifTag, med *MiscellaneousExifData, err error) {
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
+
+	sb := rifs.NewSeekableBufferWithBytes(exifData)
+
+	exifTags, med, err = getFlatExifDataUniversalSearchWithReadSeeker(sb, so, doUniversalSearch)
+	log.PanicIf(err)
+
+	return exifTags, med, nil
+}
+
+// RELEASE(dustin): GetFlatExifDataUniversalSearchWithReadSeeker is a kludge to allow using a ReadSeeker in a backwards-compatible manner. For the next release, drop this and refactor GetFlatExifDataUniversalSearch to take a ReadSeeker.
+
+// GetFlatExifDataUniversalSearchWithReadSeeker returns a simple, flat
+// representation of all tags given a ReadSeeker.
+func GetFlatExifDataUniversalSearchWithReadSeeker(rs io.ReadSeeker, so *ScanOptions, doUniversalSearch bool) (exifTags []ExifTag, med *MiscellaneousExifData, err error) {
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
+
+	exifTags, med, err = getFlatExifDataUniversalSearchWithReadSeeker(rs, so, doUniversalSearch)
+	log.PanicIf(err)
+
+	return exifTags, med, nil
+}
+
+// getFlatExifDataUniversalSearchWithReadSeeker returns a simple, flat
+// representation of all tags given a ReadSeeker.
+func getFlatExifDataUniversalSearchWithReadSeeker(rs io.ReadSeeker, so *ScanOptions, doUniversalSearch bool) (exifTags []ExifTag, med *MiscellaneousExifData, err error) {
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
+
+	headerData := make([]byte, ExifSignatureLength)
+	if _, err = io.ReadFull(rs, headerData); err != nil {
+		if err == io.EOF {
+			return nil, nil, err
+		}
+
+		log.Panic(err)
+	}
+
+	eh, err := ParseExifHeader(headerData)
 	log.PanicIf(err)
 
 	im, err := exifcommon.NewIfdMappingWithStandard()
@@ -84,7 +148,11 @@ func GetFlatExifData(exifData []byte, so *ScanOptions) (exifTags []ExifTag, med 
 
 	ti := NewTagIndex()
 
-	ebs := NewExifReadSeekerWithBytes(exifData)
+	if doUniversalSearch == true {
+		ti.SetUniversalSearch(true)
+	}
+
+	ebs := NewExifReadSeeker(rs)
 	ie := NewIfdEnumerate(im, ti, ebs, eh.ByteOrder)
 
 	exifTags = make([]ExifTag, 0)
@@ -107,6 +175,12 @@ func GetFlatExifData(exifData []byte, so *ScanOptions) (exifTags []ExifTag, med 
 		if err != nil {
 			if err == exifcommon.ErrUnhandledUndefinedTypedTag {
 				value = exifundefined.UnparseableUnknownTagValuePlaceholder
+			} else if log.Is(err, exifcommon.ErrParseFail) == true {
+				utilityLogger.Warningf(nil,
+					"Could not parse value for tag [%s] (%04x) [%s].",
+					ite.IfdPath(), ite.TagId(), ite.TagName())
+
+				return nil
 			} else {
 				log.Panic(err)
 			}

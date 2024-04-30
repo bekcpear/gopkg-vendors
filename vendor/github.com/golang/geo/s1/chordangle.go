@@ -26,14 +26,84 @@ import (
 // to be calculated and compared. Otherwise it is simpler to use Angle.
 //
 // ChordAngle loses some accuracy as the angle approaches π radians.
-// Specifically, the representation of (π - x) radians has an error of about
-// (1e-15 / x), with a maximum error of about 2e-8 radians (about 13cm on the
-// Earth's surface). For comparison, for angles up to π/2 radians (10000km)
-// the worst-case representation error is about 2e-16 radians (1 nanonmeter),
-// which is about the same as Angle.
+// There are several different ways to measure this error, including the
+// representational error (i.e., how accurately ChordAngle can represent
+// angles near π radians), the conversion error (i.e., how much precision is
+// lost when an Angle is converted to an ChordAngle), and the measurement
+// error (i.e., how accurate the ChordAngle(a, b) constructor is when the
+// points A and B are separated by angles close to π radians). All of these
+// errors differ by a small constant factor.
 //
-// ChordAngles are represented by the squared chord length, which can
-// range from 0 to 4. Positive infinity represents an infinite squared length.
+// For the measurement error (which is the largest of these errors and also
+// the most important in practice), let the angle between A and B be (π - x)
+// radians, i.e. A and B are within "x" radians of being antipodal. The
+// corresponding chord length is
+//
+//	r = 2 * sin((π - x) / 2) = 2 * cos(x / 2)
+//
+// For values of x not close to π the relative error in the squared chord
+// length is at most 4.5 * dblEpsilon (see MaxPointError below).
+// The relative error in "r" is thus at most 2.25 * dblEpsilon ~= 5e-16. To
+// convert this error into an equivalent angle, we have
+//
+//	|dr / dx| = sin(x / 2)
+//
+// and therefore
+//
+//	|dx| = dr / sin(x / 2)
+//	     = 5e-16 * (2 * cos(x / 2)) / sin(x / 2)
+//	     = 1e-15 / tan(x / 2)
+//
+// The maximum error is attained when
+//
+//	x  = |dx|
+//	   = 1e-15 / tan(x / 2)
+//	  ~= 1e-15 / (x / 2)
+//	  ~= sqrt(2e-15)
+//
+// In summary, the measurement error for an angle (π - x) is at most
+//
+//	dx  = min(1e-15 / tan(x / 2), sqrt(2e-15))
+//	  (~= min(2e-15 / x, sqrt(2e-15)) when x is small)
+//
+// On the Earth's surface (assuming a radius of 6371km), this corresponds to
+// the following worst-case measurement errors:
+//
+//	Accuracy:             Unless antipodal to within:
+//	---------             ---------------------------
+//	6.4 nanometers        10,000 km (90 degrees)
+//	1 micrometer          81.2 kilometers
+//	1 millimeter          81.2 meters
+//	1 centimeter          8.12 meters
+//	28.5 centimeters      28.5 centimeters
+//
+// The representational and conversion errors referred to earlier are somewhat
+// smaller than this. For example, maximum distance between adjacent
+// representable ChordAngle values is only 13.5 cm rather than 28.5 cm. To
+// see this, observe that the closest representable value to r^2 = 4 is
+// r^2 =  4 * (1 - dblEpsilon / 2). Thus r = 2 * (1 - dblEpsilon / 4) and
+// the angle between these two representable values is
+//
+//	x  = 2 * acos(r / 2)
+//	   = 2 * acos(1 - dblEpsilon / 4)
+//	  ~= 2 * asin(sqrt(dblEpsilon / 2)
+//	  ~= sqrt(2 * dblEpsilon)
+//	  ~= 2.1e-8
+//
+// which is 13.5 cm on the Earth's surface.
+//
+// The worst case rounding error occurs when the value halfway between these
+// two representable values is rounded up to 4. This halfway value is
+// r^2 = (4 * (1 - dblEpsilon / 4)), thus r = 2 * (1 - dblEpsilon / 8) and
+// the worst case rounding error is
+//
+//	x  = 2 * acos(r / 2)
+//	   = 2 * acos(1 - dblEpsilon / 8)
+//	  ~= 2 * asin(sqrt(dblEpsilon / 4)
+//	  ~= sqrt(dblEpsilon)
+//	  ~= 1.5e-8
+//
+// which is 9.5 cm on the Earth's surface.
 type ChordAngle float64
 
 const (
@@ -78,8 +148,9 @@ func ChordAngleFromSquaredLength(length2 float64) ChordAngle {
 // Expanded returns a new ChordAngle that has been adjusted by the given error
 // bound (which can be positive or negative). Error should be the value
 // returned by either MaxPointError or MaxAngleError. For example:
-//    a := ChordAngleFromPoints(x, y)
-//    a1 := a.Expanded(a.MaxPointError())
+//
+//	a := ChordAngleFromPoints(x, y)
+//	a1 := a.Expanded(a.MaxPointError())
 func (c ChordAngle) Expanded(e float64) ChordAngle {
 	// If the angle is special, don't change it. Otherwise clamp it to the valid range.
 	if c.isSpecial() {
@@ -93,7 +164,7 @@ func (c ChordAngle) Angle() Angle {
 	if c < 0 {
 		return -1 * Radian
 	}
-	if c.isInf() {
+	if c.IsInfinity() {
 		return InfAngle()
 	}
 	return Angle(2 * math.Asin(0.5*math.Sqrt(float64(c))))
@@ -106,14 +177,14 @@ func InfChordAngle() ChordAngle {
 	return ChordAngle(math.Inf(1))
 }
 
-// isInf reports whether this ChordAngle is infinite.
-func (c ChordAngle) isInf() bool {
+// IsInfinity reports whether this ChordAngle is infinite.
+func (c ChordAngle) IsInfinity() bool {
 	return math.IsInf(float64(c), 1)
 }
 
 // isSpecial reports whether this ChordAngle is one of the special cases.
 func (c ChordAngle) isSpecial() bool {
-	return c < 0 || c.isInf()
+	return c < 0 || c.IsInfinity()
 }
 
 // isValid reports whether this ChordAngle is valid or not.
@@ -125,9 +196,10 @@ func (c ChordAngle) isValid() bool {
 // This can be used to convert a "<" comparison to a "<=" comparison.
 //
 // Note the following special cases:
-//   NegativeChordAngle.Successor == 0
-//   StraightChordAngle.Successor == InfChordAngle
-//   InfChordAngle.Successor == InfChordAngle
+//
+//	NegativeChordAngle.Successor == 0
+//	StraightChordAngle.Successor == InfChordAngle
+//	InfChordAngle.Successor == InfChordAngle
 func (c ChordAngle) Successor() ChordAngle {
 	if c >= maxLength2 {
 		return InfChordAngle()
@@ -141,9 +213,10 @@ func (c ChordAngle) Successor() ChordAngle {
 // Predecessor returns the largest representable ChordAngle less than this one.
 //
 // Note the following special cases:
-//   InfChordAngle.Predecessor == StraightChordAngle
-//   ChordAngle(0).Predecessor == NegativeChordAngle
-//   NegativeChordAngle.Predecessor == NegativeChordAngle
+//
+//	InfChordAngle.Predecessor == StraightChordAngle
+//	ChordAngle(0).Predecessor == NegativeChordAngle
+//	NegativeChordAngle.Predecessor == NegativeChordAngle
 func (c ChordAngle) Predecessor() ChordAngle {
 	if c <= 0 {
 		return NegativeChordAngle
@@ -225,7 +298,7 @@ func (c ChordAngle) Sin() float64 {
 // It is more efficient than Sin.
 func (c ChordAngle) Sin2() float64 {
 	// Let a be the (non-squared) chord length, and let A be the corresponding
-	// half-angle (a = 2*sin(A)).  The formula below can be derived from:
+	// half-angle (a = 2*sin(A)). The formula below can be derived from:
 	//   sin(2*A) = 2 * sin(A) * cos(A)
 	//   cos^2(A) = 1 - sin^2(A)
 	// This is much faster than converting to an angle and computing its sine.

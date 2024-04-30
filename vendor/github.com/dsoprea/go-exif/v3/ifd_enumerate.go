@@ -163,6 +163,8 @@ type IfdEnumerate struct {
 	tagIndex       *TagIndex
 	ifdMapping     *exifcommon.IfdMapping
 	furthestOffset uint32
+
+	visitedIfdOffsets map[uint32]struct{}
 }
 
 // NewIfdEnumerate returns a new instance of IfdEnumerate.
@@ -172,6 +174,8 @@ func NewIfdEnumerate(ifdMapping *exifcommon.IfdMapping, tagIndex *TagIndex, ebs 
 		byteOrder:  byteOrder,
 		ifdMapping: ifdMapping,
 		tagIndex:   tagIndex,
+
+		visitedIfdOffsets: make(map[uint32]struct{}),
 	}
 }
 
@@ -232,15 +236,15 @@ func (ie *IfdEnumerate) parseTag(ii *exifcommon.IfdIdentity, tagPosition int, bp
 		// if the type stored alongside the data disagrees with it,
 		// which it apparently does, all bets are off.
 		ifdEnumerateLogger.Warningf(nil,
-			"Tag (0x%04x) in IFD [%s] at position (%d) has invalid type and will be skipped.",
-			tagId, ii, tagPosition, tagType)
+			"Tag (0x%04x) in IFD [%s] at position (%d) has invalid type (0x%04x) and will be skipped.",
+			tagId, ii, tagPosition, int(tagType))
 
 		ite = &IfdTagEntry{
 			tagId:   tagId,
 			tagType: tagType,
 		}
 
-		return nil, ErrTagTypeNotValid
+		return ite, ErrTagTypeNotValid
 	}
 
 	// Check whether the embedded type is listed among the supported types for
@@ -250,20 +254,29 @@ func (ie *IfdEnumerate) parseTag(ii *exifcommon.IfdIdentity, tagPosition int, bp
 	if err != nil {
 		if log.Is(err, ErrTagNotFound) == true {
 			ifdEnumerateLogger.Warningf(nil, "Tag (0x%04x) is not known and will be skipped.", tagId)
+
+			ite = &IfdTagEntry{
+				tagId: tagId,
+			}
+
+			return ite, ErrTagNotFound
 		}
 
 		log.Panic(err)
 	}
 
-	if it.DoesSupportType(tagType) == false {
+	// If we're trying to be as forgiving as possible then use whatever type was
+	// reported in the format. Otherwise, only accept a type that's expected for
+	// this tag.
+	if ie.tagIndex.UniversalSearch() == false && it.DoesSupportType(tagType) == false {
 		// The type in the stream disagrees with the type that this tag is
 		// expected to have. This can present issues with how we handle the
 		// special-case tags (e.g. thumbnails, GPS, etc..) when those tags
 		// suddenly have data that we no longer manipulate correctly/
 		// accurately.
 		ifdEnumerateLogger.Warningf(nil,
-			"Tag (0x%04x) in IFD [%s] at position (%d) has invalid type and will be skipped.",
-			tagId, ii, tagPosition, tagType)
+			"Tag (0x%04x) in IFD [%s] at position (%d) has unsupported type (0x%02x) and will be skipped.",
+			tagId, ii, tagPosition, int(tagType))
 
 		return nil, ErrTagTypeNotValid
 	}
@@ -399,7 +412,7 @@ func (ie *IfdEnumerate) tagPostParse(ite *IfdTagEntry, med *MiscellaneousExifDat
 	// tag should ever be repeated, and b) all but one had an incorrect
 	// type and caused parsing/conversion woes. So, this is a quick fix
 	// for those scenarios.
-	if it.DoesSupportType(tagType) == false {
+	if ie.tagIndex.UniversalSearch() == false && it.DoesSupportType(tagType) == false {
 		ifdEnumerateLogger.Warningf(nil,
 			"Skipping tag [%s] (0x%04x) [%s] with an unexpected type: %v ∉ %v",
 			ii.UnindexedString(), tagId, it.Name,
@@ -544,7 +557,19 @@ func (ie *IfdEnumerate) parseIfd(ii *exifcommon.IfdIdentity, bp *byteParser, vis
 	nextIfdOffset, _, err = bp.getUint32()
 	log.PanicIf(err)
 
-	ifdEnumerateLogger.Debugf(nil, "Next IFD at offset: (%08x)", nextIfdOffset)
+	_, alreadyVisited := ie.visitedIfdOffsets[nextIfdOffset]
+
+	if alreadyVisited == true {
+		ifdEnumerateLogger.Warningf(nil, "IFD at offset (0x%08x) has been linked-to more than once. There might be a cycle in the IFD chain. Not reparsing.", nextIfdOffset)
+		nextIfdOffset = 0
+	}
+
+	if nextIfdOffset != 0 {
+		ie.visitedIfdOffsets[nextIfdOffset] = struct{}{}
+		ifdEnumerateLogger.Debugf(nil, "[%s] Next IFD at offset: (0x%08x)", ii.String(), nextIfdOffset)
+	} else {
+		ifdEnumerateLogger.Debugf(nil, "[%s] IFD chain has terminated.", ii.String())
+	}
 
 	return nextIfdOffset, entries, thumbnailData, nil
 }

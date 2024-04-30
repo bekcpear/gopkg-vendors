@@ -38,16 +38,16 @@ import (
 //
 // Polygons have the following restrictions:
 //
-//  - Loops may not cross, i.e. the boundary of a loop may not intersect
-//    both the interior and exterior of any other loop.
+//   - Loops may not cross, i.e. the boundary of a loop may not intersect
+//     both the interior and exterior of any other loop.
 //
-//  - Loops may not share edges, i.e. if a loop contains an edge AB, then
-//    no other loop may contain AB or BA.
+//   - Loops may not share edges, i.e. if a loop contains an edge AB, then
+//     no other loop may contain AB or BA.
 //
-//  - Loops may share vertices, however no vertex may appear twice in a
-//    single loop (see Loop).
+//   - Loops may share vertices, however no vertex may appear twice in a
+//     single loop (see Loop).
 //
-//  - No loop may be empty. The full loop may appear only in the full polygon.
+//   - No loop may be empty. The full loop may appear only in the full polygon.
 type Polygon struct {
 	loops []*Loop
 
@@ -188,16 +188,18 @@ func (p *Polygon) Invert() {
 	// Inverting any one loop will invert the polygon.  The best loop to invert
 	// is the one whose area is largest, since this yields the smallest area
 	// after inversion. The loop with the largest area is always at depth 0.
-	// The descendents of this loop all have their depth reduced by 1, while the
+	// The descendants of this loop all have their depth reduced by 1, while the
 	// former siblings of this loop all have their depth increased by 1.
 
 	// The empty and full polygons are handled specially.
 	if p.IsEmpty() {
 		*p = *FullPolygon()
+		p.initLoopProperties()
 		return
 	}
 	if p.IsFull() {
 		*p = Polygon{}
+		p.initLoopProperties()
 		return
 	}
 
@@ -244,6 +246,7 @@ func (p *Polygon) Invert() {
 			newLoops = append(newLoops, l)
 		}
 	}
+
 	p.loops = newLoops
 	p.initLoopProperties()
 }
@@ -383,6 +386,7 @@ func (p *Polygon) initOneLoop() {
 
 // initLoopProperties sets the properties for polygons with multiple loops.
 func (p *Polygon) initLoopProperties() {
+	p.numVertices = 0
 	// the loops depths are set by initNested/initOriented prior to this.
 	p.bound = EmptyRect()
 	p.hasHoles = false
@@ -402,6 +406,8 @@ func (p *Polygon) initLoopProperties() {
 // initEdgesAndIndex performs the shape related initializations and adds the final
 // polygon to the index.
 func (p *Polygon) initEdgesAndIndex() {
+	p.numEdges = 0
+	p.cumulativeEdges = nil
 	if p.IsFull() {
 		return
 	}
@@ -600,13 +606,8 @@ func (p *Polygon) ContainsPoint(point Point) bool {
 		return inside
 	}
 
-	// Otherwise, look up the ShapeIndex cell containing this point.
-	it := p.index.Iterator()
-	if !it.LocatePoint(point) {
-		return false
-	}
-
-	return p.iteratorContainsPoint(it, point)
+	// Otherwise we look up the ShapeIndex cell containing this point.
+	return NewContainsPointQuery(p.index, VertexModelSemiOpen).Contains(point)
 }
 
 // ContainsCell reports whether the polygon contains the given cell.
@@ -1013,6 +1014,27 @@ func (p *Polygon) Area() float64 {
 	return area
 }
 
+// Centroid returns the true centroid of the polygon multiplied by the area of
+// the polygon. The result is not unit length, so you may want to normalize it.
+// Also note that in general, the centroid may not be contained by the polygon.
+//
+// We prescale by the polygon area for two reasons: (1) it is cheaper to
+// compute this way, and (2) it makes it easier to compute the centroid of
+// more complicated shapes (by splitting them into disjoint regions and
+// adding their centroids).
+func (p *Polygon) Centroid() Point {
+	u := Point{}.Vector
+	for _, loop := range p.loops {
+		v := loop.Centroid().Vector
+		if loop.Sign() < 0 {
+			u = u.Sub(v)
+		} else {
+			u = u.Add(v)
+		}
+	}
+	return Point{u}
+}
+
 // Encode encodes the Polygon
 func (p *Polygon) Encode(w io.Writer) error {
 	e := &encoder{w: w}
@@ -1023,7 +1045,7 @@ func (p *Polygon) Encode(w io.Writer) error {
 // encode only supports lossless encoding and not compressed format.
 func (p *Polygon) encode(e *encoder) {
 	if p.numVertices == 0 {
-		p.encodeCompressed(e, maxLevel, nil)
+		p.encodeCompressed(e, MaxLevel, nil)
 		return
 	}
 
@@ -1036,7 +1058,7 @@ func (p *Polygon) encode(e *encoder) {
 	// Computes a histogram of the cell levels at which the vertices are snapped.
 	// (histogram[0] is the number of unsnapped vertices, histogram[i] the number
 	// of vertices snapped at level i-1).
-	histogram := make([]int, maxLevel+2)
+	histogram := make([]int, MaxLevel+2)
 	for _, v := range vs {
 		histogram[v.level+1]++
 	}
@@ -1165,7 +1187,7 @@ func (p *Polygon) decode(d *decoder) {
 func (p *Polygon) decodeCompressed(d *decoder) {
 	snapLevel := int(d.readUint8())
 
-	if snapLevel > maxLevel {
+	if snapLevel > MaxLevel {
 		d.err = fmt.Errorf("snaplevel too big: %d", snapLevel)
 		return
 	}
@@ -1184,7 +1206,6 @@ func (p *Polygon) decodeCompressed(d *decoder) {
 }
 
 // TODO(roberts): Differences from C++
-// Centroid
 // SnapLevel
 // DistanceToPoint
 // DistanceToBoundary
