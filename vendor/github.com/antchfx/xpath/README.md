@@ -55,6 +55,9 @@ Supported Features
 
 - `a|b` : All nodes matching a or b, union operation(not boolean or).
 
+- `(a, b, c)` : Evaluates each of its operands and concatenates the resulting sequences, in order, into a single result sequence
+
+
 #### Node Axes 
 
 - `child::*` : The child axis selects children of the current node.
@@ -141,6 +144,8 @@ Supported Features
 `not()`| ✓ |
 `number()`| ✓ |
 `position()`| ✓ |
+`replace()`| ✓ |
+`reverse()`| ✓ |
 `round()`| ✓ |
 `starts-with()`| ✓ |
 `string()`| ✓ |
@@ -153,3 +158,15 @@ Supported Features
 `translate()`| ✓ |
 `true()`| ✓ |
 `unparsed-entity-url()` | ✗ |
+
+Changelogs
+===
+
+2019-03-19 
+- optimize XPath `|` operation performance. [#33](https://github.com/antchfx/xpath/issues/33). Tips: suggest split into multiple subquery if you have a lot of `|` operations.
+
+2019-01-29
+-  improvement `normalize-space` function. [#32](https://github.com/antchfx/xpath/issues/32)
+
+2018-12-07
+-  supports XPath 2.0 Sequence expressions. [#30](https://github.com/antchfx/xpath/pull/30) by [@minherz](https://github.com/minherz).
