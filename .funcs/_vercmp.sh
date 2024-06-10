@@ -42,7 +42,7 @@ __BASHFUNC_VERCMP_FN_EXT=(
 )
 __bashfunc_vercmp_remove_ext() {
   local in=${*} out=
-  for _ext in ${__BASHFUNC_VERCMP_FN_EXT[@]}; do
+  for _ext in "${__BASHFUNC_VERCMP_FN_EXT[@]}"; do
     out="${*%${_ext}}"
     if [[ "${in}" != "${out}" ]]; then
       break
@@ -51,7 +51,16 @@ __bashfunc_vercmp_remove_ext() {
   echo -n "${out}"
 }
 __bashfunc_vercmp_compare_ver() {
-  local v0=${1} v1=${2} is_num=1 res=
+  local v0=${1} v1=${2} is_num=1 res= prefix= v0_tmp=0
+  if [[ $v0 =~ ^([[:alpha:]]+)([[:digit:]]+)$ ]]; then
+    prefix="${BASH_REMATCH[1]}"
+    v0_tmp="${BASH_REMATCH[2]}"
+    if [[ ${v1#$prefix} =~ ^([[:digit:]]*)$ ]]; then
+      v0="$v0_tmp"
+      v1="${BASH_REMATCH[1]}"
+      : "${v1:=-1}"
+    fi
+  fi
   if [[ ! ${v0} =~ ^[0-9]+$ ]] || [[ ! ${v1} =~ ^[0-9]+$ ]]; then
     is_num=0
     : ${v0/-1/\\/}
@@ -115,7 +124,7 @@ _vercmp() {
   local str1_pkgname str1_ver str1_pre
 
   OIFS=$IFS; IFS="-"
-  str0=( $(__bashfunc_vercmp_remove_ext ${1}) ) str1=( $(__bashfunc_vercmp_remove_ext ${2}) )
+  str0=( $(__bashfunc_vercmp_remove_ext "${1}") ) str1=( $(__bashfunc_vercmp_remove_ext "${2}") )
   IFS=$OIFS
 
   for _str in "str0" "str1"; do
