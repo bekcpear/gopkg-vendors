@@ -21,7 +21,7 @@ import (
 
 	"go4.org/mem"
 	"tailscale.com/control/controlknobs"
-	"tailscale.com/net/interfaces"
+	"tailscale.com/envknob"
 	"tailscale.com/net/netaddr"
 	"tailscale.com/net/neterror"
 	"tailscale.com/net/netmon"
@@ -32,6 +32,8 @@ import (
 	"tailscale.com/types/nettype"
 	"tailscale.com/util/clientmetric"
 )
+
+var disablePortMapperEnv = envknob.RegisterBool("TS_DISABLE_PORTMAPPER")
 
 // DebugKnobs contains debug configuration that can be provided when creating a
 // Client. The zero value is valid for use.
@@ -49,6 +51,20 @@ type DebugKnobs struct {
 	DisableUPnP bool
 	DisablePMP  bool
 	DisablePCP  bool
+
+	// DisableAll, if non-nil, is a func that reports whether all port
+	// mapping attempts should be disabled.
+	DisableAll func() bool
+}
+
+func (k *DebugKnobs) disableAll() bool {
+	if disablePortMapperEnv() {
+		return true
+	}
+	if k.DisableAll != nil {
+		return k.DisableAll()
+	}
+	return false
 }
 
 // References:
@@ -187,8 +203,7 @@ func (m *pmpMapping) Release(ctx context.Context) {
 
 // NewClient returns a new portmapping client.
 //
-// The netMon parameter is optional; if non-nil it's used to do faster interface
-// lookups.
+// The netMon parameter is required.
 //
 // The debug argument allows configuring the behaviour of the portmapper for
 // debugging; if nil, a sensible set of defaults will be used.
@@ -200,10 +215,13 @@ func (m *pmpMapping) Release(ctx context.Context) {
 // whenever the port mapping status has changed. If nil, it doesn't make a
 // callback.
 func NewClient(logf logger.Logf, netMon *netmon.Monitor, debug *DebugKnobs, controlKnobs *controlknobs.Knobs, onChange func()) *Client {
+	if netMon == nil {
+		panic("nil netMon")
+	}
 	ret := &Client{
 		logf:         logf,
 		netMon:       netMon,
-		ipAndGateway: interfaces.LikelyHomeRouterIP,
+		ipAndGateway: netmon.LikelyHomeRouterIP, // TODO(bradfitz): move this to method on netMon
 		onChange:     onChange,
 		controlKnobs: controlKnobs,
 	}
@@ -403,6 +421,7 @@ var (
 	ErrNoPortMappingServices = errors.New("no port mapping services were found")
 	ErrGatewayRange          = errors.New("skipping portmap; gateway range likely lacks support")
 	ErrGatewayIPv6           = errors.New("skipping portmap; no IPv6 support for portmapping")
+	ErrPortMappingDisabled   = errors.New("port mapping is disabled")
 )
 
 // GetCachedMappingOrStartCreatingOne quickly returns with our current cached portmapping, if any.
@@ -464,6 +483,9 @@ var wildcardIP = netip.MustParseAddr("0.0.0.0")
 // If no mapping is available, the error will be of type
 // NoMappingError; see IsNoMappingError.
 func (c *Client) createOrGetMapping(ctx context.Context) (external netip.AddrPort, err error) {
+	if c.debug.disableAll() {
+		return netip.AddrPort{}, NoMappingError{ErrPortMappingDisabled}
+	}
 	if c.debug.DisableUPnP && c.debug.DisablePCP && c.debug.DisablePMP {
 		return netip.AddrPort{}, NoMappingError{ErrNoPortMappingServices}
 	}
@@ -777,6 +799,9 @@ type ProbeResult struct {
 // the returned result might be server from the Client's cache, without
 // sending any network traffic.
 func (c *Client) Probe(ctx context.Context) (res ProbeResult, err error) {
+	if c.debug.disableAll() {
+		return res, ErrPortMappingDisabled
+	}
 	gw, myIP, ok := c.gatewayAndSelfIP()
 	if !ok {
 		return res, ErrGatewayRange
@@ -1198,6 +1223,10 @@ var (
 	// metricUPnPResponseAlternatePort counts the number of times we
 	// received a UPnP response from a port other than the UPnP port.
 	metricUPnPResponseAlternatePort = clientmetric.NewCounter("portmap_upnp_response_alternate_port")
+
+	// metricUPnPSelectLegacy counts the number of times that a legacy
+	// service was found in a UPnP response.
+	metricUPnPSelectLegacy = clientmetric.NewCounter("portmap_upnp_select_legacy")
 
 	// metricUPnPSelectSingle counts the number of times that only a single
 	// UPnP device was available in selectBestService.

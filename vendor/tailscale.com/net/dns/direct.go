@@ -16,11 +16,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"tailscale.com/health"
 	"tailscale.com/net/dns/resolvconffile"
+	"tailscale.com/net/tsaddr"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/dnsname"
 	"tailscale.com/version/distro"
@@ -114,8 +117,9 @@ func restartResolved() error {
 // The caller must call Down before program shutdown
 // or as cleanup if the program terminates unexpectedly.
 type directManager struct {
-	logf logger.Logf
-	fs   wholeFileFS
+	logf   logger.Logf
+	health *health.Tracker
+	fs     wholeFileFS
 	// renameBroken is set if fs.Rename to or from /etc/resolv.conf
 	// fails. This can happen in some container runtimes, where
 	// /etc/resolv.conf is bind-mounted from outside the container,
@@ -138,14 +142,15 @@ type directManager struct {
 }
 
 //lint:ignore U1000 used in manager_{freebsd,openbsd}.go
-func newDirectManager(logf logger.Logf) *directManager {
-	return newDirectManagerOnFS(logf, directFS{})
+func newDirectManager(logf logger.Logf, health *health.Tracker) *directManager {
+	return newDirectManagerOnFS(logf, health, directFS{})
 }
 
-func newDirectManagerOnFS(logf logger.Logf, fs wholeFileFS) *directManager {
+func newDirectManagerOnFS(logf logger.Logf, health *health.Tracker, fs wholeFileFS) *directManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &directManager{
 		logf:     logf,
+		health:   health,
 		fs:       fs,
 		ctx:      ctx,
 		ctxClose: cancel,
@@ -371,10 +376,38 @@ func (m *directManager) GetBaseConfig() (OSConfig, error) {
 		fileToRead = backupConf
 	}
 
-	return m.readResolvFile(fileToRead)
+	oscfg, err := m.readResolvFile(fileToRead)
+	if err != nil {
+		return OSConfig{}, err
+	}
+
+	// On some systems, the backup configuration file is actually a
+	// symbolic link to something owned by another DNS service (commonly,
+	// resolved). Thus, it can be updated out from underneath us to contain
+	// the Tailscale service IP, which results in an infinite loop of us
+	// trying to send traffic to resolved, which sends back to us, and so
+	// on. To solve this, drop the Tailscale service IP from the base
+	// configuration; we do this in all situations since there's
+	// essentially no world where we want to forward to ourselves.
+	//
+	// See: https://github.com/tailscale/tailscale/issues/7816
+	var removed bool
+	oscfg.Nameservers = slices.DeleteFunc(oscfg.Nameservers, func(ip netip.Addr) bool {
+		if ip == tsaddr.TailscaleServiceIP() || ip == tsaddr.TailscaleServiceIPv6() {
+			removed = true
+			return true
+		}
+		return false
+	})
+	if removed {
+		m.logf("[v1] dropped Tailscale IP from base config that was a symlink")
+	}
+	return oscfg, nil
 }
 
 func (m *directManager) Close() error {
+	m.ctxClose()
+
 	// We used to keep a file for the tailscale config and symlinked
 	// to it, but then we stopped because /etc/resolv.conf being a
 	// symlink to surprising places breaks snaps and other sandboxing

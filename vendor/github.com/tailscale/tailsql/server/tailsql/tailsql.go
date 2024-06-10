@@ -114,7 +114,6 @@ type Server struct {
 	rules     []UIRewriteRule
 	authorize func(string, *apitype.WhoIsResponse) error
 	qtimeout  time.Duration
-	qcontext  func(ctx context.Context, src, query string) context.Context
 	logf      logger.Logf
 
 	mu  sync.Mutex
@@ -167,7 +166,6 @@ func NewServer(opts Options) (*Server, error) {
 		rules:     opts.UIRewriteRules,
 		authorize: opts.authorize(),
 		qtimeout:  opts.QueryTimeout.Duration(),
-		qcontext:  opts.QueryContext,
 		logf:      opts.logf(),
 		dbs:       dbs,
 	}, nil
@@ -186,17 +184,12 @@ func (s *Server) SetDB(source string, db *sql.DB, opts *DBOptions) bool {
 		panic("new database is nil")
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	for _, src := range s.dbs {
 		if src.Source() == source {
-			s.mu.Unlock()
-
-			// Perform the swap outside the service lock, since it may wait if a
-			// query is in-flight and we don't need or want to block the rest of
-			// the UI while that's happening.
-			old := src.swap(db, opts)
-			old.Close()
-			return false
+			src.swap(db, opts)
+			return true
 		}
 	}
 	s.dbs = append(s.dbs, &dbHandle{
@@ -205,7 +198,6 @@ func (s *Server) SetDB(source string, db *sql.DB, opts *DBOptions) bool {
 		label: opts.label(),
 		named: opts.namedQueries(),
 	})
-	s.mu.Unlock()
 	return false
 }
 
@@ -250,7 +242,7 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	caller, isAuthorized := s.checkAuth(w, r, src)
+	caller, isAuthorized := s.checkAuth(w, r, src, query)
 	if !isAuthorized {
 		authErrorCount.Add(1)
 		return
@@ -294,6 +286,7 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serveUIInternal(w http.ResponseWriter, r *http.Request, caller, src, query string) error {
 	http.SetCookie(w, siteAccessCookie)
 	w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
+	w.Header().Set("X-Frame-Options", "DENY")
 
 	// If a non-empty query is present, require either a site access cookie or a
 	// no-browsers header.
@@ -440,7 +433,7 @@ func (s *Server) queryContext(ctx context.Context, caller, src, query string) (*
 		defer cancel()
 	}
 
-	return runQueryInTx(s.getQueryContext(ctx, src, query), h,
+	return runQueryInTx(ctx, h,
 		func(fctx context.Context, tx *sql.Tx) (_ *dbResult, err error) {
 			start := time.Now()
 			var out dbResult
@@ -452,7 +445,7 @@ func (s *Server) queryContext(ctx context.Context, caller, src, query string) (*
 				// Record successful queries in the persistent log.  But don't log
 				// queries to the state database itself.
 				if err == nil && src != s.self {
-					serr := s.state.LogQuery(ctx, caller, src, query)
+					serr := s.state.LogQuery(ctx, caller, src, query, out.Elapsed)
 					if serr != nil {
 						s.logf("[tailsql] WARNING: Error logging query: %v", serr)
 					}
@@ -577,7 +570,7 @@ func (s *Server) dbHandleForSource(src string) *dbHandle {
 // given source.  If the caller does not have access, checkAuth logs an error
 // to w and returns false.  The reported caller name will be "" if no caller
 // can be identified.
-func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request, src string) (string, bool) {
+func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request, src, query string) (string, bool) {
 	// If there is no local client, allow everything.
 	if s.lc == nil {
 		return "", true
@@ -596,6 +589,12 @@ func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request, src string) (
 	} else {
 		caller = whois.UserProfile.LoginName
 	}
+
+	// If the caller wants the UI and didn't send a query, allow it.
+	// The source does not matter when there is no query.
+	if r.URL.Path == "/" && query == "" {
+		return caller, true
+	}
 	if err := s.authorize(src, whois); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return caller, false
@@ -609,17 +608,12 @@ func (s *Server) getHandles() []*dbHandle {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Check for pending updates.
+	for _, h := range s.dbs {
+		h.tryUpdate()
+	}
+
 	// It is safe to return the slice because we never remove any elements, new
 	// data are only ever appended to the end.
 	return s.dbs
-}
-
-// getQueryContext decorates ctx if necessary using the context hook for src and query.
-func (s *Server) getQueryContext(ctx context.Context, src, query string) context.Context {
-	if s.qcontext != nil {
-		if qctx := s.qcontext(ctx, src, query); qctx != nil {
-			return qctx
-		}
-	}
-	return ctx
 }

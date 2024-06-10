@@ -4,6 +4,8 @@
 package setec
 
 import (
+	"context"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,9 +77,16 @@ func ParseFields(v any, namePrefix string) (*Fields, error) {
 // The Fields type can handle struct fields of the following types:
 //
 //   - A field of type []byte receives a copy of the secret value.
+//
 //   - A field of type string receives a copy of the secret as a string.
+//
 //   - A field of type [setec.Secret] is populated with a handle to the secret.
+//
 //   - A field of type [setec.Watcher] is populated with a watcher for the secret.
+//
+//   - A field whose (pointer) type implements the [encoding.BinaryUnmarshaler]
+//     interface has its UnmarshalBinary method called with the secret value.
+//     This may be used to handle structured data, or to add validation.
 //
 // In addition, a field may have any type that supports JSON encoding, provided
 // the secret value is also encoded as JSON, if its tag includes the optional
@@ -121,11 +130,11 @@ func (f *Fields) Secrets() []string {
 // Note: When applying secrets to struct fields from an existing Store, the
 // AllowLookup option of the Store must be enabled, or else Apply will report
 // an error for any field that refers to a secret not already available.
-func (f *Fields) Apply(s *Store) error {
+func (f *Fields) Apply(ctx context.Context, s *Store) error {
 	var errs []error
 	for _, fi := range f.fields {
 		fullName := path.Join(f.prefix, fi.secretName)
-		if err := fi.apply(s, fullName); err != nil {
+		if err := fi.apply(ctx, s, fullName); err != nil {
 			errs = append(errs, fmt.Errorf("apply %q to field %q: %w", fullName, fi.fieldName, err))
 		}
 	}
@@ -134,11 +143,12 @@ func (f *Fields) Apply(s *Store) error {
 
 // fieldInfo records information about a tagged field.
 type fieldInfo struct {
-	fieldName  string        // name in the type (for diagnostics)
-	secretName string        // name in the field tag (without prefix)
-	value      reflect.Value // pointer to field
-	isJSON     bool          // if true, secret must be JSON encoded
-	vtype      reflect.Type  // type of field pointed to by value
+	fieldName  string             // name in the type (for diagnostics)
+	secretName string             // name in the field tag (without prefix)
+	value      reflect.Value      // pointer to field
+	unmarshal  func([]byte) error // if non-nil, call to unmarshal the value
+	isJSON     bool               // if true, secret must be JSON encoded
+	vtype      reflect.Type       // type of field pointed to by value
 }
 
 // apply sets the target of fi.value to the secret named. It reports an error
@@ -146,9 +156,9 @@ type fieldInfo struct {
 //
 // If f.isJSON is true, the data are unmarshaled as JSON.
 // Otherwise, the data are converted to the target type and copied.
-func (f fieldInfo) apply(s *Store, fullName string) error {
+func (f fieldInfo) apply(ctx context.Context, s *Store, fullName string) error {
 	if f.isJSON {
-		v, err := s.LookupSecret(fullName)
+		v, err := s.LookupSecret(ctx, fullName)
 		if err != nil {
 			return err
 		}
@@ -156,7 +166,7 @@ func (f fieldInfo) apply(s *Store, fullName string) error {
 	}
 
 	if f.vtype == watcherType {
-		w, err := s.LookupWatcher(fullName)
+		w, err := s.LookupWatcher(ctx, fullName)
 		if err != nil {
 			return err
 		}
@@ -164,9 +174,12 @@ func (f fieldInfo) apply(s *Store, fullName string) error {
 		return nil
 	}
 
-	v, err := s.LookupSecret(fullName)
+	v, err := s.LookupSecret(ctx, fullName)
 	if err != nil {
 		return err
+	}
+	if f.unmarshal != nil {
+		return f.unmarshal(v.Get())
 	}
 	switch f.vtype {
 	case bytesType:
@@ -186,6 +199,7 @@ var (
 	secretType  = reflect.TypeOf(Secret(nil))
 	stringType  = reflect.TypeOf(string(""))
 	watcherType = reflect.TypeOf(Watcher{})
+	binaryType  = reflect.TypeOf((*encoding.BinaryUnmarshaler)(nil)).Elem()
 )
 
 // parseFields constructs a field list for obj, which must be a pointer to a
@@ -217,14 +231,37 @@ func parseFields(obj any) ([]fieldInfo, error) {
 			vtype:      ft.Type,
 		}
 		if !fi.isJSON {
-			switch ft.Type {
-			case bytesType, stringType, secretType, watcherType:
-				// OK, these are supported
-			default:
-				return nil, fmt.Errorf("unsupported type %v for tagged field %q", ft.Type, ft.Name)
+			if u := checkUnmarshal(fi.value); u != nil {
+				fi.unmarshal = u
+			} else {
+				switch ft.Type {
+				case bytesType, stringType, secretType, watcherType:
+					// OK, these types are supported.
+				default:
+					return nil, fmt.Errorf("unsupported type %v for tagged field %q", ft.Type, ft.Name)
+				}
 			}
 		}
 		out = append(out, fi)
 	}
 	return out, nil
+}
+
+// checkUnmarshal checks whether v implements an unmarshaler type, and if so
+// returns a function to unmarshal a secret value into the target.  Otherwise
+// it returns nil, indicating the field does not have its own unmarshaler.
+func checkUnmarshal(v reflect.Value) func([]byte) error {
+	// The pointer to the field value implements the unmarshaler.
+	if v.Type().Implements(binaryType) {
+		return v.Interface().(encoding.BinaryUnmarshaler).UnmarshalBinary
+	}
+	// The field value is itself a pointer that implements the unmarshaler.
+	if pt := v.Elem().Type(); pt.Implements(binaryType) {
+		// If the field value is nil, allocate a value to unmarshal into.
+		if v.Elem().IsNil() {
+			v.Elem().Set(reflect.New(pt.Elem()))
+		}
+		return v.Elem().Interface().(encoding.BinaryUnmarshaler).UnmarshalBinary
+	}
+	return nil // not applicable
 }

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -48,8 +49,13 @@ var c2nHandlers = map[methodAndPath]c2nHandler{
 	req("/debug/metrics"):           handleC2NDebugMetrics,
 	req("/debug/component-logging"): handleC2NDebugComponentLogging,
 	req("/debug/logheap"):           handleC2NDebugLogHeap,
-	req("POST /logtail/flush"):      handleC2NLogtailFlush,
-	req("POST /sockstats"):          handleC2NSockStats,
+
+	// PPROF - We only expose a subset of typical pprof endpoints for security.
+	req("/debug/pprof/heap"):   handleC2NPprof,
+	req("/debug/pprof/allocs"): handleC2NPprof,
+
+	req("POST /logtail/flush"): handleC2NLogtailFlush,
+	req("POST /sockstats"):     handleC2NSockStats,
 
 	// Check TLS certificate status.
 	req("GET /tls-cert-status"): handleC2NTLSCertStatus,
@@ -178,6 +184,19 @@ func handleC2NDebugLogHeap(b *LocalBackend, w http.ResponseWriter, r *http.Reque
 	c2nLogHeap(w, r)
 }
 
+var c2nPprof func(http.ResponseWriter, *http.Request, string) // non-nil on most platforms (c2n_pprof.go)
+
+func handleC2NPprof(b *LocalBackend, w http.ResponseWriter, r *http.Request) {
+	if c2nPprof == nil {
+		// Not implemented on platforms trying to optimize for binary size or
+		// reduced memory usage.
+		http.Error(w, "not implemented", http.StatusNotImplemented)
+		return
+	}
+	_, profile := path.Split(r.URL.Path)
+	c2nPprof(w, r, profile)
+}
+
 func handleC2NSSHUsernames(b *LocalBackend, w http.ResponseWriter, r *http.Request) {
 	var req tailcfg.C2NSSHUsernamesRequest
 	if r.Method == "POST" {
@@ -278,6 +297,13 @@ func handleC2NUpdatePost(b *LocalBackend, w http.ResponseWriter, r *http.Request
 	}
 	if !res.Supported {
 		res.Err = "not supported"
+		return
+	}
+
+	// Do not update if we have active inbound SSH connections. Control can set
+	// force=true query parameter to override this.
+	if r.FormValue("force") != "true" && b.sshServer != nil && b.sshServer.NumActiveConns() > 0 {
+		res.Err = "not updating due to active SSH connections"
 		return
 	}
 

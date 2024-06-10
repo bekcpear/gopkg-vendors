@@ -17,6 +17,7 @@ import (
 	"tailscale.com/tka"
 	"tailscale.com/types/key"
 	"tailscale.com/types/views"
+	"tailscale.com/util/set"
 	"tailscale.com/wgengine/filter"
 )
 
@@ -26,6 +27,7 @@ import (
 // alias parts of previous NetworkMap values.
 type NetworkMap struct {
 	SelfNode   tailcfg.NodeView
+	AllCaps    set.Set[tailcfg.NodeCapability] // set version of SelfNode.Capabilities + SelfNode.CapMap
 	NodeKey    key.NodePublic
 	PrivateKey key.NodePrivate
 	Expiry     time.Time
@@ -120,6 +122,11 @@ func (nm *NetworkMap) GetMachineStatus() tailcfg.MachineStatus {
 	return tailcfg.MachineUnauthorized
 }
 
+// HasCap reports whether nm is non-nil and nm.AllCaps contains c.
+func (nm *NetworkMap) HasCap(c tailcfg.NodeCapability) bool {
+	return nm != nil && nm.AllCaps.Contains(c)
+}
+
 // PeerByTailscaleIP returns a peer's Node based on its Tailscale IP.
 //
 // If nm is nil or no peer is found, ok is false.
@@ -130,7 +137,7 @@ func (nm *NetworkMap) PeerByTailscaleIP(ip netip.Addr) (peer tailcfg.NodeView, o
 	}
 	for _, n := range nm.Peers {
 		ad := n.Addresses()
-		for i := 0; i < ad.Len(); i++ {
+		for i := range ad.Len() {
 			a := ad.At(i)
 			if a.Addr() == ip {
 				return n, true

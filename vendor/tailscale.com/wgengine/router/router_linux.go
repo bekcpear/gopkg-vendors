@@ -22,6 +22,7 @@ import (
 	"golang.org/x/sys/unix"
 	"golang.org/x/time/rate"
 	"tailscale.com/envknob"
+	"tailscale.com/health"
 	"tailscale.com/net/netmon"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/preftype"
@@ -37,17 +38,19 @@ const (
 )
 
 type linuxRouter struct {
-	closed           atomic.Bool
-	logf             func(fmt string, args ...any)
-	tunname          string
-	netMon           *netmon.Monitor
-	unregNetMon      func()
-	addrs            map[netip.Prefix]bool
-	routes           map[netip.Prefix]bool
-	localRoutes      map[netip.Prefix]bool
-	snatSubnetRoutes bool
-	netfilterMode    preftype.NetfilterMode
-	netfilterKind    string
+	closed            atomic.Bool
+	logf              func(fmt string, args ...any)
+	tunname           string
+	netMon            *netmon.Monitor
+	health            *health.Tracker
+	unregNetMon       func()
+	addrs             map[netip.Prefix]bool
+	routes            map[netip.Prefix]bool
+	localRoutes       map[netip.Prefix]bool
+	snatSubnetRoutes  bool
+	statefulFiltering bool
+	netfilterMode     preftype.NetfilterMode
+	netfilterKind     string
 
 	// ruleRestorePending is whether a timer has been started to
 	// restore deleted ip rules.
@@ -56,6 +59,7 @@ type linuxRouter struct {
 
 	// Various feature checks for the network stack.
 	ipRuleAvailable bool // whether kernel was built with IP_MULTIPLE_TABLES
+	v6Available     bool // whether the kernel supports IPv6
 	fwmaskWorks     bool // whether we can use 'ip rule...fwmark <mark>/<mask>'
 
 	// ipPolicyPrefBase is the base priority at which ip rules are installed.
@@ -68,7 +72,7 @@ type linuxRouter struct {
 	magicsockPortV6 uint16
 }
 
-func newUserspaceRouter(logf logger.Logf, tunDev tun.Device, netMon *netmon.Monitor) (Router, error) {
+func newUserspaceRouter(logf logger.Logf, tunDev tun.Device, netMon *netmon.Monitor, health *health.Tracker) (Router, error) {
 	tunname, err := tunDev.Name()
 	if err != nil {
 		return nil, err
@@ -78,15 +82,16 @@ func newUserspaceRouter(logf logger.Logf, tunDev tun.Device, netMon *netmon.Moni
 		ambientCapNetAdmin: useAmbientCaps(),
 	}
 
-	return newUserspaceRouterAdvanced(logf, tunname, netMon, cmd)
+	return newUserspaceRouterAdvanced(logf, tunname, netMon, cmd, health)
 }
 
-func newUserspaceRouterAdvanced(logf logger.Logf, tunname string, netMon *netmon.Monitor, cmd commandRunner) (Router, error) {
+func newUserspaceRouterAdvanced(logf logger.Logf, tunname string, netMon *netmon.Monitor, cmd commandRunner, health *health.Tracker) (Router, error) {
 	r := &linuxRouter{
 		logf:          logf,
 		tunname:       tunname,
 		netfilterMode: netfilterOff,
 		netMon:        netMon,
+		health:        health,
 
 		cmd: cmd,
 
@@ -141,6 +146,8 @@ func newUserspaceRouterAdvanced(logf logger.Logf, tunname string, netMon *netmon
 		r.ipPolicyPrefBase = 1300
 		r.logf("mwan3 on openWRT detected, switching policy base priority to 1300")
 	}
+
+	r.v6Available = linuxfw.CheckIPv6(r.logf) == nil
 
 	r.fixupWSLMTU()
 
@@ -271,7 +278,7 @@ func (r *linuxRouter) onIPRuleDeleted(table uint8, priority uint32) {
 		// Not our rule.
 		return
 	}
-	if !r.ruleRestorePending.Swap(true) {
+	if r.ruleRestorePending.Swap(true) {
 		// Another timer is already pending.
 		return
 	}
@@ -386,6 +393,7 @@ func (r *linuxRouter) Set(cfg *Config) error {
 	}
 	r.addrs = newAddrs
 
+	// Ensure that the SNAT rule is added or removed as needed.
 	switch {
 	case cfg.SNATSubnetRoutes == r.snatSubnetRoutes:
 		// state already correct, nothing to do.
@@ -400,7 +408,76 @@ func (r *linuxRouter) Set(cfg *Config) error {
 	}
 	r.snatSubnetRoutes = cfg.SNATSubnetRoutes
 
+	// As above, for stateful filtering
+	switch {
+	case cfg.StatefulFiltering == r.statefulFiltering:
+		// state already correct, nothing to do.
+	case cfg.StatefulFiltering:
+		if err := r.addStatefulRule(); err != nil {
+			errs = append(errs, err)
+		}
+	default:
+		if err := r.delStatefulRule(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	r.statefulFiltering = cfg.StatefulFiltering
+	r.updateStatefulFilteringWithDockerWarning(cfg)
+
+	// Issue 11405: enable IP forwarding on gokrazy.
+	advertisingRoutes := len(cfg.SubnetRoutes) > 0
+	if distro.Get() == distro.Gokrazy && advertisingRoutes {
+		r.enableIPForwarding()
+	}
+
 	return multierr.New(errs...)
+}
+
+var warnStatefulFilteringWithDocker = health.NewWarnable()
+
+func (r *linuxRouter) updateStatefulFilteringWithDockerWarning(cfg *Config) {
+	// If stateful filtering is disabled, clear the warning.
+	if !r.statefulFiltering {
+		r.health.SetWarnable(warnStatefulFilteringWithDocker, nil)
+		return
+	}
+
+	advertisingRoutes := len(cfg.SubnetRoutes) > 0
+
+	// TODO(andrew-d,maisem): we might want to check if we're running in a
+	// container, since, if so, stateful filtering might prevent other
+	// containers from connecting through the Tailscale in this container.
+	//
+	// For now, just check for the case where we're running Tailscale on
+	// the host and Docker is also running.
+
+	// If this node isn't a subnet router or exit node, then we would never
+	// have allowed traffic from a Docker container in to Tailscale, since
+	// there wouldn't be an AllowedIP for the container's source IP. So we
+	// don't need to warn in this case.
+	//
+	// cfg.SubnetRoutes contains all subnet routes for the node, including
+	// the default route (0.0.0.0/0 or ::/0) if this node is an exit node.
+	if advertisingRoutes {
+		// Check for the presence of a Docker interface and warn if it's found
+		// on the system.
+		//
+		// TODO(andrew-d): do a better job at detecting Docker, e.g. by looking
+		// for it in the $PATH or by checking for the presence of the Docker
+		// socket/daemon/etc.
+		ifstate := r.netMon.InterfaceState()
+		if _, found := ifstate.Interface["docker0"]; found {
+			r.health.SetWarnable(warnStatefulFilteringWithDocker, fmt.Errorf(""+
+				"Stateful filtering is enabled and Docker was detected; this may prevent Docker containers "+
+				"on this host from connecting to Tailscale nodes. "+
+				"See https://tailscale.com/s/stateful-docker",
+			))
+			return
+		}
+	}
+
+	// If we get here, then we have no warnings; clear anything existing.
+	r.health.SetWarnable(warnStatefulFilteringWithDocker, nil)
 }
 
 // UpdateMagicsockPort implements the Router interface.
@@ -416,7 +493,12 @@ func (r *linuxRouter) UpdateMagicsockPort(port uint16, network string) error {
 	case "udp4":
 		magicsockPort = &r.magicsockPortV4
 	case "udp6":
-		if !r.nfr.HasIPV6() {
+		// Skip setting up MagicSock port if the host does not support
+		// IPv6. MagicSock IPv6 port needs a filter rule to function. In
+		// some cases (hosts with partial iptables support) filter
+		// tables are not supported, so skip setting up the port for
+		// those hosts too.
+		if !r.getV6FilteringAvailable() {
 			return nil
 		}
 		magicsockPort = &r.magicsockPortV6
@@ -455,7 +537,7 @@ func (r *linuxRouter) UpdateMagicsockPort(port uint16, network string) error {
 // reflect the new mode, and r.snatSubnetRoutes is updated to reflect
 // the current state of subnet SNATing.
 func (r *linuxRouter) setNetfilterMode(mode preftype.NetfilterMode) error {
-	if distro.Get() == distro.Synology {
+	if !platformCanNetfilter() {
 		mode = netfilterOff
 	}
 
@@ -523,7 +605,7 @@ func (r *linuxRouter) setNetfilterMode(mode preftype.NetfilterMode) error {
 					return fmt.Errorf("could not add magicsock port rule v4: %w", err)
 				}
 			}
-			if r.magicsockPortV6 != 0 && r.nfr.HasIPV6() {
+			if r.magicsockPortV6 != 0 && r.getV6FilteringAvailable() {
 				if err := r.nfr.AddMagicsockPortRule(r.magicsockPortV6, "udp6"); err != nil {
 					return fmt.Errorf("could not add magicsock port rule v6: %w", err)
 				}
@@ -563,7 +645,7 @@ func (r *linuxRouter) setNetfilterMode(mode preftype.NetfilterMode) error {
 					return fmt.Errorf("could not add magicsock port rule v4: %w", err)
 				}
 			}
-			if r.magicsockPortV6 != 0 && r.nfr.HasIPV6() {
+			if r.magicsockPortV6 != 0 && r.getV6FilteringAvailable() {
 				if err := r.nfr.AddMagicsockPortRule(r.magicsockPortV6, "udp6"); err != nil {
 					return fmt.Errorf("could not add magicsock port rule v6: %w", err)
 				}
@@ -594,13 +676,20 @@ func (r *linuxRouter) setNetfilterMode(mode preftype.NetfilterMode) error {
 
 	for cidr := range r.addrs {
 		if err := r.addLoopbackRule(cidr.Addr()); err != nil {
-			return err
+			return fmt.Errorf("error adding loopback rule: %w", err)
 		}
 	}
 
 	return nil
 }
 
+// getV6FilteringAvailable returns true if the router is able to setup the
+// required tailscale filter rules for IPv6.
+func (r *linuxRouter) getV6FilteringAvailable() bool {
+	return r.nfr.HasIPV6() && r.nfr.HasIPV6Filter()
+}
+
+// getV6Available returns true if the host supports IPv6.
 func (r *linuxRouter) getV6Available() bool {
 	return r.nfr.HasIPV6()
 }
@@ -663,6 +752,9 @@ func (r *linuxRouter) addLoopbackRule(addr netip.Addr) error {
 	if r.netfilterMode == netfilterOff {
 		return nil
 	}
+	if addr.Is6() && !r.nfr.HasIPV6Filter() {
+		return nil
+	}
 
 	if err := r.nfr.AddLoopbackRule(addr); err != nil {
 		return err
@@ -674,6 +766,9 @@ func (r *linuxRouter) addLoopbackRule(addr netip.Addr) error {
 // traffic to a Tailscale IP.
 func (r *linuxRouter) delLoopbackRule(addr netip.Addr) error {
 	if r.netfilterMode == netfilterOff {
+		return nil
+	}
+	if addr.Is6() && !r.nfr.HasIPV6Filter() {
 		return nil
 	}
 
@@ -888,6 +983,28 @@ func (r *linuxRouter) upInterface() error {
 		return fmt.Errorf("bringing interface up, %w", err)
 	}
 	return netlink.LinkSetUp(link)
+}
+
+func (r *linuxRouter) enableIPForwarding() {
+	sysctls := map[string]string{
+		"net.ipv4.ip_forward":          "1",
+		"net.ipv6.conf.all.forwarding": "1",
+	}
+	for k, v := range sysctls {
+		if err := writeSysctl(k, v); err != nil {
+			r.logf("warning: %v", k, v, err)
+			continue
+		}
+		r.logf("sysctl(%v=%v): ok", k, v)
+	}
+}
+
+func writeSysctl(key, val string) error {
+	fn := "/proc/sys/" + strings.Replace(key, ".", "/", -1)
+	if err := os.WriteFile(fn, []byte(val), 0644); err != nil {
+		return fmt.Errorf("sysctl(%v=%v): %v", key, val, err)
+	}
+	return nil
 }
 
 // downInterface sets the tunnel interface administratively down.
@@ -1277,6 +1394,26 @@ func (r *linuxRouter) delSNATRule() error {
 	return nil
 }
 
+// addStatefulRule adds a netfilter rule to perform stateful filtering from
+// subnets onto the tailnet.
+func (r *linuxRouter) addStatefulRule() error {
+	if r.netfilterMode == netfilterOff {
+		return nil
+	}
+
+	return r.nfr.AddStatefulRule(r.tunname)
+}
+
+// delStatefulRule removes the netfilter rule to perform stateful filtering
+// from subnets onto the tailnet.
+func (r *linuxRouter) delStatefulRule() error {
+	if r.netfilterMode == netfilterOff {
+		return nil
+	}
+
+	return r.nfr.DelStatefulRule(r.tunname)
+}
+
 // cidrDiff calls add and del as needed to make the set of prefixes in
 // old and new match. Returns a map reflecting the actual new state
 // (which may be somewhere in between old and new if some commands
@@ -1347,12 +1484,27 @@ func normalizeCIDR(cidr netip.Prefix) string {
 	return cidr.Masked().String()
 }
 
-// cleanup removes all the rules and routes that were added by the linux router.
-// The function calls cleanup for both iptables and nftables since which ever
-// netfilter runner is used, the cleanup function for the other one doesn't do anything.
-func cleanup(logf logger.Logf, interfaceName string) {
-	if interfaceName != "userspace-networking" {
-		linuxfw.IPTablesCleanup(logf)
+// platformCanNetfilter reports whether the current distro/environment supports
+// running iptables/nftables commands.
+func platformCanNetfilter() bool {
+	switch distro.Get() {
+	case distro.Synology:
+		// Synology doesn't support iptables or nftables. Attempting to run it
+		// just blocks for a long time while it logs about failures.
+		//
+		// See https://github.com/tailscale/tailscale/issues/11737 for one such
+		// prior regression where we tried to run iptables on Synology.
+		return false
+	}
+	return true
+}
+
+// cleanUp removes all the rules and routes that were added by the linux router.
+// The function calls cleanUp for both iptables and nftables since which ever
+// netfilter runner is used, the cleanUp function for the other one doesn't do anything.
+func cleanUp(logf logger.Logf, interfaceName string) {
+	if interfaceName != "userspace-networking" && platformCanNetfilter() {
+		linuxfw.IPTablesCleanUp(logf)
 		linuxfw.NfTablesCleanUp(logf)
 	}
 }

@@ -4,6 +4,7 @@
 package setec
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,7 +23,7 @@ import (
 
 // Store is a store that provides named secrets.
 type Store struct {
-	client      Client // API client
+	client      StoreClient // API client
 	logf        logger.Logf
 	cache       Cache
 	allowLookup bool
@@ -71,7 +72,7 @@ func (s *Store) Metrics() *expvar.Map {
 type StoreConfig struct {
 	// Client is the API client used to fetch secrets from the service.
 	// The service URL must be non-empty.
-	Client Client
+	Client StoreClient
 
 	// Secrets are the names of secrets this Store should retrieve.
 	//
@@ -107,7 +108,10 @@ type StoreConfig struct {
 	Cache Cache
 
 	// PollInterval is the interval at which the store will poll the service for
-	// updated secret values. If zero or negative, a default value is used.
+	// updated secret values. If zero, a default value is used. If negative, the
+	// store does not automatically poll and the caller must explicitly call the
+	// Refresh method to effect an update.
+	//
 	// This field is ignored if PollTicker is set.
 	PollInterval time.Duration
 
@@ -137,7 +141,7 @@ func (c StoreConfig) logger() logger.Logf {
 }
 
 func (c StoreConfig) pollInterval() time.Duration {
-	if c.PollInterval <= 0 {
+	if c.PollInterval == 0 {
 		return 1 * time.Hour
 	}
 	return c.PollInterval
@@ -170,8 +174,8 @@ func (c StoreConfig) timeNow() func() time.Time {
 // values are accepted even if stale, as long as there is a value for each of
 // the secrets in cfg.
 func NewStore(ctx context.Context, cfg StoreConfig) (*Store, error) {
-	if cfg.Client.Server == "" {
-		return nil, errors.New("no service URL is set")
+	if cfg.Client == nil {
+		return nil, errors.New("no service client is set")
 	}
 
 	secrets, structs, err := cfg.secretNames()
@@ -240,7 +244,7 @@ func NewStore(ctx context.Context, cfg StoreConfig) (*Store, error) {
 
 	// Plumb secrets in to struct fields, if necessary.
 	for _, fi := range structs {
-		if err := fi.Apply(s); err != nil {
+		if err := fi.Apply(ctx, s); err != nil {
 			return nil, fmt.Errorf("apply secrets to struct: %w", err)
 		}
 	}
@@ -253,7 +257,12 @@ func NewStore(ctx context.Context, cfg StoreConfig) (*Store, error) {
 	done := make(chan struct{})
 	s.done = done
 
-	go s.run(pctx, cfg.pollInterval(), done)
+	if pi := cfg.pollInterval(); pi > 0 {
+		go s.run(pctx, pi, done)
+	} else {
+		close(done) // unblock shutdown, which will wait for this
+		s.logf("[store] automatic polling for new values is disabled")
+	}
 
 	return s, nil
 }
@@ -294,9 +303,21 @@ func (s *Store) Refresh(ctx context.Context) error {
 	}
 }
 
-// Secret returns a fetcher for the named secret. It returns nil if name does
-// not correspond to one of the secrets known by s.
+// Secret returns a fetcher for the named secret.
+//
+// If s has lookups enabled, Secret returns nil for an unknown name.
+// Otherwise, Secret panics for an unknown name.
 func (s *Store) Secret(name string) Secret {
+	sec := s.secretOrNil(name)
+	if sec == nil && !s.allowLookup {
+		panic(fmt.Sprintf("secret %q not found in StoreConfig with lookup disabled", name))
+	}
+	return sec
+}
+
+// secretOrNil returns the fetcher for the named secret, or nil of the name is
+// not known by s.
+func (s *Store) secretOrNil(name string) Secret {
 	s.active.Lock()
 	defer s.active.Unlock()
 	return s.secretLocked(name)
@@ -330,47 +351,82 @@ func (s *Store) secretLocked(name string) Secret {
 // latest active version of the secret from the service and either adds it to
 // the collection or reports an error.  LookupSecret does not automatically
 // retry in case of errors.
-func (s *Store) LookupSecret(name string) (Secret, error) {
-	if f := s.Secret(name); f != nil {
+func (s *Store) LookupSecret(ctx context.Context, name string) (Secret, error) {
+	f := s.secretOrNil(name)
+	if f != nil {
 		return f, nil
 	} else if !s.allowLookup {
 		return nil, errors.New("lookup is not enabled")
 	}
-	return s.lookupSecretInternal(name)
+	return s.lookupSecretInternal(ctx, name)
 }
 
 // lookupSecretInternal fetches the specified secret from the service and,
 // if successful, installs it into the active set.
 // The caller must not hold the s.active lock; the call to the service is
 // performed outside the lock to avoid stalling other readers.
-func (s *Store) lookupSecretInternal(name string) (Secret, error) {
-	// Impose a loose deadline so requests do not stall forever if the
-	// infrastructure is farkakte.
-	getCtx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
-	defer cancel()
-	sv, err := s.client.Get(getCtx, name)
-	if err != nil {
-		return nil, fmt.Errorf("lookup %q: %w", name, err)
-	}
+func (s *Store) lookupSecretInternal(ctx context.Context, name string) (Secret, error) {
+	// When lookups are enabled, multiple goroutines may race for the right to
+	// grab and cache a given secret, so singleflight the lookup for each secret
+	// under its own marker. The "lookup:" prefix here ensures we don't collide
+	// with the "poll" label used by periodic updates.
+	//
+	// Note that the winner of the race on the singleflight may time out early,
+	// in which case we want to retry (up to a safety limit) when we discover
+	// the result was due to a context cancellation other than our own.
+	for {
+		v, err, _ := s.single.Do("lookup:"+name, func() (any, error) {
+			// If the winning caller's context doesn't already have a deadline,
+			// impose a safety fallback so requests do not stall forever if the
+			// infrastructure is farkakte.
+			dctx := ctx
+			if _, ok := ctx.Deadline(); !ok {
+				var cancel context.CancelFunc
+				dctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
+				defer cancel()
+			}
 
-	s.active.Lock()
-	defer s.active.Unlock()
-	s.active.m[name] = &cachedSecret{Secret: sv, LastAccess: s.timeNow().Unix()}
-	if err := s.flushCacheLocked(); err != nil {
-		s.logf("WARNING: error flushing cache: %v", err)
+			sv, err := s.client.Get(dctx, name)
+			if err != nil {
+				return nil, fmt.Errorf("lookup %q: %w", name, err)
+			}
+
+			s.active.Lock()
+			defer s.active.Unlock()
+			s.active.m[name] = &cachedSecret{Secret: sv, LastAccess: s.timeNow().Unix()}
+			if err := s.flushCacheLocked(); err != nil {
+				s.logf("WARNING: error flushing cache: %v", err)
+			}
+			s.logf("[store] added new undeclared secret %q", name)
+			return s.secretLocked(name), nil
+		})
+		if err == nil {
+			return v.(Secret), nil
+		} else if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			if ctx.Err() == nil {
+				// This wasn't us timing out, try again.
+				continue
+			}
+		}
+		// Reaching here, either we won the singleflight race and timed out, or
+		// we got a real error from the winner.
+		return nil, err
 	}
-	s.logf("[store] added new undeclared secret %q", name)
-	return s.secretLocked(name), nil
 }
 
-// Watcher returns a watcher for the named secret. It returns a zero Watcher if
-// name does not correspond to one of the secrets known by s.
+// Watcher returns a watcher for the named secret.
+//
+// If s has lookups enabled, Watcher returns a zero Watcher for an unknown name.
+// Otherwise, Watcher panics for an unknown name.
 func (s *Store) Watcher(name string) Watcher {
 	s.active.Lock()
 	defer s.active.Unlock()
 	secret := s.secretLocked(name)
 	if secret == nil {
-		return Watcher{}
+		if s.allowLookup {
+			return Watcher{}
+		}
+		panic(fmt.Sprintf("secret %q not found in StoreConfig with lookup disabled", name))
 	}
 	w := Watcher{ready: make(chan struct{}, 1), secret: secret}
 	s.active.w[name] = append(s.active.w[name], w)
@@ -382,7 +438,7 @@ func (s *Store) Watcher(name string) Watcher {
 // latest active version of the secret from the service and either adds it to
 // the collection or reports an error.
 // LookupWatcher does not automatically retry in case of errors.
-func (s *Store) LookupWatcher(name string) (Watcher, error) {
+func (s *Store) LookupWatcher(ctx context.Context, name string) (Watcher, error) {
 	s.active.Lock()
 	defer s.active.Unlock()
 	var secret Secret
@@ -396,7 +452,7 @@ func (s *Store) LookupWatcher(name string) (Watcher, error) {
 		got, err := func() (Secret, error) {
 			s.active.Unlock() // NOTE: This order is intended.
 			defer s.active.Lock()
-			return s.lookupSecretInternal(name)
+			return s.lookupSecretInternal(ctx, name)
 		}()
 		if err != nil {
 			return Watcher{}, err
@@ -412,11 +468,19 @@ func (s *Store) LookupWatcher(name string) (Watcher, error) {
 // A Secret is a function that fetches the current active value of a secret.
 // The caller should not cache the value returned; the function does not block
 // and will always report a valid (if possibly stale) result.
+//
+// The Secret retains ownership of the bytes returned, but the store will never
+// modify the contents of the secret, so it is safe to share the slice without
+// copying as long as the caller does not modify them.
 type Secret func() []byte
 
 // Get returns the current active value of the secret.  It is a legibility
 // alias for calling the function.
 func (s Secret) Get() []byte { return s() }
+
+// GetString returns a copy of the current active value of the secret as a
+// string.
+func (s Secret) GetString() string { return string(s()) }
 
 // StaticSecret returns a Secret that vends a static string value.
 // This is useful as a placeholder for development, migration, and testing.
@@ -425,7 +489,9 @@ func StaticSecret(value string) Secret {
 	return func() []byte { return []byte(value) }
 }
 
-// StaticFile returns a Secret that vends the contents of path.
+// StaticFile returns a Secret that vends the contents of path.  The contents
+// of the file are returned exactly as stored.
+//
 // This is useful as a placeholder for development, migration, and testing.
 // The value reported by this secret is the contents of path at the
 // time this function is called, and never changes.
@@ -435,6 +501,20 @@ func StaticFile(path string) (Secret, error) {
 		return nil, fmt.Errorf("reading static secret: %w", err)
 	}
 	return func() []byte { return bs }, nil
+}
+
+// StaticTextFile returns a secret that vends the contents of path, which are
+// treated as text with leading and trailing whitespace trimmed.
+//
+// This is useful as a placeholder for development, migration, and testing.
+// The value reported by a static secret never changes.
+func StaticTextFile(path string) (Secret, error) {
+	bs, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading static secret: %w", err)
+	}
+	text := bytes.TrimSpace(bs)
+	return func() []byte { return text }, nil
 }
 
 // hasExpired reports whether cs is an undeclared secret whose last access time
@@ -610,6 +690,11 @@ func (s *Store) initializeActive(ctx context.Context) error {
 	const baseRetryInterval = 1 * time.Millisecond
 	retryWait := baseRetryInterval
 
+	// As a special case, if the client is specifically a FileClient, we know
+	// any secrets that are missing at startup will never become available.
+	// In that case, report an error back to the caller so startup can fail.
+	_, waitingIsPointless := s.client.(*FileClient)
+
 	for {
 		var missing int
 		for name, cs := range s.active.m {
@@ -636,6 +721,10 @@ func (s *Store) initializeActive(ctx context.Context) error {
 		}
 		if missing == 0 {
 			return nil // succeeded for all values
+		}
+
+		if waitingIsPointless {
+			return fmt.Errorf("missing %d unavailable secrets", missing)
 		}
 
 		// Otherwise, wait a bit and try again, with gentle backoff.
@@ -691,6 +780,9 @@ func (w Watcher) notify() {
 	default:
 	}
 }
+
+// IsValid reports whether w is valid, meaning that it has a secret available.
+func (w Watcher) IsValid() bool { return w.secret != nil }
 
 // NewUpdater creates a new Updater that tracks updates to a value based on new
 // secret versions delivered to w.  The newValue function returns a new value

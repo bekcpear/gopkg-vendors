@@ -28,7 +28,7 @@ type Client struct {
 	DoHTTP func(*http.Request) (*http.Response, error)
 }
 
-func do[RESP, REQ any](ctx context.Context, c *Client, path string, req REQ) (RESP, error) {
+func do[RESP, REQ any](ctx context.Context, c Client, path string, req REQ) (RESP, error) {
 	var resp RESP
 
 	bs, err := json.Marshal(req)
@@ -84,14 +84,18 @@ func do[RESP, REQ any](ctx context.Context, c *Client, path string, req REQ) (RE
 	return resp, nil
 }
 
-// List fetches a list of secret names and associated metadata (but
-// not the secret values themselves).
-func (c *Client) List(ctx context.Context) ([]*api.SecretInfo, error) {
+// List fetches a list of secret names and associated metadata for all those
+// secrets on which the caller has "info" access. List does not report the
+// secret values themselves. If the caller does not have "info" access to any
+// secrets, List reports zero values without error.
+func (c Client) List(ctx context.Context) ([]*api.SecretInfo, error) {
 	return do[[]*api.SecretInfo](ctx, c, "/api/list", api.ListRequest{})
 }
 
-// Get fetches a secret value by name.
-func (c *Client) Get(ctx context.Context, name string) (*api.SecretValue, error) {
+// Get fetches the current active secret value for name.
+//
+// Access requirement: "get"
+func (c Client) Get(ctx context.Context, name string) (*api.SecretValue, error) {
 	return do[*api.SecretValue](ctx, c, "/api/get", api.GetRequest{
 		Name:    name,
 		Version: api.SecretVersionDefault,
@@ -101,8 +105,14 @@ func (c *Client) Get(ctx context.Context, name string) (*api.SecretValue, error)
 // GetIfChanged fetches a secret value by name, if the active version on the
 // server is different from oldVersion. If the active version on the server is
 // the same as oldVersion, it reports api.ErrValueNotChanged without returning
-// a secret.
-func (c *Client) GetIfChanged(ctx context.Context, name string, oldVersion api.SecretVersion) (*api.SecretValue, error) {
+// a secret. As a special case, if oldVersion == 0 then GetIfVersion behaves as
+// Get and retrieves the current active version.
+//
+// Access requirement: "get"
+func (c Client) GetIfChanged(ctx context.Context, name string, oldVersion api.SecretVersion) (*api.SecretValue, error) {
+	if oldVersion == api.SecretVersionDefault {
+		return c.Get(ctx, name)
+	}
 	return do[*api.SecretValue](ctx, c, "/api/get", api.GetRequest{
 		Name:            name,
 		Version:         oldVersion,
@@ -110,8 +120,11 @@ func (c *Client) GetIfChanged(ctx context.Context, name string, oldVersion api.S
 	})
 }
 
-// Get fetches a secret value by name and version.
-func (c *Client) GetVersion(ctx context.Context, name string, version api.SecretVersion) (*api.SecretValue, error) {
+// Get fetches a secret value by name and version. If version == 0, GetVersion
+// retrieves the current active version.
+//
+// Access requirement: "get"
+func (c Client) GetVersion(ctx context.Context, name string, version api.SecretVersion) (*api.SecretValue, error) {
 	return do[*api.SecretValue](ctx, c, "/api/get", api.GetRequest{
 		Name:    name,
 		Version: version,
@@ -119,16 +132,19 @@ func (c *Client) GetVersion(ctx context.Context, name string, version api.Secret
 }
 
 // Info fetches metadata for a given secret name.
-func (c *Client) Info(ctx context.Context, name string) (*api.SecretInfo, error) {
+//
+// Access requirement: "info"
+func (c Client) Info(ctx context.Context, name string) (*api.SecretInfo, error) {
 	return do[*api.SecretInfo](ctx, c, "/api/info", api.InfoRequest{
 		Name: name,
 	})
 }
 
-// Put creates a secret called name, with the given value. If a secret
-// called name already exist, the value is saved as a new inactive
-// version.
-func (c *Client) Put(ctx context.Context, name string, value []byte) (version api.SecretVersion, err error) {
+// Put creates a secret called name, with the given value. If a secret called
+// name already exist, the value is saved as a new inactive version.
+//
+// Access requirement: "put"
+func (c Client) Put(ctx context.Context, name string, value []byte) (version api.SecretVersion, err error) {
 	return do[api.SecretVersion](ctx, c, "/api/put", api.PutRequest{
 		Name:  name,
 		Value: value,
@@ -136,7 +152,9 @@ func (c *Client) Put(ctx context.Context, name string, value []byte) (version ap
 }
 
 // Activate changes the active version of the secret called name to version.
-func (c *Client) Activate(ctx context.Context, name string, version api.SecretVersion) error {
+//
+// Access requirement: "activate"
+func (c Client) Activate(ctx context.Context, name string, version api.SecretVersion) error {
 	_, err := do[struct{}](ctx, c, "/api/activate", api.ActivateRequest{
 		Name:    name,
 		Version: version,
@@ -145,7 +163,12 @@ func (c *Client) Activate(ctx context.Context, name string, version api.SecretVe
 }
 
 // DeleteVersion deletes the specified version of the named secret.
-func (c *Client) DeleteVersion(ctx context.Context, name string, version api.SecretVersion) error {
+//
+// Note: DeleteVersion will report an error if the caller attempts to delete
+// the active version, even if they have permission to do so.
+//
+// Access requirement: "delete"
+func (c Client) DeleteVersion(ctx context.Context, name string, version api.SecretVersion) error {
 	_, err := do[struct{}](ctx, c, "/api/delete-version", api.DeleteVersionRequest{
 		Name:    name,
 		Version: version,
@@ -154,7 +177,12 @@ func (c *Client) DeleteVersion(ctx context.Context, name string, version api.Sec
 }
 
 // Delete deletes all versions of the named secret.
-func (c *Client) Delete(ctx context.Context, name string) error {
+//
+// Note: Delete will delete all versions of the secret, including the active
+// one, if the caller has permission to do so.
+//
+// Access requirement: "delete"
+func (c Client) Delete(ctx context.Context, name string) error {
 	_, err := do[struct{}](ctx, c, "/api/delete", api.DeleteRequest{
 		Name: name,
 	})
