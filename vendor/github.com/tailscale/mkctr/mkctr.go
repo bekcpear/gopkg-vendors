@@ -9,6 +9,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,12 +18,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/daemon"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -56,13 +59,10 @@ func parseFiles(s string) (map[string]string, error) {
 	return ret, nil
 }
 
-func parseRepos(reg, tags []string) ([]name.Reference, error) {
-	var refs []name.Reference
+func parseRepos(reg, tags []string) ([]name.Tag, error) {
+	var refs []name.Tag
 	for _, rs := range reg {
 		r, err := name.NewRepository(rs)
-		if err != nil {
-			return nil, err
-		}
 		if err != nil {
 			return nil, err
 		}
@@ -77,7 +77,7 @@ type buildParams struct {
 	baseImage   string
 	goPaths     map[string]string
 	staticFiles map[string]string
-	imageRefs   []name.Reference
+	imageRefs   []name.Tag
 	publish     bool
 	ldflags     string
 	gotags      string
@@ -95,7 +95,7 @@ func main() {
 		ldflagsArg = flag.String("ldflags", "", "the --ldflags value to pass to go")
 		gotags     = flag.String("gotags", "", "the --tags value to pass to go")
 		push       = flag.Bool("push", false, "publish the image")
-		target     = flag.String("target", "", "build for a specific env (options: flyio)")
+		target     = flag.String("target", "", "build for a specific env (options: flyio, local)")
 		verbose    = flag.Bool("v", false, "verbose build output")
 	)
 	flag.Parse()
@@ -109,7 +109,7 @@ func main() {
 		log.Fatal("baseImage must be set")
 	}
 	switch *target {
-	case "", "flyio":
+	case "", "flyio", "local":
 	default:
 		log.Fatalf("unsupported target %q", *target)
 	}
@@ -158,9 +158,28 @@ func fetchBaseImage(baseImage string, opts ...remote.Option) (*remote.Descriptor
 	return desc, nil
 }
 
+// canRunLocal reports whether the platform can run the binary locally, to be
+// used by the local target.
+func canRunLocal(p v1.Platform) bool {
+	if p.OS != "linux" {
+		return false
+	}
+	if runtime.GOOS == "linux" {
+		return p.Architecture == runtime.GOARCH
+	}
+	if runtime.GOOS == "darwin" {
+		// macOS can run amd64 linux binaries in docker.
+		return p.Architecture == "amd64"
+	}
+	return false
+}
+
 func verifyPlatform(p v1.Platform, target string) error {
 	if p.OS != "linux" {
 		return fmt.Errorf("unsupported OS: %v", p.OS)
+	}
+	if target == "local" && !canRunLocal(p) {
+		return fmt.Errorf("not required for target %q", target)
 	}
 	if target == "flyio" && p.Architecture != "amd64" {
 		return fmt.Errorf("not required for target %q", target)
@@ -211,6 +230,12 @@ func fetchAndBuild(bp *buildParams) error {
 		}
 
 		for _, r := range bp.imageRefs {
+			if bp.target == "local" {
+				if err := loadLocalImage(logf, r, img); err != nil {
+					return err
+				}
+				continue
+			}
 			logf("pushing to %v", r)
 			if err := remote.Write(r, img, remoteOpts...); err != nil {
 				return err
@@ -293,12 +318,21 @@ func fetchAndBuild(bp *buildParams) error {
 		}
 
 		for _, r := range bp.imageRefs {
+			if bp.target == "local" {
+				if err := loadLocalImage(logf, r, img); err != nil {
+					return err
+				}
+				continue
+			}
 			logf("pushing to %v", r)
 			if err := remote.Write(r, img, remoteOpts...); err != nil {
 				return err
 			}
 		}
 		return nil
+	}
+	if bp.target == "local" {
+		return fmt.Errorf("cannot build multi-platform images for local target")
 	}
 	// Generate a new 'fat manifest' with all the platform images. If we are
 	// at this point the base was either a Dokcer manifest list or an OCI
@@ -509,5 +543,41 @@ func tarFile(tw *tar.Writer, src, dst string) error {
 	if _, err := io.Copy(tw, file); err != nil {
 		return err
 	}
+	return nil
+}
+
+func loadLocalImage(logf logf, tag name.Tag, img v1.Image) error {
+	if _, err := daemon.Write(tag, img); err == nil {
+		return nil
+	}
+
+	// Assume we failed because the docker daemon API is not available, try a
+	// CLI option instead.
+	var bin string
+	if p, err := exec.LookPath("docker"); err == nil {
+		bin = p
+	} else if p, err = exec.LookPath("podman"); err == nil {
+		bin = p
+	} else if p, err = exec.LookPath("nerdctl"); err == nil {
+		bin = p
+	} else {
+		return errors.New("no suitable docker CLI-compatible binary found")
+	}
+
+	cmd := exec.Command(bin, "image", "load")
+	imgReader, imgWriter := io.Pipe()
+	defer imgReader.Close()
+	go func() {
+		defer imgWriter.Close()
+		tarball.Write(tag, img, imgWriter)
+	}()
+	cmd.Stdin = imgReader
+	logf("running command: %s", cmd.String())
+	out, err := cmd.CombinedOutput()
+	logf("output: %s", string(out))
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
