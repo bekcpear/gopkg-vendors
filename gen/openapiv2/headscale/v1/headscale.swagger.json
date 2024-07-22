@@ -495,6 +495,59 @@
         ]
       }
     },
+    "/api/v1/policy": {
+      "get": {
+        "summary": "--- Policy start ---",
+        "operationId": "HeadscaleService_GetPolicy",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1GetPolicyResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "tags": [
+          "HeadscaleService"
+        ]
+      },
+      "put": {
+        "operationId": "HeadscaleService_SetPolicy",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1SetPolicyResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/v1SetPolicyRequest"
+            }
+          }
+        ],
+        "tags": [
+          "HeadscaleService"
+        ]
+      }
+    },
     "/api/v1/preauthkey": {
       "get": {
         "operationId": "HeadscaleService_ListPreAuthKeys",
@@ -1091,6 +1144,18 @@
         }
       }
     },
+    "v1GetPolicyResponse": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
     "v1GetRoutesResponse": {
       "type": "object",
       "properties": {
@@ -1341,6 +1406,26 @@
           "format": "date-time"
         },
         "deletedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "v1SetPolicyRequest": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "type": "string"
+        }
+      }
+    },
+    "v1SetPolicyResponse": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "type": "string"
+        },
+        "updatedAt": {
           "type": "string",
           "format": "date-time"
         }

@@ -46,6 +46,8 @@ const (
 	HeadscaleService_ExpireApiKey_FullMethodName     = "/headscale.v1.HeadscaleService/ExpireApiKey"
 	HeadscaleService_ListApiKeys_FullMethodName      = "/headscale.v1.HeadscaleService/ListApiKeys"
 	HeadscaleService_DeleteApiKey_FullMethodName     = "/headscale.v1.HeadscaleService/DeleteApiKey"
+	HeadscaleService_GetPolicy_FullMethodName        = "/headscale.v1.HeadscaleService/GetPolicy"
+	HeadscaleService_SetPolicy_FullMethodName        = "/headscale.v1.HeadscaleService/SetPolicy"
 )
 
 // HeadscaleServiceClient is the client API for HeadscaleService service.
@@ -84,6 +86,9 @@ type HeadscaleServiceClient interface {
 	ExpireApiKey(ctx context.Context, in *ExpireApiKeyRequest, opts ...grpc.CallOption) (*ExpireApiKeyResponse, error)
 	ListApiKeys(ctx context.Context, in *ListApiKeysRequest, opts ...grpc.CallOption) (*ListApiKeysResponse, error)
 	DeleteApiKey(ctx context.Context, in *DeleteApiKeyRequest, opts ...grpc.CallOption) (*DeleteApiKeyResponse, error)
+	// --- Policy start ---
+	GetPolicy(ctx context.Context, in *GetPolicyRequest, opts ...grpc.CallOption) (*GetPolicyResponse, error)
+	SetPolicy(ctx context.Context, in *SetPolicyRequest, opts ...grpc.CallOption) (*SetPolicyResponse, error)
 }
 
 type headscaleServiceClient struct {
@@ -364,6 +369,26 @@ func (c *headscaleServiceClient) DeleteApiKey(ctx context.Context, in *DeleteApi
 	return out, nil
 }
 
+func (c *headscaleServiceClient) GetPolicy(ctx context.Context, in *GetPolicyRequest, opts ...grpc.CallOption) (*GetPolicyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetPolicyResponse)
+	err := c.cc.Invoke(ctx, HeadscaleService_GetPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *headscaleServiceClient) SetPolicy(ctx context.Context, in *SetPolicyRequest, opts ...grpc.CallOption) (*SetPolicyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetPolicyResponse)
+	err := c.cc.Invoke(ctx, HeadscaleService_SetPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HeadscaleServiceServer is the server API for HeadscaleService service.
 // All implementations must embed UnimplementedHeadscaleServiceServer
 // for forward compatibility
@@ -400,6 +425,9 @@ type HeadscaleServiceServer interface {
 	ExpireApiKey(context.Context, *ExpireApiKeyRequest) (*ExpireApiKeyResponse, error)
 	ListApiKeys(context.Context, *ListApiKeysRequest) (*ListApiKeysResponse, error)
 	DeleteApiKey(context.Context, *DeleteApiKeyRequest) (*DeleteApiKeyResponse, error)
+	// --- Policy start ---
+	GetPolicy(context.Context, *GetPolicyRequest) (*GetPolicyResponse, error)
+	SetPolicy(context.Context, *SetPolicyRequest) (*SetPolicyResponse, error)
 	mustEmbedUnimplementedHeadscaleServiceServer()
 }
 
@@ -487,6 +515,12 @@ func (UnimplementedHeadscaleServiceServer) ListApiKeys(context.Context, *ListApi
 }
 func (UnimplementedHeadscaleServiceServer) DeleteApiKey(context.Context, *DeleteApiKeyRequest) (*DeleteApiKeyResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteApiKey not implemented")
+}
+func (UnimplementedHeadscaleServiceServer) GetPolicy(context.Context, *GetPolicyRequest) (*GetPolicyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetPolicy not implemented")
+}
+func (UnimplementedHeadscaleServiceServer) SetPolicy(context.Context, *SetPolicyRequest) (*SetPolicyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetPolicy not implemented")
 }
 func (UnimplementedHeadscaleServiceServer) mustEmbedUnimplementedHeadscaleServiceServer() {}
 
@@ -987,6 +1021,42 @@ func _HeadscaleService_DeleteApiKey_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HeadscaleService_GetPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HeadscaleServiceServer).GetPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HeadscaleService_GetPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HeadscaleServiceServer).GetPolicy(ctx, req.(*GetPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HeadscaleService_SetPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HeadscaleServiceServer).SetPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HeadscaleService_SetPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HeadscaleServiceServer).SetPolicy(ctx, req.(*SetPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // HeadscaleService_ServiceDesc is the grpc.ServiceDesc for HeadscaleService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1101,6 +1171,14 @@ var HeadscaleService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteApiKey",
 			Handler:    _HeadscaleService_DeleteApiKey_Handler,
+		},
+		{
+			MethodName: "GetPolicy",
+			Handler:    _HeadscaleService_GetPolicy_Handler,
+		},
+		{
+			MethodName: "SetPolicy",
+			Handler:    _HeadscaleService_SetPolicy_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
