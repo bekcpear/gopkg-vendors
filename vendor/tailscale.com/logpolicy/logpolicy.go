@@ -31,6 +31,7 @@ import (
 	"tailscale.com/atomicfile"
 	"tailscale.com/envknob"
 	"tailscale.com/health"
+	"tailscale.com/hostinfo"
 	"tailscale.com/log/filelogger"
 	"tailscale.com/logtail"
 	"tailscale.com/logtail/filch"
@@ -463,6 +464,11 @@ func New(collection string, netMon *netmon.Monitor, health *health.Tracker, logf
 // The netMon parameter is optional. It should be specified in environments where
 // Tailscaled is manipulating the routing table.
 func NewWithConfigPath(collection, dir, cmdName string, netMon *netmon.Monitor, health *health.Tracker, logf logger.Logf) *Policy {
+	if hostinfo.IsNATLabGuestVM() {
+		// In NATLab Gokrazy instances, tailscaled comes up concurently with
+		// DHCP and the doesn't have DNS for a while. Wait for DHCP first.
+		awaitGokrazyNetwork()
+	}
 	var lflags int
 	if term.IsTerminal(2) || runtime.GOOS == "windows" {
 		lflags = 0
@@ -709,7 +715,7 @@ func dialContext(ctx context.Context, netw, addr string, netMon *netmon.Monitor,
 	}
 
 	if version.IsWindowsGUI() && strings.HasPrefix(netw, "tcp") {
-		if c, err := safesocket.Connect(""); err == nil {
+		if c, err := safesocket.ConnectContext(ctx, ""); err == nil {
 			fmt.Fprintf(c, "CONNECT %s HTTP/1.0\r\n\r\n", addr)
 			br := bufio.NewReader(c)
 			res, err := http.ReadResponse(br, nil)
@@ -815,4 +821,26 @@ func (noopPretendSuccessTransport) RoundTrip(req *http.Request) (*http.Response,
 		StatusCode: 200,
 		Status:     "200 OK",
 	}, nil
+}
+
+func awaitGokrazyNetwork() {
+	if runtime.GOOS != "linux" || distro.Get() != distro.Gokrazy {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	for {
+		// Before DHCP finishes, the /etc/resolv.conf file has just "#MANUAL".
+		all, _ := os.ReadFile("/etc/resolv.conf")
+		if bytes.Contains(all, []byte("nameserver ")) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }

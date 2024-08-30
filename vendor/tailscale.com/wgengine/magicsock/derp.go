@@ -7,8 +7,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"hash/fnv"
-	"math/rand"
 	"net"
 	"net/netip"
 	"reflect"
@@ -16,6 +14,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/tailscale/wireguard-go/conn"
 	"tailscale.com/derp"
@@ -31,6 +30,7 @@ import (
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/mak"
+	"tailscale.com/util/rands"
 	"tailscale.com/util/sysresources"
 	"tailscale.com/util/testenv"
 )
@@ -41,32 +41,20 @@ import (
 // preferredDERPFrameTime, so update with care.
 const frameReceiveRecordRate = 5 * time.Second
 
-// useDerpRoute reports whether magicsock should enable the DERP
-// return path optimization (Issue 150).
-//
-// By default it's enabled, unless an environment variable
-// or control says to disable it.
-func (c *Conn) useDerpRoute() bool {
-	if b, ok := debugUseDerpRoute().Get(); ok {
-		return b
-	}
-	return c.controlKnobs == nil || !c.controlKnobs.DisableDRPO.Load()
-}
-
 // derpRoute is a route entry for a public key, saying that a certain
-// peer should be available at DERP node derpID, as long as the
-// current connection for that derpID is dc. (but dc should not be
+// peer should be available at DERP regionID, as long as the
+// current connection for that regionID is dc. (but dc should not be
 // used to write directly; it's owned by the read/write loops)
 type derpRoute struct {
-	derpID int
-	dc     *derphttp.Client // don't use directly; see comment above
+	regionID int
+	dc       *derphttp.Client // don't use directly; see comment above
 }
 
 // removeDerpPeerRoute removes a DERP route entry previously added by addDerpPeerRoute.
-func (c *Conn) removeDerpPeerRoute(peer key.NodePublic, derpID int, dc *derphttp.Client) {
+func (c *Conn) removeDerpPeerRoute(peer key.NodePublic, regionID int, dc *derphttp.Client) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	r2 := derpRoute{derpID, dc}
+	r2 := derpRoute{regionID, dc}
 	if r, ok := c.derpRoute[peer]; ok && r == r2 {
 		delete(c.derpRoute, peer)
 	}
@@ -94,7 +82,6 @@ type activeDerp struct {
 }
 
 var (
-	processStartUnixNano     = time.Now().UnixNano()
 	pickDERPFallbackForTests func() int
 )
 
@@ -136,9 +123,8 @@ func (c *Conn) pickDERPFallback() int {
 		return pickDERPFallbackForTests()
 	}
 
-	h := fnv.New64()
-	fmt.Fprintf(h, "%p/%d", c, processStartUnixNano) // arbitrary
-	return ids[rand.New(rand.NewSource(int64(h.Sum64()))).Intn(len(ids))]
+	metricDERPHomeFallback.Add(1)
+	return ids[rands.IntN(uint64(uintptr(unsafe.Pointer(c))), len(ids))]
 }
 
 // This allows existing tests to pass, but allows us to still test the
@@ -161,6 +147,10 @@ func (c *Conn) maybeSetNearestDERP(report *netcheck.Report) (preferredDERP int) 
 	//
 	// For tests, always assume we're connected to control unless we're
 	// explicitly testing this behaviour.
+	//
+	// Despite the above behaviour, ensure that we set the nearest DERP if
+	// we don't currently have one set; any DERP server is better than
+	// none, even if not connected to control.
 	var connectedToControl bool
 	if testenv.InTest() && !checkControlHealthDuringNearestDERPInTests {
 		connectedToControl = true
@@ -169,8 +159,16 @@ func (c *Conn) maybeSetNearestDERP(report *netcheck.Report) (preferredDERP int) 
 	}
 	if !connectedToControl {
 		c.mu.Lock()
-		defer c.mu.Unlock()
-		return c.myDerp
+		myDerp := c.myDerp
+		c.mu.Unlock()
+		if myDerp != 0 {
+			metricDERPHomeNoChangeNoControl.Add(1)
+			return myDerp
+		}
+
+		// Intentionally fall through; we don't have a current DERP, so
+		// as mentioned above selecting one even if not connected is
+		// strictly better than doing nothing.
 	}
 
 	preferredDERP = report.PreferredDERP
@@ -248,14 +246,14 @@ func (c *Conn) startDerpHomeConnectLocked() {
 }
 
 // goDerpConnect starts a goroutine to start connecting to the given
-// DERP node.
+// DERP region ID.
 //
 // c.mu may be held, but does not need to be.
-func (c *Conn) goDerpConnect(node int) {
-	if node == 0 {
+func (c *Conn) goDerpConnect(regionID int) {
+	if regionID == 0 {
 		return
 	}
-	go c.derpWriteChanOfAddr(netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, uint16(node)), key.NodePublic{})
+	go c.derpWriteChanForRegion(regionID, key.NodePublic{})
 }
 
 var (
@@ -312,18 +310,15 @@ func bufferedDerpWritesBeforeDrop() int {
 	return bufferedDerpWrites
 }
 
-// derpWriteChanOfAddr returns a DERP client for fake UDP addresses that
-// represent DERP servers, creating them as necessary. For real UDP
-// addresses, it returns nil.
+// derpWriteChanForRegion returns a channel to which to send DERP packet write
+// requests. It creates a new DERP connection to regionID if necessary.
 //
-// If peer is non-zero, it can be used to find an active reverse
-// path, without using addr.
-func (c *Conn) derpWriteChanOfAddr(addr netip.AddrPort, peer key.NodePublic) chan<- derpWriteRequest {
-	if addr.Addr() != tailcfg.DerpMagicIPAddr {
-		return nil
-	}
-	regionID := int(addr.Port())
-
+// If peer is non-zero, it can be used to find an active reverse path, without
+// using regionID.
+//
+// It returns nil if the network is down, the Conn is closed, or the regionID is
+// not known.
+func (c *Conn) derpWriteChanForRegion(regionID int, peer key.NodePublic) chan<- derpWriteRequest {
 	if c.networkDown() {
 		return nil
 	}
@@ -337,7 +332,7 @@ func (c *Conn) derpWriteChanOfAddr(addr netip.AddrPort, peer key.NodePublic) cha
 		return nil
 	}
 	if c.privateKey.IsZero() {
-		c.logf("magicsock: DERP lookup of %v with no private key; ignoring", addr)
+		c.logf("magicsock: DERP lookup of region %v with no private key; ignoring", regionID)
 		return nil
 	}
 
@@ -358,10 +353,10 @@ func (c *Conn) derpWriteChanOfAddr(addr netip.AddrPort, peer key.NodePublic) cha
 	// perhaps peer's home is Frankfurt, but they dialed our home DERP
 	// node in SF to reach us, so we can reply to them using our
 	// SF connection rather than dialing Frankfurt. (Issue 150)
-	if !peer.IsZero() && c.useDerpRoute() {
+	if !peer.IsZero() {
 		if r, ok := c.derpRoute[peer]; ok {
-			if ad, ok := c.activeDerp[r.derpID]; ok && ad.c == r.dc {
-				c.setPeerLastDerpLocked(peer, r.derpID, regionID)
+			if ad, ok := c.activeDerp[r.regionID]; ok && ad.c == r.dc {
+				c.setPeerLastDerpLocked(peer, r.regionID, regionID)
 				*ad.lastWrite = time.Now()
 				return ad.writeCh
 			}
@@ -443,7 +438,7 @@ func (c *Conn) derpWriteChanOfAddr(addr netip.AddrPort, peer key.NodePublic) cha
 		}()
 	}
 
-	go c.runDerpReader(ctx, addr, dc, wg, startGate)
+	go c.runDerpReader(ctx, regionID, dc, wg, startGate)
 	go c.runDerpWriter(ctx, dc, ch, wg, startGate)
 	go c.derpActiveFunc()
 
@@ -506,7 +501,7 @@ type derpReadResult struct {
 
 // runDerpReader runs in a goroutine for the life of a DERP
 // connection, handling received packets.
-func (c *Conn) runDerpReader(ctx context.Context, derpFakeAddr netip.AddrPort, dc *derphttp.Client, wg *syncs.WaitGroupChan, startGate <-chan struct{}) {
+func (c *Conn) runDerpReader(ctx context.Context, regionID int, dc *derphttp.Client, wg *syncs.WaitGroupChan, startGate <-chan struct{}) {
 	defer wg.Decr()
 	defer dc.Close()
 
@@ -517,7 +512,6 @@ func (c *Conn) runDerpReader(ctx context.Context, derpFakeAddr netip.AddrPort, d
 	}
 
 	didCopy := make(chan struct{}, 1)
-	regionID := int(derpFakeAddr.Port())
 	res := derpReadResult{regionID: regionID}
 	var pkt derp.ReceivedPacket
 	res.copyBuf = func(dst []byte) int {
@@ -940,6 +934,7 @@ func (c *Conn) cleanStaleDerp() {
 		}
 		if ad.lastWrite.Before(tooOld) {
 			c.closeDerpLocked(i, "idle")
+			metricDERPStaleCleaned.Add(1)
 			dirty = true
 		} else {
 			someNonHomeOpen = true

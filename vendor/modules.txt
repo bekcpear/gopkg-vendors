@@ -155,6 +155,14 @@ github.com/cenkalti/backoff/v4
 # github.com/cespare/xxhash/v2 v2.2.0
 ## explicit; go 1.11
 github.com/cespare/xxhash/v2
+# github.com/coder/websocket v1.8.12
+## explicit; go 1.19
+github.com/coder/websocket
+github.com/coder/websocket/internal/bpool
+github.com/coder/websocket/internal/errd
+github.com/coder/websocket/internal/util
+github.com/coder/websocket/internal/wsjs
+github.com/coder/websocket/internal/xsync
 # github.com/containerd/console v1.0.4
 ## explicit; go 1.13
 github.com/containerd/console
@@ -196,7 +204,7 @@ github.com/docker/cli/cli/compose/schema
 github.com/docker/cli/cli/compose/template
 github.com/docker/cli/cli/compose/types
 github.com/docker/cli/opts
-# github.com/docker/docker v26.1.3+incompatible
+# github.com/docker/docker v26.1.4+incompatible
 ## explicit
 github.com/docker/docker/api/types/blkiodev
 github.com/docker/docker/api/types/container
@@ -223,10 +231,10 @@ github.com/felixge/fgprof
 # github.com/fsnotify/fsnotify v1.7.0
 ## explicit; go 1.17
 github.com/fsnotify/fsnotify
-# github.com/fxamacker/cbor/v2 v2.5.0
-## explicit; go 1.12
+# github.com/fxamacker/cbor/v2 v2.6.0
+## explicit; go 1.17
 github.com/fxamacker/cbor/v2
-# github.com/gaissmai/bart v0.4.1
+# github.com/gaissmai/bart v0.11.1
 ## explicit; go 1.21
 github.com/gaissmai/bart
 # github.com/glebarez/go-sqlite v1.22.0
@@ -250,6 +258,7 @@ github.com/go-jose/go-jose/v4/cipher
 github.com/go-jose/go-jose/v4/json
 # github.com/go-json-experiment/json v0.0.0-20231102232822-2e55bd4e08b0
 ## explicit; go 1.21
+github.com/go-json-experiment/json
 github.com/go-json-experiment/json/internal
 github.com/go-json-experiment/json/internal/jsonflags
 github.com/go-json-experiment/json/internal/jsonopts
@@ -539,8 +548,11 @@ github.com/pkg/profile
 # github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 ## explicit
 github.com/pmezard/go-difflib/difflib
-# github.com/prometheus/client_golang v1.18.0
+# github.com/prometheus-community/pro-bing v0.4.0
 ## explicit; go 1.19
+github.com/prometheus-community/pro-bing
+# github.com/prometheus/client_golang v1.19.1
+## explicit; go 1.20
 github.com/prometheus/client_golang/prometheus
 github.com/prometheus/client_golang/prometheus/internal
 github.com/prometheus/client_golang/prometheus/promauto
@@ -548,7 +560,7 @@ github.com/prometheus/client_golang/prometheus/promhttp
 # github.com/prometheus/client_model v0.5.0
 ## explicit; go 1.19
 github.com/prometheus/client_model/go
-# github.com/prometheus/common v0.46.0
+# github.com/prometheus/common v0.48.0
 ## explicit; go 1.20
 github.com/prometheus/common/expfmt
 github.com/prometheus/common/internal/bitbucket.org/ww/goautoneg
@@ -609,7 +621,7 @@ github.com/spf13/afero/mem
 # github.com/spf13/cast v1.6.0
 ## explicit; go 1.19
 github.com/spf13/cast
-# github.com/spf13/cobra v1.8.0
+# github.com/spf13/cobra v1.8.1
 ## explicit; go 1.15
 github.com/spf13/cobra
 # github.com/spf13/pflag v1.0.5
@@ -639,7 +651,7 @@ github.com/tailscale/go-winio/internal/fs
 github.com/tailscale/go-winio/internal/socket
 github.com/tailscale/go-winio/internal/stringbuffer
 github.com/tailscale/go-winio/pkg/guid
-# github.com/tailscale/golang-x-crypto v0.0.0-20240108194725-7ce1f622c780
+# github.com/tailscale/golang-x-crypto v0.0.0-20240604161659-3fde5e568aa4
 ## explicit; go 1.18
 github.com/tailscale/golang-x-crypto/acme
 github.com/tailscale/golang-x-crypto/internal/poly1305
@@ -675,7 +687,7 @@ github.com/tailscale/tailsql/server/tailsql
 # github.com/tailscale/web-client-prebuilt v0.0.0-20240226180453-5db17b287bf1
 ## explicit; go 1.21
 github.com/tailscale/web-client-prebuilt
-# github.com/tailscale/wireguard-go v0.0.0-20240429185444-03c5a0ccf754
+# github.com/tailscale/wireguard-go v0.0.0-20240731203015-71393c576b98
 ## explicit; go 1.20
 github.com/tailscale/wireguard-go/conn
 github.com/tailscale/wireguard-go/conn/winrio
@@ -974,8 +986,8 @@ gorm.io/gorm/logger
 gorm.io/gorm/migrator
 gorm.io/gorm/schema
 gorm.io/gorm/utils
-# gvisor.dev/gvisor v0.0.0-20240306221502-ee1e1f6070e3
-## explicit; go 1.21.1
+# gvisor.dev/gvisor v0.0.0-20240722211153-64c016c92987
+## explicit; go 1.22.0
 gvisor.dev/gvisor/pkg/atomicbitops
 gvisor.dev/gvisor/pkg/bits
 gvisor.dev/gvisor/pkg/buffer
@@ -999,7 +1011,6 @@ gvisor.dev/gvisor/pkg/tcpip/hash/jenkins
 gvisor.dev/gvisor/pkg/tcpip/header
 gvisor.dev/gvisor/pkg/tcpip/header/parse
 gvisor.dev/gvisor/pkg/tcpip/internal/tcp
-gvisor.dev/gvisor/pkg/tcpip/link/channel
 gvisor.dev/gvisor/pkg/tcpip/network/hash
 gvisor.dev/gvisor/pkg/tcpip/network/internal/fragmentation
 gvisor.dev/gvisor/pkg/tcpip/network/internal/ip
@@ -1009,6 +1020,7 @@ gvisor.dev/gvisor/pkg/tcpip/network/ipv6
 gvisor.dev/gvisor/pkg/tcpip/ports
 gvisor.dev/gvisor/pkg/tcpip/seqnum
 gvisor.dev/gvisor/pkg/tcpip/stack
+gvisor.dev/gvisor/pkg/tcpip/stack/gro
 gvisor.dev/gvisor/pkg/tcpip/transport
 gvisor.dev/gvisor/pkg/tcpip/transport/icmp
 gvisor.dev/gvisor/pkg/tcpip/transport/internal/network
@@ -1056,15 +1068,7 @@ modernc.org/memory
 # modernc.org/sqlite v1.29.9
 ## explicit; go 1.20
 modernc.org/sqlite/lib
-# nhooyr.io/websocket v1.8.10
-## explicit; go 1.19
-nhooyr.io/websocket
-nhooyr.io/websocket/internal/bpool
-nhooyr.io/websocket/internal/errd
-nhooyr.io/websocket/internal/util
-nhooyr.io/websocket/internal/wsjs
-nhooyr.io/websocket/internal/xsync
-# tailscale.com v1.66.3
+# tailscale.com v1.72.1
 ## explicit; go 1.22.0
 tailscale.com
 tailscale.com/appc
@@ -1090,6 +1094,7 @@ tailscale.com/envknob
 tailscale.com/health
 tailscale.com/health/healthmsg
 tailscale.com/hostinfo
+tailscale.com/internal/noiseconn
 tailscale.com/ipn
 tailscale.com/ipn/conffile
 tailscale.com/ipn/ipnauth
@@ -1110,6 +1115,7 @@ tailscale.com/logtail
 tailscale.com/logtail/backoff
 tailscale.com/logtail/filch
 tailscale.com/metrics
+tailscale.com/net/captivedetection
 tailscale.com/net/connstats
 tailscale.com/net/dns
 tailscale.com/net/dns/publicdns
@@ -1119,6 +1125,7 @@ tailscale.com/net/dns/resolver
 tailscale.com/net/dnscache
 tailscale.com/net/dnsfallback
 tailscale.com/net/flowtrack
+tailscale.com/net/ipset
 tailscale.com/net/memnet
 tailscale.com/net/netaddr
 tailscale.com/net/netcheck
@@ -1145,6 +1152,7 @@ tailscale.com/net/tsdial
 tailscale.com/net/tshttpproxy
 tailscale.com/net/tstun
 tailscale.com/net/wsconn
+tailscale.com/omit
 tailscale.com/paths
 tailscale.com/portlist
 tailscale.com/posture
@@ -1217,6 +1225,8 @@ tailscale.com/util/set
 tailscale.com/util/singleflight
 tailscale.com/util/slicesx
 tailscale.com/util/syspolicy
+tailscale.com/util/syspolicy/internal
+tailscale.com/util/syspolicy/setting
 tailscale.com/util/sysresources
 tailscale.com/util/systemd
 tailscale.com/util/testenv
@@ -1225,6 +1235,7 @@ tailscale.com/util/uniq
 tailscale.com/util/vizerror
 tailscale.com/util/winutil
 tailscale.com/util/winutil/authenticode
+tailscale.com/util/winutil/gp
 tailscale.com/util/winutil/policy
 tailscale.com/util/winutil/winenv
 tailscale.com/util/zstdframe
@@ -1233,6 +1244,7 @@ tailscale.com/version/distro
 tailscale.com/wgengine
 tailscale.com/wgengine/capture
 tailscale.com/wgengine/filter
+tailscale.com/wgengine/filter/filtertype
 tailscale.com/wgengine/magicsock
 tailscale.com/wgengine/netlog
 tailscale.com/wgengine/netstack

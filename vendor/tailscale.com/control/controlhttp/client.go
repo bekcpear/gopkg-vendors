@@ -32,18 +32,21 @@ import (
 	"net/http/httptrace"
 	"net/netip"
 	"net/url"
+	"runtime"
 	"sort"
 	"sync/atomic"
 	"time"
 
 	"tailscale.com/control/controlbase"
 	"tailscale.com/envknob"
+	"tailscale.com/health"
 	"tailscale.com/net/dnscache"
 	"tailscale.com/net/dnsfallback"
 	"tailscale.com/net/netutil"
 	"tailscale.com/net/sockstats"
 	"tailscale.com/net/tlsdial"
 	"tailscale.com/net/tshttpproxy"
+	"tailscale.com/syncs"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tstime"
 	"tailscale.com/util/multierr"
@@ -396,12 +399,29 @@ func (a *Dialer) resolver() *dnscache.Resolver {
 	}
 }
 
+func isLoopback(a net.Addr) bool {
+	if ta, ok := a.(*net.TCPAddr); ok {
+		return ta.IP.IsLoopback()
+	}
+	return false
+}
+
+var macOSScreenTime = health.Register(&health.Warnable{
+	Code:     "macos-screen-time",
+	Severity: health.SeverityHigh,
+	Title:    "Tailscale blocked by Screen Time",
+	Text: func(args health.Args) string {
+		return "macOS Screen Time seems to be blocking Tailscale. Try disabling Screen Time in System Settings > Screen Time > Content & Privacy > Access to Web Content."
+	},
+	ImpactsConnectivity: true,
+})
+
 // tryURLUpgrade connects to u, and tries to upgrade it to a net.Conn. If addr
 // is valid, then no DNS is used and the connection will be made to the
 // provided address.
 //
 // Only the provided ctx is used, not a.ctx.
-func (a *Dialer) tryURLUpgrade(ctx context.Context, u *url.URL, addr netip.Addr, init []byte) (net.Conn, error) {
+func (a *Dialer) tryURLUpgrade(ctx context.Context, u *url.URL, addr netip.Addr, init []byte) (_ net.Conn, retErr error) {
 	var dns *dnscache.Resolver
 
 	// If we were provided an address to dial, then create a resolver that just
@@ -421,6 +441,30 @@ func (a *Dialer) tryURLUpgrade(ctx context.Context, u *url.URL, addr netip.Addr,
 		dialer = a.Dialer
 	} else {
 		dialer = stdDialer.DialContext
+	}
+
+	// On macOS, see if Screen Time is blocking things.
+	if runtime.GOOS == "darwin" {
+		var proxydIntercepted atomic.Bool // intercepted by macOS webfilterproxyd
+		origDialer := dialer
+		dialer = func(ctx context.Context, network, address string) (net.Conn, error) {
+			c, err := origDialer(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			if isLoopback(c.LocalAddr()) && isLoopback(c.RemoteAddr()) {
+				proxydIntercepted.Store(true)
+			}
+			return c, nil
+		}
+		defer func() {
+			if retErr != nil && proxydIntercepted.Load() {
+				a.HealthTracker.SetUnhealthy(macOSScreenTime, nil)
+				retErr = fmt.Errorf("macOS Screen Time is blocking network access: %w", retErr)
+			} else {
+				a.HealthTracker.SetHealthy(macOSScreenTime)
+			}
+		}()
 	}
 
 	tr := http.DefaultTransport.(*http.Transport).Clone()
@@ -454,11 +498,9 @@ func (a *Dialer) tryURLUpgrade(ctx context.Context, u *url.URL, addr netip.Addr,
 	tr.DisableCompression = true
 
 	// (mis)use httptrace to extract the underlying net.Conn from the
-	// transport. We make exactly 1 request using this transport, so
-	// there will be exactly 1 GotConn call. Additionally, the
-	// transport handles 101 Switching Protocols correctly, such that
-	// the Conn will not be reused or kept alive by the transport once
-	// the response has been handed back from RoundTrip.
+	// transport. The transport handles 101 Switching Protocols correctly,
+	// such that the Conn will not be reused or kept alive by the transport
+	// once the response has been handed back from RoundTrip.
 	//
 	// In theory, the machinery of net/http should make it such that
 	// the trace callback happens-before we get the response, but
@@ -474,10 +516,16 @@ func (a *Dialer) tryURLUpgrade(ctx context.Context, u *url.URL, addr netip.Addr,
 	// unexpected EOFs...), and we're bound to forget someday and
 	// introduce a protocol optimization at a higher level that starts
 	// eagerly transmitting from the server.
-	connCh := make(chan net.Conn, 1)
+	var lastConn syncs.AtomicValue[net.Conn]
 	trace := httptrace.ClientTrace{
+		// Even though we only make a single HTTP request which should
+		// require a single connection, the context (with the attached
+		// trace configuration) might be used by our custom dialer to
+		// make other HTTP requests (e.g. BootstrapDNS). We only care
+		// about the last connection made, which should be the one to
+		// the control server.
 		GotConn: func(info httptrace.GotConnInfo) {
-			connCh <- info.Conn
+			lastConn.Store(info.Conn)
 		},
 	}
 	ctx = httptrace.WithClientTrace(ctx, &trace)
@@ -505,11 +553,7 @@ func (a *Dialer) tryURLUpgrade(ctx context.Context, u *url.URL, addr netip.Addr,
 	// is still a read buffer attached to it within resp.Body. So, we
 	// must direct I/O through resp.Body, but we can still use the
 	// underlying net.Conn for stuff like deadlines.
-	var switchedConn net.Conn
-	select {
-	case switchedConn = <-connCh:
-	default:
-	}
+	switchedConn := lastConn.Load()
 	if switchedConn == nil {
 		resp.Body.Close()
 		return nil, fmt.Errorf("httptrace didn't provide a connection")

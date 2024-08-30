@@ -25,6 +25,7 @@ import (
 	"tailscale.com/health"
 	"tailscale.com/net/netmon"
 	"tailscale.com/types/logger"
+	"tailscale.com/types/opt"
 	"tailscale.com/types/preftype"
 	"tailscale.com/util/linuxfw"
 	"tailscale.com/util/multierr"
@@ -58,9 +59,9 @@ type linuxRouter struct {
 	ipRuleFixLimiter   *rate.Limiter
 
 	// Various feature checks for the network stack.
-	ipRuleAvailable bool // whether kernel was built with IP_MULTIPLE_TABLES
-	v6Available     bool // whether the kernel supports IPv6
-	fwmaskWorks     bool // whether we can use 'ip rule...fwmark <mark>/<mask>'
+	ipRuleAvailable bool     // whether kernel was built with IP_MULTIPLE_TABLES
+	v6Available     bool     // whether the kernel supports IPv6
+	fwmaskWorksLazy opt.Bool // whether we can use 'ip rule...fwmark <mark>/<mask>'; set lazily
 
 	// ipPolicyPrefBase is the base priority at which ip rules are installed.
 	ipPolicyPrefBase int
@@ -108,20 +109,6 @@ func newUserspaceRouterAdvanced(logf logger.Logf, tunname string, netMon *netmon
 			r.logf("[v1] policy routing available; found %d rules", len(rules))
 			r.ipRuleAvailable = true
 		}
-	}
-
-	// To be a good denizen of the 4-byte 'fwmark' bitspace on every packet, we try to
-	// only use the third byte. However, support for masking to part of the fwmark bitspace
-	// was only added to busybox in 1.33.0. As such, we want to detect older versions and
-	// not issue such a stanza.
-	var err error
-	if r.fwmaskWorks, err = ipCmdSupportsFwmask(); err != nil {
-		r.logf("failed to determine ip command fwmask support: %v", err)
-	}
-	if r.fwmaskWorks {
-		r.logf("[v1] ip command supports fwmark masks")
-	} else {
-		r.logf("[v1] ip command does NOT support fwmark masks")
 	}
 
 	// A common installation of OpenWRT involves use of the 'mwan3' package.
@@ -258,6 +245,31 @@ func (r *linuxRouter) useIPCommand() bool {
 	// command runner in tests.
 	_, ok := r.cmd.(osCommandRunner)
 	return !ok
+}
+
+// fwmaskWorks reports whether we can use 'ip rule...fwmark <mark>/<mask>'.
+// This is computed lazily on first use. By default, we don't run the "ip"
+// command, so never actually runs this. But the "ip" command is used in tests
+// and can be forced. (see useIPCommand)
+func (r *linuxRouter) fwmaskWorks() bool {
+	if v, ok := r.fwmaskWorksLazy.Get(); ok {
+		return v
+	}
+	// To be a good denizen of the 4-byte 'fwmark' bitspace on every packet, we try to
+	// only use the third byte. However, support for masking to part of the fwmark bitspace
+	// was only added to busybox in 1.33.0. As such, we want to detect older versions and
+	// not issue such a stanza.
+	v, err := ipCmdSupportsFwmask()
+	if err != nil {
+		r.logf("failed to determine ip command fwmask support: %v", err)
+	}
+	r.fwmaskWorksLazy.Set(v)
+	if v {
+		r.logf("[v1] ip command supports fwmark masks")
+	} else {
+		r.logf("[v1] ip command does NOT support fwmark masks")
+	}
+	return v
 }
 
 // onIPRuleDeleted is the callback from the network monitor for when an IP
@@ -433,12 +445,17 @@ func (r *linuxRouter) Set(cfg *Config) error {
 	return multierr.New(errs...)
 }
 
-var warnStatefulFilteringWithDocker = health.NewWarnable()
+var dockerStatefulFilteringWarnable = health.Register(&health.Warnable{
+	Code:     "docker-stateful-filtering",
+	Title:    "Docker with stateful filtering",
+	Severity: health.SeverityMedium,
+	Text:     health.StaticMessage("Stateful filtering is enabled and Docker was detected; this may prevent Docker containers on this host from resolving DNS and connecting to Tailscale nodes. See https://tailscale.com/s/stateful-docker"),
+})
 
 func (r *linuxRouter) updateStatefulFilteringWithDockerWarning(cfg *Config) {
 	// If stateful filtering is disabled, clear the warning.
 	if !r.statefulFiltering {
-		r.health.SetWarnable(warnStatefulFilteringWithDocker, nil)
+		r.health.SetHealthy(dockerStatefulFilteringWarnable)
 		return
 	}
 
@@ -467,17 +484,13 @@ func (r *linuxRouter) updateStatefulFilteringWithDockerWarning(cfg *Config) {
 		// socket/daemon/etc.
 		ifstate := r.netMon.InterfaceState()
 		if _, found := ifstate.Interface["docker0"]; found {
-			r.health.SetWarnable(warnStatefulFilteringWithDocker, fmt.Errorf(""+
-				"Stateful filtering is enabled and Docker was detected; this may prevent Docker containers "+
-				"on this host from connecting to Tailscale nodes. "+
-				"See https://tailscale.com/s/stateful-docker",
-			))
+			r.health.SetUnhealthy(dockerStatefulFilteringWarnable, nil)
 			return
 		}
 	}
 
 	// If we get here, then we have no warnings; clear anything existing.
-	r.health.SetWarnable(warnStatefulFilteringWithDocker, nil)
+	r.health.SetHealthy(dockerStatefulFilteringWarnable)
 }
 
 // UpdateMagicsockPort implements the Router interface.
@@ -1266,7 +1279,7 @@ func (r *linuxRouter) addIPRulesWithIPCommand() error {
 				"pref", strconv.Itoa(rule.Priority + r.ipPolicyPrefBase),
 			}
 			if rule.Mark != 0 {
-				if r.fwmaskWorks {
+				if r.fwmaskWorks() {
 					args = append(args, "fwmark", fmt.Sprintf("0x%x/%s", rule.Mark, linuxfw.TailscaleFwmarkMask))
 				} else {
 					args = append(args, "fwmark", fmt.Sprintf("0x%x", rule.Mark))

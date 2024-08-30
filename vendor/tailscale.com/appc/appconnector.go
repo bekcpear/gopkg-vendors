@@ -11,20 +11,63 @@ package appc
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	xmaps "golang.org/x/exp/maps"
 	"golang.org/x/net/dns/dnsmessage"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/views"
+	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/dnsname"
 	"tailscale.com/util/execqueue"
 	"tailscale.com/util/mak"
 	"tailscale.com/util/slicesx"
 )
+
+// rateLogger responds to calls to update by adding a count for the current period and
+// calling the callback if any previous period has finished since update was last called
+type rateLogger struct {
+	interval    time.Duration
+	start       time.Time
+	periodStart time.Time
+	periodCount int64
+	now         func() time.Time
+	callback    func(int64, time.Time, int64)
+}
+
+func (rl *rateLogger) currentIntervalStart(now time.Time) time.Time {
+	millisSince := now.Sub(rl.start).Milliseconds() % rl.interval.Milliseconds()
+	return now.Add(-(time.Duration(millisSince)) * time.Millisecond)
+}
+
+func (rl *rateLogger) update(numRoutes int64) {
+	now := rl.now()
+	periodEnd := rl.periodStart.Add(rl.interval)
+	if periodEnd.Before(now) {
+		if rl.periodCount != 0 {
+			rl.callback(rl.periodCount, rl.periodStart, numRoutes)
+		}
+		rl.periodCount = 0
+		rl.periodStart = rl.currentIntervalStart(now)
+	}
+	rl.periodCount++
+}
+
+func newRateLogger(now func() time.Time, interval time.Duration, callback func(int64, time.Time, int64)) *rateLogger {
+	nowTime := now()
+	return &rateLogger{
+		callback:    callback,
+		now:         now,
+		interval:    interval,
+		start:       nowTime,
+		periodStart: nowTime,
+	}
+}
 
 // RouteAdvertiser is an interface that allows the AppConnector to advertise
 // newly discovered routes that need to be served through the AppConnector.
@@ -35,6 +78,42 @@ type RouteAdvertiser interface {
 
 	// UnadvertiseRoute removes any matching route advertisements.
 	UnadvertiseRoute(...netip.Prefix) error
+}
+
+var (
+	metricStoreRoutesRateBuckets = []int64{1, 2, 3, 4, 5, 10, 100, 1000}
+	metricStoreRoutesNBuckets    = []int64{1, 2, 3, 4, 5, 10, 100, 1000, 10000}
+	metricStoreRoutesRate        []*clientmetric.Metric
+	metricStoreRoutesN           []*clientmetric.Metric
+)
+
+func initMetricStoreRoutes() {
+	for _, n := range metricStoreRoutesRateBuckets {
+		metricStoreRoutesRate = append(metricStoreRoutesRate, clientmetric.NewCounter(fmt.Sprintf("appc_store_routes_rate_%d", n)))
+	}
+	metricStoreRoutesRate = append(metricStoreRoutesRate, clientmetric.NewCounter("appc_store_routes_rate_over"))
+	for _, n := range metricStoreRoutesNBuckets {
+		metricStoreRoutesN = append(metricStoreRoutesN, clientmetric.NewCounter(fmt.Sprintf("appc_store_routes_n_routes_%d", n)))
+	}
+	metricStoreRoutesN = append(metricStoreRoutesN, clientmetric.NewCounter("appc_store_routes_n_routes_over"))
+}
+
+func recordMetric(val int64, buckets []int64, metrics []*clientmetric.Metric) {
+	if len(buckets) < 1 {
+		return
+	}
+	// finds the first bucket where val <=, or len(buckets) if none match
+	// for bucket values of 1, 10, 100; 0-1 goes to [0], 2-10 goes to [1], 11-100 goes to [2], 101+ goes to [3]
+	bucket, _ := slices.BinarySearch(buckets, val)
+	metrics[bucket].Add(1)
+}
+
+func metricStoreRoutes(rate, nRoutes int64) {
+	if len(metricStoreRoutesRate) == 0 {
+		initMetricStoreRoutes()
+	}
+	recordMetric(rate, metricStoreRoutesRateBuckets, metricStoreRoutesRate)
+	recordMetric(nRoutes, metricStoreRoutesNBuckets, metricStoreRoutesN)
 }
 
 // RouteInfo is a data structure used to persist the in memory state of an AppConnector
@@ -81,6 +160,9 @@ type AppConnector struct {
 
 	// queue provides ordering for update operations
 	queue execqueue.ExecQueue
+
+	writeRateMinute *rateLogger
+	writeRateDay    *rateLogger
 }
 
 // NewAppConnector creates a new AppConnector.
@@ -95,6 +177,13 @@ func NewAppConnector(logf logger.Logf, routeAdvertiser RouteAdvertiser, routeInf
 		ac.wildcards = routeInfo.Wildcards
 		ac.controlRoutes = routeInfo.Control
 	}
+	ac.writeRateMinute = newRateLogger(time.Now, time.Minute, func(c int64, s time.Time, l int64) {
+		ac.logf("routeInfo write rate: %d in minute starting at %v (%d routes)", c, s, l)
+		metricStoreRoutes(c, l)
+	})
+	ac.writeRateDay = newRateLogger(time.Now, 24*time.Hour, func(c int64, s time.Time, l int64) {
+		ac.logf("routeInfo write rate: %d in 24 hours starting at %v (%d routes)", c, s, l)
+	})
 	return ac
 }
 
@@ -109,6 +198,15 @@ func (e *AppConnector) storeRoutesLocked() error {
 	if !e.ShouldStoreRoutes() {
 		return nil
 	}
+
+	// log write rate and write size
+	numRoutes := int64(len(e.controlRoutes))
+	for _, rs := range e.domains {
+		numRoutes += int64(len(rs))
+	}
+	e.writeRateMinute.update(numRoutes)
+	e.writeRateDay.update(numRoutes)
+
 	return e.storeRoutesFunc(&RouteInfo{
 		Control:   e.controlRoutes,
 		Domains:   e.domains,
@@ -383,8 +481,10 @@ func (e *AppConnector) ObserveDNSResponse(res []byte) {
 			}
 		}
 
-		e.logf("[v2] observed new routes for %s: %s", domain, toAdvertise)
-		e.scheduleAdvertisement(domain, toAdvertise...)
+		if len(toAdvertise) > 0 {
+			e.logf("[v2] observed new routes for %s: %s", domain, toAdvertise)
+			e.scheduleAdvertisement(domain, toAdvertise...)
+		}
 	}
 }
 

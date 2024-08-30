@@ -59,6 +59,10 @@ type Dialer struct {
 	// If nil, it's not used.
 	NetstackDialTCP func(context.Context, netip.AddrPort) (net.Conn, error)
 
+	// NetstackDialUDP dials the provided IPPort using netstack.
+	// If nil, it's not used.
+	NetstackDialUDP func(context.Context, netip.AddrPort) (net.Conn, error)
+
 	peerClientOnce sync.Once
 	peerClient     *http.Client
 
@@ -162,6 +166,7 @@ func (d *Dialer) Close() error {
 		c.Close()
 	}
 	d.activeSysConns = nil
+	d.PeerAPITransport().CloseIdleConnections()
 	return nil
 }
 
@@ -403,14 +408,17 @@ func (d *Dialer) UserDial(ctx context.Context, network, addr string) (net.Conn, 
 		return nil, err
 	}
 	if d.UseNetstackForIP != nil && d.UseNetstackForIP(ipp.Addr()) {
-		if d.NetstackDialTCP == nil {
+		if d.NetstackDialTCP == nil || d.NetstackDialUDP == nil {
 			return nil, errors.New("Dialer not initialized correctly")
+		}
+		if strings.HasPrefix(network, "udp") {
+			return d.NetstackDialUDP(ctx, ipp)
 		}
 		return d.NetstackDialTCP(ctx, ipp)
 	}
 
 	if routes := d.routes.Load(); routes != nil {
-		if isTailscaleRoute, _ := routes.Get(ipp.Addr()); isTailscaleRoute {
+		if isTailscaleRoute, _ := routes.Lookup(ipp.Addr()); isTailscaleRoute {
 			return d.getPeerDialer().DialContext(ctx, network, ipp.String())
 		}
 

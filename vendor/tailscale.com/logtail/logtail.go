@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	mrand "math/rand"
+	mrand "math/rand/v2"
 	"net/http"
 	"net/netip"
 	"os"
@@ -266,6 +266,7 @@ func (l *Logger) Shutdown(ctx context.Context) error {
 		case <-l.shutdownDone:
 		}
 		close(done)
+		l.httpc.CloseIdleConnections()
 	}()
 
 	l.shutdownStartMu.Lock()
@@ -435,7 +436,7 @@ func (l *Logger) uploading(ctx context.Context) {
 				// Sleep for the specified retryAfter period,
 				// otherwise default to some random value.
 				if retryAfter <= 0 {
-					retryAfter = time.Duration(30+mrand.Intn(30)) * time.Second
+					retryAfter = mrand.N(30*time.Second) + 30*time.Second
 				}
 				tstime.Sleep(ctx, retryAfter)
 			} else {
