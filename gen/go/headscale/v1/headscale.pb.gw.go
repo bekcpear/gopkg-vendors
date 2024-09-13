@@ -1227,6 +1227,7 @@ func local_request_HeadscaleService_SetPolicy_0(ctx context.Context, marshaler r
 // UnaryRPC     :call HeadscaleServiceServer directly.
 // StreamingRPC :currently unsupported pending https://github.com/grpc/grpc-go/issues/906.
 // Note that using this registration option will cause many gRPC library features to stop working. Consider using RegisterHeadscaleServiceHandlerFromEndpoint instead.
+// GRPC interceptors will not work for this type of registration. To use interceptors, you must use the "runtime.WithMiddlewares" option in the "runtime.NewServeMux" call.
 func RegisterHeadscaleServiceHandlerServer(ctx context.Context, mux *runtime.ServeMux, server HeadscaleServiceServer) error {
 
 	mux.Handle("GET", pattern_HeadscaleService_GetUser_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
@@ -1992,7 +1993,7 @@ func RegisterHeadscaleServiceHandler(ctx context.Context, mux *runtime.ServeMux,
 // to "mux". The handlers forward requests to the grpc endpoint over the given implementation of "HeadscaleServiceClient".
 // Note: the gRPC framework executes interceptors within the gRPC handler. If the passed in "HeadscaleServiceClient"
 // doesn't go through the normal gRPC flow (creating a gRPC client etc.) then it will be up to the passed in
-// "HeadscaleServiceClient" to call the correct interceptors.
+// "HeadscaleServiceClient" to call the correct interceptors. This client ignores the HTTP middlewares.
 func RegisterHeadscaleServiceHandlerClient(ctx context.Context, mux *runtime.ServeMux, client HeadscaleServiceClient) error {
 
 	mux.Handle("GET", pattern_HeadscaleService_GetUser_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
