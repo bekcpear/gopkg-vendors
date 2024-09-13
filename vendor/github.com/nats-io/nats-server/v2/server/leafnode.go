@@ -1,4 +1,4 @@
-// Copyright 2019-2023 The NATS Authors
+// Copyright 2019-2024 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -34,6 +34,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
@@ -96,6 +97,8 @@ type leaf struct {
 	tsubt *time.Timer
 	// Selected compression mode, which may be different from the server configured mode.
 	compression string
+	// This is for GW map replies.
+	gwSub *subscription
 }
 
 // Used for remote (solicited) leafnodes.
@@ -239,7 +242,7 @@ func validateLeafNode(o *Options) error {
 		}
 	} else {
 		if len(o.LeafNode.Users) != 0 {
-			return fmt.Errorf("operator mode does not allow specifying user in leafnode config")
+			return fmt.Errorf("operator mode does not allow specifying users in leafnode config")
 		}
 		for _, r := range o.LeafNode.Remotes {
 			if !nkeys.IsValidPublicAccountKey(r.LocalAccount) {
@@ -299,12 +302,12 @@ func validateLeafNode(o *Options) error {
 	// with gateways. So if an option validation needs to be done regardless,
 	// it MUST be done before this point!
 
-	if o.Gateway.Name == "" && o.Gateway.Port == 0 {
+	if o.Gateway.Name == _EMPTY_ && o.Gateway.Port == 0 {
 		return nil
 	}
 	// If we are here we have both leaf nodes and gateways defined, make sure there
 	// is a system account defined.
-	if o.SystemAccount == "" {
+	if o.SystemAccount == _EMPTY_ {
 		return fmt.Errorf("leaf nodes and gateways (both being defined) require a system account to also be configured")
 	}
 	if err := validatePinnedCerts(o.LeafNode.TLSPinnedCerts); err != nil {
@@ -333,6 +336,9 @@ func validateLeafNodeAuthOptions(o *Options) error {
 	}
 	if o.LeafNode.Username != _EMPTY_ {
 		return fmt.Errorf("can not have a single user/pass and a users array")
+	}
+	if o.LeafNode.Nkey != _EMPTY_ {
+		return fmt.Errorf("can not have a single nkey and a users array")
 	}
 	users := map[string]struct{}{}
 	for _, u := range o.LeafNode.Users {
@@ -579,6 +585,9 @@ func (s *Server) clearObserverState(remote *leafNodeCfg) {
 		return
 	}
 
+	acc.jscmMu.Lock()
+	defer acc.jscmMu.Unlock()
+
 	// Walk all streams looking for any clustered stream, skip otherwise.
 	for _, mset := range acc.streams() {
 		node := mset.raftNode()
@@ -613,6 +622,9 @@ func (s *Server) checkJetStreamMigrate(remote *leafNodeCfg) {
 		s.Warnf("Error looking up account [%s] checking for JetStream migration on a leafnode", accName)
 		return
 	}
+
+	acc.jscmMu.Lock()
+	defer acc.jscmMu.Unlock()
 
 	// Walk all streams looking for any clustered stream, skip otherwise.
 	// If we are the leader force stepdown.
@@ -830,6 +842,19 @@ func (c *client) sendLeafConnect(clusterName string, headers bool) error {
 		sig := base64.RawURLEncoding.EncodeToString(sigraw)
 		cinfo.JWT = bytesToString(tmp)
 		cinfo.Sig = sig
+	} else if nkey := c.leaf.remote.Nkey; nkey != _EMPTY_ {
+		kp, err := nkeys.FromSeed([]byte(nkey))
+		if err != nil {
+			c.Errorf("Remote nkey has malformed seed")
+			return err
+		}
+		// Wipe our key on exit.
+		defer kp.Wipe()
+		sigraw, _ := kp.Sign(c.nonce)
+		sig := base64.RawURLEncoding.EncodeToString(sigraw)
+		pkey, _ := kp.PublicKey()
+		cinfo.Nkey = pkey
+		cinfo.Sig = sig
 	} else if userInfo := c.leaf.remote.curURL.User; userInfo != nil {
 		cinfo.User = userInfo.Username()
 		cinfo.Pass, _ = userInfo.Password()
@@ -839,7 +864,7 @@ func (c *client) sendLeafConnect(clusterName string, headers bool) error {
 	}
 	b, err := json.Marshal(cinfo)
 	if err != nil {
-		c.Errorf("Error marshaling CONNECT to route: %v\n", err)
+		c.Errorf("Error marshaling CONNECT to remote leafnode: %v\n", err)
 		return err
 	}
 	// Although this call is made before the writeLoop is created,
@@ -1674,9 +1699,16 @@ func (s *Server) addLeafNodeConnection(c *client, srvName, clusterName string, c
 func (s *Server) removeLeafNodeConnection(c *client) {
 	c.mu.Lock()
 	cid := c.cid
-	if c.leaf != nil && c.leaf.tsubt != nil {
-		c.leaf.tsubt.Stop()
-		c.leaf.tsubt = nil
+	if c.leaf != nil {
+		if c.leaf.tsubt != nil {
+			c.leaf.tsubt.Stop()
+			c.leaf.tsubt = nil
+		}
+		if c.leaf.gwSub != nil {
+			s.gwLeafSubs.Remove(c.leaf.gwSub)
+			// We need to set this to nil for GC to release the connection
+			c.leaf.gwSub = nil
+		}
 	}
 	c.mu.Unlock()
 	s.mu.Lock()
@@ -1688,6 +1720,7 @@ func (s *Server) removeLeafNodeConnection(c *client) {
 // Connect information for solicited leafnodes.
 type leafConnectInfo struct {
 	Version   string   `json:"version,omitempty"`
+	Nkey      string   `json:"nkey,omitempty"`
 	JWT       string   `json:"jwt,omitempty"`
 	Sig       string   `json:"sig,omitempty"`
 	User      string   `json:"user,omitempty"`
@@ -1730,6 +1763,13 @@ func (c *client) processLeafNodeConnect(s *Server, arg []byte, lang string) erro
 	proto := &leafConnectInfo{}
 	if err := json.Unmarshal(arg, proto); err != nil {
 		return err
+	}
+
+	// Reject a cluster that contains spaces or line breaks.
+	if proto.Cluster != _EMPTY_ && strings.ContainsFunc(proto.Cluster, unicode.IsSpace) {
+		c.sendErrAndErr(ErrClusterNameHasSpaces.Error())
+		c.closeConnection(ProtocolViolation)
+		return ErrClusterNameHasSpaces
 	}
 
 	// Check for cluster name collisions.
@@ -1963,7 +2003,10 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 	if c.isSpokeLeafNode() {
 		// Add a fake subscription for this solicited leafnode connection
 		// so that we can send back directly for mapped GW replies.
-		c.srv.gwLeafSubs.Insert(&subscription{client: c, subject: []byte(gwReplyPrefix + ">")})
+		// We need to keep track of this subscription so it can be removed
+		// when the connection is closed so that the GC can release it.
+		c.leaf.gwSub = &subscription{client: c, subject: []byte(gwReplyPrefix + ">")}
+		c.srv.gwLeafSubs.Insert(c.leaf.gwSub)
 	}
 
 	// Now walk the results and add them to our smap
@@ -2001,8 +2044,8 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 		c.leaf.smap[oldGWReplyPrefix+"*.>"]++
 		c.leaf.smap[gwReplyPrefix+">"]++
 	}
-	// Detect loop by subscribing to a specific subject and checking
-	// if this is coming back to us.
+	// Detect loops by subscribing to a specific subject and checking
+	// if this sub is coming back to us.
 	c.leaf.smap[lds]++
 
 	// Check if we need to add an existing siReply to our map.
@@ -2066,7 +2109,7 @@ func (acc *Account) updateLeafNodes(sub *subscription, delta int32) {
 	isLDS := bytes.HasPrefix(sub.subject, []byte(leafNodeLoopDetectionSubjectPrefix))
 
 	// Capture the cluster even if its empty.
-	cluster := _EMPTY_
+	var cluster string
 	if sub.origin != nil {
 		cluster = bytesToString(sub.origin)
 	}
@@ -2095,11 +2138,11 @@ func (acc *Account) updateLeafNodes(sub *subscription, delta int32) {
 		}
 		// Check to make sure this sub does not have an origin cluster that matches the leafnode.
 		ln.mu.Lock()
-		skip := (cluster != _EMPTY_ && cluster == ln.remoteCluster()) || (delta > 0 && !ln.canSubscribe(subject))
 		// If skipped, make sure that we still let go the "$LDS." subscription that allows
-		// the detection of a loop.
-		if isLDS || !skip {
-			ln.updateSmap(sub, delta)
+		// the detection of loops as long as different cluster.
+		clusterDifferent := cluster != ln.remoteCluster()
+		if (isLDS && clusterDifferent) || ((cluster == _EMPTY_ || clusterDifferent) && (delta <= 0 || ln.canSubscribe(subject))) {
+			ln.updateSmap(sub, delta, isLDS)
 		}
 		ln.mu.Unlock()
 	}
@@ -2108,7 +2151,7 @@ func (acc *Account) updateLeafNodes(sub *subscription, delta int32) {
 // This will make an update to our internal smap and determine if we should send out
 // an interest update to the remote side.
 // Lock should be held.
-func (c *client) updateSmap(sub *subscription, delta int32) {
+func (c *client) updateSmap(sub *subscription, delta int32, isLDS bool) {
 	if c.leaf.smap == nil {
 		return
 	}
@@ -2116,7 +2159,7 @@ func (c *client) updateSmap(sub *subscription, delta int32) {
 	// If we are solicited make sure this is a local client or a non-solicited leaf node
 	skind := sub.client.kind
 	updateClient := skind == CLIENT || skind == SYSTEM || skind == JETSTREAM || skind == ACCOUNT
-	if c.isSpokeLeafNode() && !(updateClient || (skind == LEAF && !sub.client.isSpokeLeafNode())) {
+	if !isLDS && c.isSpokeLeafNode() && !(updateClient || (skind == LEAF && !sub.client.isSpokeLeafNode())) {
 		return
 	}
 
@@ -2167,6 +2210,28 @@ func (c *client) forceAddToSmap(subj string) {
 	// Place into the map since it was not there.
 	c.leaf.smap[subj] = 1
 	c.sendLeafNodeSubUpdate(subj, 1)
+}
+
+// Used to force remove a subject from the subject map.
+func (c *client) forceRemoveFromSmap(subj string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.leaf.smap == nil {
+		return
+	}
+	n := c.leaf.smap[subj]
+	if n == 0 {
+		return
+	}
+	n--
+	if n == 0 {
+		// Remove is now zero
+		delete(c.leaf.smap, subj)
+		c.sendLeafNodeSubUpdate(subj, 0)
+	} else {
+		c.leaf.smap[subj] = n
+	}
 }
 
 // Send the subscription interest change to the other side.
@@ -2276,6 +2341,7 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 	acc := c.acc
 	// Check if we have a loop.
 	ldsPrefix := bytes.HasPrefix(sub.subject, []byte(leafNodeLoopDetectionSubjectPrefix))
+
 	if ldsPrefix && bytesToString(sub.subject) == acc.getLDSubject() {
 		c.mu.Unlock()
 		c.handleLeafNodeLoop(true)
@@ -2611,9 +2677,8 @@ func (c *client) processInboundLeafMsg(msg []byte) {
 	// Go back to the sublist data structure.
 	if !ok {
 		r = c.acc.sl.Match(subject)
-		c.in.results[subject] = r
 		// Prune the results cache. Keeps us from unbounded growth. Random delete.
-		if len(c.in.results) > maxResultCacheSize {
+		if len(c.in.results) >= maxResultCacheSize {
 			n := 0
 			for subj := range c.in.results {
 				delete(c.in.results, subj)
@@ -2622,6 +2687,8 @@ func (c *client) processInboundLeafMsg(msg []byte) {
 				}
 			}
 		}
+		// Then add the new cache entry.
+		c.in.results[subject] = r
 	}
 
 	// Collect queue names if needed.
@@ -2943,6 +3010,9 @@ func (s *Server) leafNodeFinishConnectProcess(c *client) {
 	if err := c.registerWithAccount(acc); err != nil {
 		if err == ErrTooManyAccountConnections {
 			c.maxAccountConnExceeded()
+			return
+		} else if err == ErrLeafNodeLoop {
+			c.handleLeafNodeLoop(true)
 			return
 		}
 		c.Errorf("Registering leaf with account %s resulted in error: %v", acc.Name, err)

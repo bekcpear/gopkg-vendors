@@ -2,14 +2,17 @@ package phony
 
 import (
 	"runtime"
+	"sync"
 	"sync/atomic"
-	"unsafe"
 )
+
+var stops = sync.Pool{New: func() interface{} { return make(chan struct{}, 1) }}
+var elems = sync.Pool{New: func() interface{} { return new(queueElem) }}
 
 // A message in the queue
 type queueElem struct {
 	msg  func()
-	next unsafe.Pointer // *queueElem, accessed atomically
+	next atomic.Pointer[queueElem] // *queueElem, accessed atomically
 }
 
 // Inbox is an ordered queue of messages which an Actor will process sequentially.
@@ -19,9 +22,9 @@ type queueElem struct {
 // An Inbox must not be copied after first use.
 type Inbox struct {
 	noCopy noCopy
-	head   *queueElem     // Used carefully to avoid needing atomics
-	tail   unsafe.Pointer // *queueElem, accessed atomically
-	busy   uintptr        // accessed atomically, 1 if sends should apply backpressure
+	head   *queueElem                // Used carefully to avoid needing atomics
+	tail   atomic.Pointer[queueElem] // *queueElem, accessed atomically
+	busy   atomic.Bool               // accessed atomically, 1 if sends should apply backpressure
 }
 
 // Actor is the interface for Actors, based on their ability to receive a message from another Actor.
@@ -36,11 +39,12 @@ type Actor interface {
 // enqueue puts a message into the Inbox and returns true if backpressure should be applied.
 // If the inbox was empty, then the actor was not already running, so enqueue starts it.
 func (a *Inbox) enqueue(msg func()) {
-	q := &queueElem{msg: msg}
-	tail := (*queueElem)(atomic.SwapPointer(&a.tail, unsafe.Pointer(q)))
+	q := elems.Get().(*queueElem)
+	*q = queueElem{msg: msg}
+	tail := a.tail.Swap(q)
 	if tail != nil {
 		//An old tail exists, so update its next pointer to reference q
-		atomic.StorePointer(&tail.next, unsafe.Pointer(q))
+		tail.next.Store(q)
 	} else {
 		// No old tail existed, so no worker is currently running
 		// Update the head to point to q, then start the worker
@@ -59,10 +63,13 @@ func (a *Inbox) Act(from Actor, action func()) {
 		panic("tried to send nil action")
 	}
 	a.enqueue(action)
-	if from != nil && atomic.LoadUintptr(&a.busy) != 0 {
-		s := stop{from: from}
-		a.enqueue(s.signal)
-		from.enqueue(s.wait)
+	if from != nil && a.busy.Load() {
+		done := stops.Get().(chan struct{})
+		a.enqueue(func() { done <- struct{}{} })
+		from.enqueue(func() {
+			<-done
+			stops.Put(done)
+		})
 	}
 }
 
@@ -76,15 +83,17 @@ func Block(actor Actor, action func()) {
 	} else if action == nil {
 		panic("tried to send nil action")
 	}
-	done := make(chan struct{})
-	actor.enqueue(func() { action(); close(done) })
+	done := stops.Get().(chan struct{})
+	actor.enqueue(action)
+	actor.enqueue(func() { done <- struct{}{} })
 	<-done
+	stops.Put(done)
 }
 
 // run is executed when a message is placed in an empty Inbox, and launches a worker goroutine.
 // The worker goroutine processes messages from the Inbox until empty, and then exits.
 func (a *Inbox) run() {
-	atomic.StoreUintptr(&a.busy, 1)
+	a.busy.Store(true)
 	for running := true; running; running = a.advance() {
 		a.head.msg()
 	}
@@ -93,27 +102,29 @@ func (a *Inbox) run() {
 // returns true if we still have more work to do
 func (a *Inbox) advance() (more bool) {
 	head := a.head
-	a.head = (*queueElem)(atomic.LoadPointer(&head.next))
+	a.head = head.next.Load()
 	if a.head == nil {
 		// We loaded the last message
 		// Unset busy and CAS the tail to nil to shut down
-		atomic.StoreUintptr(&a.busy, 0)
-		if !atomic.CompareAndSwapPointer(&a.tail, unsafe.Pointer(head), nil) {
+		a.busy.Store(false)
+		if !a.tail.CompareAndSwap(head, nil) {
 			// Someone pushed to the list before we could CAS the tail to shut down
 			// This means we're effectively restarting at this point
 			// Set busy and load the next message
-			atomic.StoreUintptr(&a.busy, 1)
+			a.busy.Store(true)
 			for a.head == nil {
 				// Busy loop until the message is successfully loaded
 				// Gosched to avoid blocking the thread in the mean time
 				runtime.Gosched()
-				a.head = (*queueElem)(atomic.LoadPointer(&head.next))
+				a.head = head.next.Load()
 			}
 			more = true
 		}
 	} else {
 		more = true
 	}
+	*head = queueElem{}
+	elems.Put(head)
 	return
 }
 
@@ -121,24 +132,7 @@ func (a *Inbox) restart() {
 	go a.run()
 }
 
-type stop struct {
-	flag uintptr
-	from Actor
-}
-
-func (s *stop) signal() {
-	if atomic.SwapUintptr((*uintptr)(&s.flag), 1) != 0 && s.from.advance() {
-		s.from.restart()
-	}
-}
-
-func (s *stop) wait() {
-	if atomic.SwapUintptr((*uintptr)(&s.flag), 1) == 0 {
-		runtime.Goexit()
-	}
-}
-
-// noCopy implements the sync.Locker interface so go vet can catch unsafe copying
+// noCopy implements the sync.Locker interface, so go vet can catch unsafe copying
 type noCopy struct{}
 
 func (n *noCopy) Lock()   {}

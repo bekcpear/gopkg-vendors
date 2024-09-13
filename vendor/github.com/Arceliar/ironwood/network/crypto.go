@@ -40,6 +40,18 @@ func (key publicKey) equal(comparedKey publicKey) bool {
 	return key == comparedKey
 }
 
+func (key publicKey) less(comparedKey publicKey) bool {
+	for idx := range key {
+		switch {
+		case key[idx] < comparedKey[idx]:
+			return true
+		case key[idx] > comparedKey[idx]:
+			return false
+		}
+	}
+	return false
+}
+
 func (key publicKey) addr() types.Addr {
 	return types.Addr(key[:])
 }
@@ -47,4 +59,9 @@ func (key publicKey) addr() types.Addr {
 func (c *crypto) init(secret ed25519.PrivateKey) {
 	copy(c.privateKey[:], secret)
 	copy(c.publicKey[:], secret.Public().(ed25519.PublicKey))
+}
+
+func (key publicKey) toEd() ed25519.PublicKey {
+	k := key
+	return k[:]
 }

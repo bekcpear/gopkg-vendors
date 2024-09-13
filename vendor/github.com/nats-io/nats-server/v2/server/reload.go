@@ -14,12 +14,13 @@
 package server
 
 import (
+	"cmp"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/url"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -834,7 +835,7 @@ type profBlockRateReload struct {
 
 func (o *profBlockRateReload) Apply(s *Server) {
 	s.setBlockProfileRate(o.newValue)
-	s.Noticef("Reloaded: block_prof_rate = %v", o.newValue)
+	s.Noticef("Reloaded: prof_block_rate = %v", o.newValue)
 }
 
 type leafNodeOption struct {
@@ -995,10 +996,15 @@ func (s *Server) Reload() error {
 	return s.ReloadOptions(newOpts)
 }
 
-// ReloadOptions applies any supported options from the provided Option
+// ReloadOptions applies any supported options from the provided Options
 // type. This returns an error if an option which doesn't support
 // hot-swapping was changed.
+// The provided Options type should not be re-used afterwards.
+// Either use Options.Clone() to pass a copy, or make a new one.
 func (s *Server) ReloadOptions(newOpts *Options) error {
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+
 	s.mu.Lock()
 
 	curOpts := s.getOpts()
@@ -1123,41 +1129,27 @@ func (s *Server) reloadOptions(curOpts, newOpts *Options) error {
 }
 
 // For the purpose of comparing, impose a order on slice data types where order does not matter
-func imposeOrder(value interface{}) error {
+func imposeOrder(value any) error {
 	switch value := value.(type) {
 	case []*Account:
-		sort.Slice(value, func(i, j int) bool {
-			return value[i].Name < value[j].Name
-		})
+		slices.SortFunc(value, func(i, j *Account) int { return cmp.Compare(i.Name, j.Name) })
 		for _, a := range value {
-			sort.Slice(a.imports.streams, func(i, j int) bool {
-				return a.imports.streams[i].acc.Name < a.imports.streams[j].acc.Name
-			})
+			slices.SortFunc(a.imports.streams, func(i, j *streamImport) int { return cmp.Compare(i.acc.Name, j.acc.Name) })
 		}
 	case []*User:
-		sort.Slice(value, func(i, j int) bool {
-			return value[i].Username < value[j].Username
-		})
+		slices.SortFunc(value, func(i, j *User) int { return cmp.Compare(i.Username, j.Username) })
 	case []*NkeyUser:
-		sort.Slice(value, func(i, j int) bool {
-			return value[i].Nkey < value[j].Nkey
-		})
+		slices.SortFunc(value, func(i, j *NkeyUser) int { return cmp.Compare(i.Nkey, j.Nkey) })
 	case []*url.URL:
-		sort.Slice(value, func(i, j int) bool {
-			return value[i].String() < value[j].String()
-		})
+		slices.SortFunc(value, func(i, j *url.URL) int { return cmp.Compare(i.String(), j.String()) })
 	case []string:
-		sort.Strings(value)
+		slices.Sort(value)
 	case []*jwt.OperatorClaims:
-		sort.Slice(value, func(i, j int) bool {
-			return value[i].Issuer < value[j].Issuer
-		})
+		slices.SortFunc(value, func(i, j *jwt.OperatorClaims) int { return cmp.Compare(i.Issuer, j.Issuer) })
 	case GatewayOpts:
-		sort.Slice(value.Gateways, func(i, j int) bool {
-			return value.Gateways[i].Name < value.Gateways[j].Name
-		})
+		slices.SortFunc(value.Gateways, func(i, j *RemoteGatewayOpts) int { return cmp.Compare(i.Name, j.Name) })
 	case WebsocketOpts:
-		sort.Strings(value.AllowedOrigins)
+		slices.Sort(value.AllowedOrigins)
 	case string, bool, uint8, int, int32, int64, time.Duration, float64, nil, LeafNodeOpts, ClusterOpts, *tls.Config, PinnedCertSet,
 		*URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, Authentication, MQTTOpts, jwt.TagList,
 		*OCSPConfig, map[string]string, JSLimitOpts, StoreCipher, *OCSPResponseCacheConfig:
@@ -1703,7 +1695,6 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 		reloadClientTrcLvl = false
 		reloadJetstream    = false
 		jsEnabled          = false
-		reloadTLS          = false
 		isStatszChange     = false
 		co                 *clusterOption
 	)
@@ -1717,9 +1708,6 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 		}
 		if opt.IsAuthChange() {
 			reloadAuth = true
-		}
-		if opt.IsTLSChange() {
-			reloadTLS = true
 		}
 		if opt.IsClusterPoolSizeOrAccountsChange() {
 			co = opt.(*clusterOption)
@@ -1778,13 +1766,9 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 		s.updateRemoteLeafNodesTLSConfig(newOpts)
 	}
 
-	// This will fire if TLS enabled at root (NATS listener) -or- if ocsp or ocsp_cache
-	// appear in the config.
-	if reloadTLS {
-		// Restart OCSP monitoring.
-		if err := s.reloadOCSP(); err != nil {
-			s.Warnf("Can't restart OCSP features: %v", err)
-		}
+	// Always restart OCSP monitoring on reload.
+	if err := s.reloadOCSP(); err != nil {
+		s.Warnf("Can't restart OCSP features: %v", err)
 	}
 
 	s.Noticef("Reloaded server configuration")
@@ -1881,7 +1865,7 @@ func (s *Server) reloadAuthorization() {
 		}
 		// Now range over existing accounts and keep track of the ones deleted
 		// so some cleanup can be made after releasing the server lock.
-		s.accounts.Range(func(k, v interface{}) bool {
+		s.accounts.Range(func(k, v any) bool {
 			an, acc := k.(string), v.(*Account)
 			// Exclude default and system account from this test since those
 			// may not actually be in opts.Accounts.
@@ -1908,7 +1892,7 @@ func (s *Server) reloadAuthorization() {
 			// With a memory resolver we want to do something similar to configured accounts.
 			// We will walk the accounts and delete them if they are no longer present via fetch.
 			// If they are present we will force a claim update to process changes.
-			s.accounts.Range(func(k, v interface{}) bool {
+			s.accounts.Range(func(k, v any) bool {
 				acc := v.(*Account)
 				// Skip global account.
 				if acc == s.gacc {
@@ -1960,7 +1944,7 @@ func (s *Server) reloadAuthorization() {
 		s.accounts.Store(s.sys.account.Name, s.sys.account)
 	}
 
-	s.accounts.Range(func(k, v interface{}) bool {
+	s.accounts.Range(func(k, v any) bool {
 		acc := v.(*Account)
 		acc.mu.RLock()
 		// Check for sysclients accounting, ignore the system account.
@@ -2156,7 +2140,7 @@ func (s *Server) reloadClusterPermissions(oldPerms *RoutePermissions) {
 	// Then, go over all accounts and gather local subscriptions that need to be
 	// sent over as SUB or removed as UNSUB, and routed subscriptions that need
 	// to be dropped due to export permissions.
-	s.accounts.Range(func(_, v interface{}) bool {
+	s.accounts.Range(func(_, v any) bool {
 		acc := v.(*Account)
 		acc.mu.RLock()
 		accName, sl, poolIdx := acc.Name, acc.sl, acc.routePoolIdx
@@ -2371,7 +2355,7 @@ func (s *Server) reloadClusterPoolAndAccounts(co *clusterOption, opts *Options) 
 	// pool index. Note that the added/removed accounts will be reset there
 	// too, but that's ok (we could use a map to exclude them, but not worth it).
 	if co.poolSizeChanged {
-		s.accounts.Range(func(_, v interface{}) bool {
+		s.accounts.Range(func(_, v any) bool {
 			acc := v.(*Account)
 			acc.mu.Lock()
 			s.setRouteInfo(acc)

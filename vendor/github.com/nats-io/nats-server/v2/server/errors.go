@@ -60,6 +60,9 @@ var (
 	// connections.
 	ErrTooManyAccountConnections = errors.New("maximum account active connections exceeded")
 
+	// ErrLeafNodeLoop signals a leafnode is trying to register for a cluster we already have registered.
+	ErrLeafNodeLoop = errors.New("leafnode loop detected")
+
 	// ErrTooManySubs signals a client that the maximum number of subscriptions per connection
 	// has been reached.
 	ErrTooManySubs = errors.New("maximum subscriptions exceeded")
@@ -176,6 +179,9 @@ var (
 
 	// ErrClusterNameRemoteConflict signals that a remote server has a different cluster name.
 	ErrClusterNameRemoteConflict = errors.New("cluster name from remote server conflicts")
+
+	// ErrClusterNameHasSpaces signals that the cluster name contains spaces, which is not allowed.
+	ErrClusterNameHasSpaces = errors.New("cluster name cannot contain spaces or new lines")
 
 	// ErrMalformedSubject is returned when a subscription is made with a subject that does not conform to subject rules.
 	ErrMalformedSubject = errors.New("malformed subject")
@@ -315,7 +321,7 @@ type errCtx struct {
 	ctx string
 }
 
-func NewErrorCtx(err error, format string, args ...interface{}) error {
+func NewErrorCtx(err error, format string, args ...any) error {
 	return &errCtx{err, fmt.Sprintf(format, args...)}
 }
 
