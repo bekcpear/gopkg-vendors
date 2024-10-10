@@ -80,6 +80,16 @@ func (p *hunkChangesParser) parseDiffLines(h *diffpkg.Hunk) {
 		ret = append(ret, dl)
 	}
 
+	// if > 0, then the original file had a 'No newline at end of file' mark
+	if h.OrigNoNewlineAt > 0 {
+		dl := diffLine{
+			originalNumber: currentOriginalLineNumber + 1,
+			typ:            diffLineAdded,
+			data:           "",
+		}
+		ret = append(ret, dl)
+	}
+
 	p.lines = ret
 }
 
@@ -123,8 +133,8 @@ func (p *hunkChangesParser) handleDeletedLines(deletedLines []diffLine, addedLin
 	}
 
 	if len(addedLines) != 0 {
-		//nolint:gocritic
-		change.Replacement.NewLines = append(p.replacementLinesToPrepend, addedLines...)
+		change.Replacement.NewLines = append([]string{}, p.replacementLinesToPrepend...)
+		change.Replacement.NewLines = append(change.Replacement.NewLines, addedLines...)
 		if len(p.replacementLinesToPrepend) != 0 {
 			p.replacementLinesToPrepend = nil
 		}

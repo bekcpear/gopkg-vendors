@@ -15,7 +15,6 @@ import (
 
 const nestifName = "nestif"
 
-//nolint:dupl
 func NewNestif(settings *config.NestifSettings) *goanalysis.Linter {
 	var mu sync.Mutex
 	var resIssues []goanalysis.Issue
@@ -23,7 +22,7 @@ func NewNestif(settings *config.NestifSettings) *goanalysis.Linter {
 	analyzer := &analysis.Analyzer{
 		Name: goanalysis.TheOnlyAnalyzerName,
 		Doc:  goanalysis.TheOnlyanalyzerDoc,
-		Run: func(pass *analysis.Pass) (interface{}, error) {
+		Run: func(pass *analysis.Pass) (any, error) {
 			issues := runNestIf(pass, settings)
 
 			if len(issues) == 0 {

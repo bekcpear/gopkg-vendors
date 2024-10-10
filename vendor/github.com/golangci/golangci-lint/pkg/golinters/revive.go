@@ -34,7 +34,7 @@ type jsonObject struct {
 
 // NewRevive returns a new Revive linter.
 //
-//nolint:dupl
+
 func NewRevive(settings *config.ReviveSettings) *goanalysis.Linter {
 	var mu sync.Mutex
 	var resIssues []goanalysis.Issue
@@ -51,7 +51,7 @@ func NewRevive(settings *config.ReviveSettings) *goanalysis.Linter {
 		[]*analysis.Analyzer{analyzer},
 		nil,
 	).WithContextSetter(func(lintCtx *linter.Context) {
-		analyzer.Run = func(pass *analysis.Pass) (interface{}, error) {
+		analyzer.Run = func(pass *analysis.Pass) (any, error) {
 			issues, err := runRevive(lintCtx, pass, settings)
 			if err != nil {
 				return nil, err
@@ -160,7 +160,8 @@ func reviveToIssue(pass *analysis.Pass, object *jsonObject) goanalysis.Issue {
 // This function mimics the GetConfig function of revive.
 // This allows to get default values and right types.
 // https://github.com/golangci/golangci-lint/issues/1745
-// https://github.com/mgechev/revive/blob/v1.1.4/config/config.go#L182
+// https://github.com/mgechev/revive/blob/v1.3.7/config/config.go#L217
+// https://github.com/mgechev/revive/blob/v1.3.7/config/config.go#L169-L174
 func getReviveConfig(cfg *config.ReviveSettings) (*lint.Config, error) {
 	conf := defaultConfig()
 
@@ -182,13 +183,21 @@ func getReviveConfig(cfg *config.ReviveSettings) (*lint.Config, error) {
 
 	normalizeConfig(conf)
 
+	for k, r := range conf.Rules {
+		err := r.Initialize()
+		if err != nil {
+			return nil, fmt.Errorf("error in config of rule %q: %w", k, err)
+		}
+		conf.Rules[k] = r
+	}
+
 	reviveDebugf("revive configuration: %#v", conf)
 
 	return conf, nil
 }
 
-func createConfigMap(cfg *config.ReviveSettings) map[string]interface{} {
-	rawRoot := map[string]interface{}{
+func createConfigMap(cfg *config.ReviveSettings) map[string]any {
+	rawRoot := map[string]any{
 		"ignoreGeneratedHeader": cfg.IgnoreGeneratedHeader,
 		"confidence":            cfg.Confidence,
 		"severity":              cfg.Severity,
@@ -197,9 +206,9 @@ func createConfigMap(cfg *config.ReviveSettings) map[string]interface{} {
 		"enableAllRules":        cfg.EnableAllRules,
 	}
 
-	rawDirectives := map[string]map[string]interface{}{}
+	rawDirectives := map[string]map[string]any{}
 	for _, directive := range cfg.Directives {
-		rawDirectives[directive.Name] = map[string]interface{}{
+		rawDirectives[directive.Name] = map[string]any{
 			"severity": directive.Severity,
 		}
 	}
@@ -208,12 +217,13 @@ func createConfigMap(cfg *config.ReviveSettings) map[string]interface{} {
 		rawRoot["directive"] = rawDirectives
 	}
 
-	rawRules := map[string]map[string]interface{}{}
+	rawRules := map[string]map[string]any{}
 	for _, s := range cfg.Rules {
-		rawRules[s.Name] = map[string]interface{}{
+		rawRules[s.Name] = map[string]any{
 			"severity":  s.Severity,
 			"arguments": safeTomlSlice(s.Arguments),
 			"disabled":  s.Disabled,
+			"exclude":   s.Exclude,
 		}
 	}
 
@@ -224,19 +234,19 @@ func createConfigMap(cfg *config.ReviveSettings) map[string]interface{} {
 	return rawRoot
 }
 
-func safeTomlSlice(r []interface{}) []interface{} {
+func safeTomlSlice(r []any) []any {
 	if len(r) == 0 {
 		return nil
 	}
 
-	if _, ok := r[0].(map[interface{}]interface{}); !ok {
+	if _, ok := r[0].(map[any]any); !ok {
 		return r
 	}
 
-	var typed []interface{}
+	var typed []any
 	for _, elt := range r {
-		item := map[string]interface{}{}
-		for k, v := range elt.(map[interface{}]interface{}) {
+		item := map[string]any{}
+		for k, v := range elt.(map[any]any) {
 			item[k.(string)] = v
 		}
 
@@ -247,7 +257,7 @@ func safeTomlSlice(r []interface{}) []interface{} {
 }
 
 // This element is not exported by revive, so we need copy the code.
-// Extracted from https://github.com/mgechev/revive/blob/v1.3.0/config/config.go#L15
+// Extracted from https://github.com/mgechev/revive/blob/v1.3.7/config/config.go#L15
 var defaultRules = []lint.Rule{
 	&rule.VarDeclarationsRule{},
 	&rule.PackageCommentsRule{},
@@ -267,7 +277,6 @@ var defaultRules = []lint.Rule{
 	&rule.TimeNamingRule{},
 	&rule.ContextKeysType{},
 	&rule.ContextAsArgumentRule{},
-	&rule.IfReturnRule{},
 	&rule.EmptyBlockRule{},
 	&rule.SuperfluousElseRule{},
 	&rule.UnusedParamRule{},
@@ -291,7 +300,7 @@ var allRules = append([]lint.Rule{
 	&rule.ModifiesValRecRule{},
 	&rule.ConstantLogicalExprRule{},
 	&rule.BoolLiteralRule{},
-	&rule.ImportsBlacklistRule{},
+	&rule.ImportsBlocklistRule{},
 	&rule.FunctionResultsLimitRule{},
 	&rule.MaxPublicStructsRule{},
 	&rule.RangeValInClosureRule{},
@@ -317,12 +326,20 @@ var allRules = append([]lint.Rule{
 	&rule.FunctionLength{},
 	&rule.NestedStructs{},
 	&rule.UselessBreak{},
+	&rule.UncheckedTypeAssertionRule{},
 	&rule.TimeEqualRule{},
 	&rule.BannedCharsRule{},
 	&rule.OptimizeOperandsOrderRule{},
 	&rule.UseAnyRule{},
 	&rule.DataRaceRule{},
 	&rule.CommentSpacingsRule{},
+	&rule.IfReturnRule{},
+	&rule.RedundantImportAlias{},
+	&rule.ImportAliasNamingRule{},
+	&rule.EnforceMapStyleRule{},
+	&rule.EnforceRepeatedArgTypeStyleRule{},
+	&rule.EnforceSliceStyleRule{},
+	&rule.MaxControlNestingRule{},
 }, defaultRules...)
 
 const defaultConfidence = 0.8
@@ -345,8 +362,8 @@ func normalizeConfig(cfg *lint.Config) {
 	}
 	if cfg.EnableAllRules {
 		// Add to the configuration all rules not yet present in it
-		for _, rule := range allRules {
-			ruleName := rule.Name()
+		for _, r := range allRules {
+			ruleName := r.Name()
 			_, alreadyInConf := cfg.Rules[ruleName]
 			if alreadyInConf {
 				continue

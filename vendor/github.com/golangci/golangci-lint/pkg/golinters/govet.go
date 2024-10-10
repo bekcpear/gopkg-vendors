@@ -1,7 +1,11 @@
 package golinters
 
 import (
+	"slices"
+	"sort"
+
 	"golang.org/x/tools/go/analysis"
+	"golang.org/x/tools/go/analysis/passes/appends"
 	"golang.org/x/tools/go/analysis/passes/asmdecl"
 	"golang.org/x/tools/go/analysis/passes/assign"
 	"golang.org/x/tools/go/analysis/passes/atomic"
@@ -14,6 +18,8 @@ import (
 	"golang.org/x/tools/go/analysis/passes/copylock"
 	_ "golang.org/x/tools/go/analysis/passes/ctrlflow" // unused, internal analyzer
 	"golang.org/x/tools/go/analysis/passes/deepequalerrors"
+	"golang.org/x/tools/go/analysis/passes/defers"
+	"golang.org/x/tools/go/analysis/passes/directive"
 	"golang.org/x/tools/go/analysis/passes/errorsas"
 	"golang.org/x/tools/go/analysis/passes/fieldalignment"
 	"golang.org/x/tools/go/analysis/passes/findcall"
@@ -31,6 +37,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/shadow"
 	"golang.org/x/tools/go/analysis/passes/shift"
 	"golang.org/x/tools/go/analysis/passes/sigchanyzer"
+	"golang.org/x/tools/go/analysis/passes/slog"
 	"golang.org/x/tools/go/analysis/passes/sortslice"
 	"golang.org/x/tools/go/analysis/passes/stdmethods"
 	"golang.org/x/tools/go/analysis/passes/stringintconv"
@@ -46,10 +53,12 @@ import (
 
 	"github.com/golangci/golangci-lint/pkg/config"
 	"github.com/golangci/golangci-lint/pkg/golinters/goanalysis"
+	"github.com/golangci/golangci-lint/pkg/logutils"
 )
 
 var (
 	allAnalyzers = []*analysis.Analyzer{
+		appends.Analyzer,
 		asmdecl.Analyzer,
 		assign.Analyzer,
 		atomic.Analyzer,
@@ -60,6 +69,8 @@ var (
 		composite.Analyzer,
 		copylock.Analyzer,
 		deepequalerrors.Analyzer,
+		defers.Analyzer,
+		directive.Analyzer,
 		errorsas.Analyzer,
 		fieldalignment.Analyzer,
 		findcall.Analyzer,
@@ -75,6 +86,7 @@ var (
 		shadow.Analyzer,
 		shift.Analyzer,
 		sigchanyzer.Analyzer,
+		slog.Analyzer,
 		sortslice.Analyzer,
 		stdmethods.Analyzer,
 		stringintconv.Analyzer,
@@ -89,8 +101,9 @@ var (
 		unusedwrite.Analyzer,
 	}
 
-	// https://github.com/golang/go/blob/9f834a559c9ed6cdf883e29b36e21e5f956df74f/src/cmd/vet/main.go#L46-L76
+	// https://github.com/golang/go/blob/b56645a87b28840a180d64077877cb46570b4176/src/cmd/vet/main.go#L49-L81
 	defaultAnalyzers = []*analysis.Analyzer{
+		appends.Analyzer,
 		asmdecl.Analyzer,
 		assign.Analyzer,
 		atomic.Analyzer,
@@ -99,6 +112,8 @@ var (
 		cgocall.Analyzer,
 		composite.Analyzer,
 		copylock.Analyzer,
+		defers.Analyzer,
+		directive.Analyzer,
 		errorsas.Analyzer,
 		framepointer.Analyzer,
 		httpresponse.Analyzer,
@@ -109,6 +124,7 @@ var (
 		printf.Analyzer,
 		shift.Analyzer,
 		sigchanyzer.Analyzer,
+		slog.Analyzer,
 		stdmethods.Analyzer,
 		stringintconv.Analyzer,
 		structtag.Analyzer,
@@ -122,29 +138,32 @@ var (
 	}
 )
 
+var (
+	govetDebugf  = logutils.Debug(logutils.DebugKeyGovet)
+	isGovetDebug = logutils.HaveDebugTag(logutils.DebugKeyGovet)
+)
+
 func NewGovet(settings *config.GovetSettings) *goanalysis.Linter {
-	var conf map[string]map[string]interface{}
+	var conf map[string]map[string]any
 	if settings != nil {
 		conf = settings.Settings
 	}
 
 	return goanalysis.NewLinter(
 		"govet",
-		"Vet examines Go source code and reports suspicious constructs, "+
-			"such as Printf calls whose arguments do not align with the format string",
+		"Vet examines Go source code and reports suspicious constructs. "+
+			"It is roughly the same as 'go vet' and uses its passes.",
 		analyzersFromConfig(settings),
 		conf,
 	).WithLoadMode(goanalysis.LoadModeTypesInfo)
 }
 
 func analyzersFromConfig(settings *config.GovetSettings) []*analysis.Analyzer {
+	debugAnalyzersListf(allAnalyzers, "All available analyzers")
+	debugAnalyzersListf(defaultAnalyzers, "Default analyzers")
+
 	if settings == nil {
 		return defaultAnalyzers
-	}
-
-	if settings.CheckShadowing {
-		// Keeping for backward compatibility.
-		settings.Enable = append(settings.Enable, shadow.Analyzer.Name)
 	}
 
 	var enabledAnalyzers []*analysis.Analyzer
@@ -154,40 +173,57 @@ func analyzersFromConfig(settings *config.GovetSettings) []*analysis.Analyzer {
 		}
 	}
 
+	debugAnalyzersListf(enabledAnalyzers, "Enabled by config analyzers")
+
 	return enabledAnalyzers
 }
 
 func isAnalyzerEnabled(name string, cfg *config.GovetSettings, defaultAnalyzers []*analysis.Analyzer) bool {
-	if cfg.EnableAll {
-		for _, n := range cfg.Disable {
-			if n == name {
-				return false
-			}
-		}
-		return true
-	}
-
-	// Raw for loops should be OK on small slice lengths.
-	for _, n := range cfg.Enable {
-		if n == name {
-			return true
-		}
-	}
-
-	for _, n := range cfg.Disable {
-		if n == name {
-			return false
-		}
-	}
-
-	if cfg.DisableAll {
+	// TODO(ldez) remove loopclosure when go1.23
+	if name == loopclosure.Analyzer.Name && config.IsGoGreaterThanOrEqual(cfg.Go, "1.22") {
 		return false
 	}
 
-	for _, a := range defaultAnalyzers {
-		if a.Name == name {
-			return true
-		}
+	// TODO(ldez) re-enable httpresponse once https://github.com/golangci/golangci-lint/issues/4482 is fixed.
+	if name == httpresponse.Analyzer.Name {
+		govetDebugf("httpresponse is disabled due to panic. See https://github.com/golang/go/issues/66259")
+		return false
 	}
-	return false
+
+	// Keeping for backward compatibility.
+	if cfg.CheckShadowing && name == shadow.Analyzer.Name {
+		return true
+	}
+
+	switch {
+	case cfg.EnableAll:
+		return !slices.Contains(cfg.Disable, name)
+
+	case slices.Contains(cfg.Enable, name):
+		return true
+
+	case slices.Contains(cfg.Disable, name):
+		return false
+
+	case cfg.DisableAll:
+		return false
+
+	default:
+		return slices.ContainsFunc(defaultAnalyzers, func(a *analysis.Analyzer) bool { return a.Name == name })
+	}
+}
+
+func debugAnalyzersListf(analyzers []*analysis.Analyzer, message string) {
+	if !isGovetDebug {
+		return
+	}
+
+	analyzerNames := make([]string, 0, len(analyzers))
+	for _, a := range analyzers {
+		analyzerNames = append(analyzerNames, a.Name)
+	}
+
+	sort.Strings(analyzerNames)
+
+	govetDebugf("%s (%d): %s", message, len(analyzerNames), analyzerNames)
 }

@@ -47,7 +47,7 @@ func (p Diff) Process(issues []result.Issue) ([]result.Issue, error) {
 	if p.patchFilePath != "" {
 		patch, err := os.ReadFile(p.patchFilePath)
 		if err != nil {
-			return nil, fmt.Errorf("can't read from patch file %s: %s", p.patchFilePath, err)
+			return nil, fmt.Errorf("can't read from patch file %s: %w", p.patchFilePath, err)
 		}
 		patchReader = bytes.NewReader(patch)
 	} else if p.patch != "" {
@@ -60,18 +60,18 @@ func (p Diff) Process(issues []result.Issue) ([]result.Issue, error) {
 		WholeFiles:   p.wholeFiles,
 	}
 	if err := c.Prepare(); err != nil {
-		return nil, fmt.Errorf("can't prepare diff by revgrep: %s", err)
+		return nil, fmt.Errorf("can't prepare diff by revgrep: %w", err)
 	}
 
-	return transformIssues(issues, func(i *result.Issue) *result.Issue {
-		hunkPos, isNew := c.IsNewIssue(i)
+	return transformIssues(issues, func(issue *result.Issue) *result.Issue {
+		hunkPos, isNew := c.IsNewIssue(issue)
 		if !isNew {
 			return nil
 		}
 
-		newI := *i
-		newI.HunkPos = hunkPos
-		return &newI
+		newIssue := *issue
+		newIssue.HunkPos = hunkPos
+		return &newIssue
 	}), nil
 }
 

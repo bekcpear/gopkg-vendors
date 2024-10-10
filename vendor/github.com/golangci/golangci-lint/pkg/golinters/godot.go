@@ -30,7 +30,7 @@ func NewGodot(settings *config.GodotSettings) *goanalysis.Linter {
 
 		// Convert deprecated setting
 		// todo(butuzov): remove on v2 release
-		if settings.CheckAll { //nolint:staticcheck // Keep for retro-compatibility.
+		if settings.CheckAll {
 			dotSettings.Scope = godot.AllScope
 		}
 	}
@@ -42,7 +42,7 @@ func NewGodot(settings *config.GodotSettings) *goanalysis.Linter {
 	analyzer := &analysis.Analyzer{
 		Name: godotName,
 		Doc:  goanalysis.TheOnlyanalyzerDoc,
-		Run: func(pass *analysis.Pass) (interface{}, error) {
+		Run: func(pass *analysis.Pass) (any, error) {
 			issues, err := runGodot(pass, dotSettings)
 			if err != nil {
 				return nil, err

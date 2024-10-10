@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 )
@@ -54,7 +55,7 @@ var DefaultExcludePatterns = []ExcludePattern{
 	},
 	{
 		ID:      "EXC0008",
-		Pattern: "(G104|G307)",
+		Pattern: "(G104)",
 		Linter:  "gosec",
 		Why:     "Duplicated errcheck checks",
 	},
@@ -108,7 +109,12 @@ type Issues struct {
 	ExcludeCaseSensitive   bool          `mapstructure:"exclude-case-sensitive"`
 	ExcludePatterns        []string      `mapstructure:"exclude"`
 	ExcludeRules           []ExcludeRule `mapstructure:"exclude-rules"`
+	ExcludeGeneratedStrict bool          `mapstructure:"exclude-generated-strict"`
 	UseDefaultExcludes     bool          `mapstructure:"exclude-use-default"`
+
+	ExcludeFiles          []string `mapstructure:"exclude-files"`
+	ExcludeDirs           []string `mapstructure:"exclude-dirs"`
+	UseDefaultExcludeDirs bool     `mapstructure:"exclude-dirs-use-default"`
 
 	MaxIssuesPerLinter int `mapstructure:"max-issues-per-linter"`
 	MaxSameIssues      int `mapstructure:"max-same-issues"`
@@ -121,47 +127,77 @@ type Issues struct {
 	NeedFix bool `mapstructure:"fix"`
 }
 
+func (i *Issues) Validate() error {
+	for i, rule := range i.ExcludeRules {
+		if err := rule.Validate(); err != nil {
+			return fmt.Errorf("error in exclude rule #%d: %w", i, err)
+		}
+	}
+
+	return nil
+}
+
 type ExcludeRule struct {
 	BaseRule `mapstructure:",squash"`
 }
 
-func (e ExcludeRule) Validate() error {
+func (e *ExcludeRule) Validate() error {
 	return e.BaseRule.Validate(excludeRuleMinConditionsCount)
 }
 
 type BaseRule struct {
-	Linters []string
-	Path    string
-	Text    string
-	Source  string
+	Linters    []string
+	Path       string
+	PathExcept string `mapstructure:"path-except"`
+	Text       string
+	Source     string
 }
 
-func (b BaseRule) Validate(minConditionsCount int) error {
+func (b *BaseRule) Validate(minConditionsCount int) error {
 	if err := validateOptionalRegex(b.Path); err != nil {
-		return fmt.Errorf("invalid path regex: %v", err)
+		return fmt.Errorf("invalid path regex: %w", err)
 	}
+
+	if err := validateOptionalRegex(b.PathExcept); err != nil {
+		return fmt.Errorf("invalid path-except regex: %w", err)
+	}
+
 	if err := validateOptionalRegex(b.Text); err != nil {
-		return fmt.Errorf("invalid text regex: %v", err)
+		return fmt.Errorf("invalid text regex: %w", err)
 	}
+
 	if err := validateOptionalRegex(b.Source); err != nil {
-		return fmt.Errorf("invalid source regex: %v", err)
+		return fmt.Errorf("invalid source regex: %w", err)
 	}
+
+	if b.Path != "" && b.PathExcept != "" {
+		return errors.New("path and path-except should not be set at the same time")
+	}
+
 	nonBlank := 0
 	if len(b.Linters) > 0 {
 		nonBlank++
 	}
-	if b.Path != "" {
+
+	// Filtering by path counts as one condition, regardless how it is done (one or both).
+	// Otherwise, a rule with Path and PathExcept set would pass validation
+	// whereas before the introduction of path-except that wouldn't have been precise enough.
+	if b.Path != "" || b.PathExcept != "" {
 		nonBlank++
 	}
+
 	if b.Text != "" {
 		nonBlank++
 	}
+
 	if b.Source != "" {
 		nonBlank++
 	}
+
 	if nonBlank < minConditionsCount {
-		return fmt.Errorf("at least %d of (text, source, path, linters) should be set", minConditionsCount)
+		return fmt.Errorf("at least %d of (text, source, path[-except],  linters) should be set", minConditionsCount)
 	}
+
 	return nil
 }
 
@@ -169,6 +205,7 @@ func validateOptionalRegex(value string) error {
 	if value == "" {
 		return nil
 	}
+
 	_, err := regexp.Compile(value)
 	return err
 }

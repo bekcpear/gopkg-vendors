@@ -9,7 +9,6 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/hashicorp/go-multierror"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/types/objectpath"
@@ -50,7 +49,7 @@ type action struct {
 	deps                []*action
 	objectFacts         map[objectFactKey]analysis.Fact
 	packageFacts        map[packageFactKey]analysis.Fact
-	result              interface{}
+	result              any
 	diagnostics         []analysis.Diagnostic
 	err                 error
 	r                   *runner
@@ -126,26 +125,22 @@ func (act *action) analyze() {
 	}(time.Now())
 
 	// Report an error if any dependency failures.
-	var depErrors *multierror.Error
+	var depErrors error
 	for _, dep := range act.deps {
 		if dep.err == nil {
 			continue
 		}
 
-		depErrors = multierror.Append(depErrors, errors.Unwrap(dep.err))
+		depErrors = errors.Join(depErrors, errors.Unwrap(dep.err))
 	}
 	if depErrors != nil {
-		depErrors.ErrorFormat = func(e []error) string {
-			return fmt.Sprintf("failed prerequisites: %v", e)
-		}
-
-		act.err = depErrors
+		act.err = fmt.Errorf("failed prerequisites: %w", depErrors)
 		return
 	}
 
 	// Plumb the output values of the dependencies
 	// into the inputs of this action.  Also facts.
-	inputs := make(map[*analysis.Analyzer]interface{})
+	inputs := make(map[*analysis.Analyzer]any)
 	startedAt := time.Now()
 	for _, dep := range act.deps {
 		if dep.pkg == act.pkg {

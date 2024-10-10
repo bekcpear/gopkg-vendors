@@ -2,6 +2,7 @@ package golinters
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"go/token"
 	"os"
@@ -21,7 +22,6 @@ const lllName = "lll"
 
 const goCommentDirectivePrefix = "//go:"
 
-//nolint:dupl
 func NewLLL(settings *config.LllSettings) *goanalysis.Linter {
 	var mu sync.Mutex
 	var resIssues []goanalysis.Issue
@@ -29,7 +29,7 @@ func NewLLL(settings *config.LllSettings) *goanalysis.Linter {
 	analyzer := &analysis.Analyzer{
 		Name: lllName,
 		Doc:  goanalysis.TheOnlyanalyzerDoc,
-		Run: func(pass *analysis.Pass) (interface{}, error) {
+		Run: func(pass *analysis.Pass) (any, error) {
 			issues, err := runLll(pass, settings)
 			if err != nil {
 				return nil, err
@@ -82,7 +82,7 @@ func getLLLIssuesForFile(filename string, maxLineLen int, tabSpaces string) ([]r
 
 	f, err := os.Open(filename)
 	if err != nil {
-		return nil, fmt.Errorf("can't open file %s: %s", filename, err)
+		return nil, fmt.Errorf("can't open file %s: %w", filename, err)
 	}
 	defer f.Close()
 
@@ -127,7 +127,7 @@ func getLLLIssuesForFile(filename string, maxLineLen int, tabSpaces string) ([]r
 	}
 
 	if err := scanner.Err(); err != nil {
-		if err == bufio.ErrTooLong && maxLineLen < bufio.MaxScanTokenSize {
+		if errors.Is(err, bufio.ErrTooLong) && maxLineLen < bufio.MaxScanTokenSize {
 			// scanner.Scan() might fail if the line is longer than bufio.MaxScanTokenSize
 			// In the case where the specified maxLineLen is smaller than bufio.MaxScanTokenSize
 			// we can return this line as a long line instead of returning an error.
@@ -148,7 +148,7 @@ func getLLLIssuesForFile(filename string, maxLineLen int, tabSpaces string) ([]r
 				FromLinter: lllName,
 			})
 		} else {
-			return nil, fmt.Errorf("can't scan file %s: %s", filename, err)
+			return nil, fmt.Errorf("can't scan file %s: %w", filename, err)
 		}
 	}
 

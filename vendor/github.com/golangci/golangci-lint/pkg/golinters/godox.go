@@ -16,7 +16,6 @@ import (
 
 const godoxName = "godox"
 
-//nolint:dupl
 func NewGodox(settings *config.GodoxSettings) *goanalysis.Linter {
 	var mu sync.Mutex
 	var resIssues []goanalysis.Issue
@@ -24,7 +23,7 @@ func NewGodox(settings *config.GodoxSettings) *goanalysis.Linter {
 	analyzer := &analysis.Analyzer{
 		Name: godoxName,
 		Doc:  goanalysis.TheOnlyanalyzerDoc,
-		Run: func(pass *analysis.Pass) (interface{}, error) {
+		Run: func(pass *analysis.Pass) (any, error) {
 			issues := runGodox(pass, settings)
 
 			if len(issues) == 0 {

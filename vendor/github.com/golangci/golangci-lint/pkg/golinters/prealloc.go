@@ -15,7 +15,6 @@ import (
 
 const preallocName = "prealloc"
 
-//nolint:dupl
 func NewPreAlloc(settings *config.PreallocSettings) *goanalysis.Linter {
 	var mu sync.Mutex
 	var resIssues []goanalysis.Issue
@@ -23,7 +22,7 @@ func NewPreAlloc(settings *config.PreallocSettings) *goanalysis.Linter {
 	analyzer := &analysis.Analyzer{
 		Name: preallocName,
 		Doc:  goanalysis.TheOnlyanalyzerDoc,
-		Run: func(pass *analysis.Pass) (interface{}, error) {
+		Run: func(pass *analysis.Pass) (any, error) {
 			issues := runPreAlloc(pass, settings)
 
 			if len(issues) == 0 {

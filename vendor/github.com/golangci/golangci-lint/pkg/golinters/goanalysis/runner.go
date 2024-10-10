@@ -17,6 +17,7 @@ import (
 	"sort"
 	"sync"
 
+	"golang.org/x/exp/maps"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/packages"
 
@@ -60,7 +61,8 @@ type runner struct {
 }
 
 func newRunner(prefix string, logger logutils.Log, pkgCache *pkgcache.Cache, loadGuard *load.Guard,
-	loadMode LoadMode, sw *timeutils.Stopwatch) *runner {
+	loadMode LoadMode, sw *timeutils.Stopwatch,
+) *runner {
 	return &runner{
 		prefix:    prefix,
 		log:       logger,
@@ -79,7 +81,8 @@ func newRunner(prefix string, logger logutils.Log, pkgCache *pkgcache.Cache, loa
 // singlechecker and the multi-analysis commands.
 // It returns the appropriate exit code.
 func (r *runner) run(analyzers []*analysis.Analyzer, initialPackages []*packages.Package) ([]Diagnostic,
-	[]error, map[*analysis.Pass]*packages.Package) {
+	[]error, map[*analysis.Pass]*packages.Package,
+) {
 	debugf("Analyzing %d packages on load mode %s", len(initialPackages), r.loadMode)
 	defer r.pkgCache.Trim()
 
@@ -115,7 +118,8 @@ func (r *runner) markAllActions(a *analysis.Analyzer, pkg *packages.Package, mar
 }
 
 func (r *runner) makeAction(a *analysis.Analyzer, pkg *packages.Package,
-	initialPkgs map[*packages.Package]bool, actions map[actKey]*action, actAlloc *actionAllocator) *action {
+	initialPkgs map[*packages.Package]bool, actions map[actKey]*action, actAlloc *actionAllocator,
+) *action {
 	k := actKey{a, pkg}
 	act, ok := actions[k]
 	if ok {
@@ -149,7 +153,8 @@ func (r *runner) makeAction(a *analysis.Analyzer, pkg *packages.Package,
 }
 
 func (r *runner) buildActionFactDeps(act *action, a *analysis.Analyzer, pkg *packages.Package,
-	initialPkgs map[*packages.Package]bool, actions map[actKey]*action, actAlloc *actionAllocator) {
+	initialPkgs map[*packages.Package]bool, actions map[actKey]*action, actAlloc *actionAllocator,
+) {
 	// An analysis that consumes/produces facts
 	// must run on the package's dependencies too.
 	if len(a.FactTypes) == 0 {
@@ -159,10 +164,7 @@ func (r *runner) buildActionFactDeps(act *action, a *analysis.Analyzer, pkg *pac
 	act.objectFacts = make(map[objectFactKey]analysis.Fact)
 	act.packageFacts = make(map[packageFactKey]analysis.Fact)
 
-	paths := make([]string, 0, len(pkg.Imports))
-	for path := range pkg.Imports {
-		paths = append(paths, path)
-	}
+	paths := maps.Keys(pkg.Imports)
 	sort.Strings(paths) // for determinism
 	for _, path := range paths {
 		dep := r.makeAction(a, pkg.Imports[path], initialPkgs, actions, actAlloc)
@@ -175,9 +177,9 @@ func (r *runner) buildActionFactDeps(act *action, a *analysis.Analyzer, pkg *pac
 	}
 }
 
-//nolint:gocritic
 func (r *runner) prepareAnalysis(pkgs []*packages.Package,
-	analyzers []*analysis.Analyzer) (map[*packages.Package]bool, []*action, []*action) {
+	analyzers []*analysis.Analyzer,
+) (initialPkgs map[*packages.Package]bool, allActions, roots []*action) {
 	// Construct the action graph.
 
 	// Each graph node (action) is one unit of analysis.
@@ -197,13 +199,13 @@ func (r *runner) prepareAnalysis(pkgs []*packages.Package,
 	actions := make(map[actKey]*action, totalActionsCount)
 	actAlloc := newActionAllocator(totalActionsCount)
 
-	initialPkgs := make(map[*packages.Package]bool, len(pkgs))
+	initialPkgs = make(map[*packages.Package]bool, len(pkgs))
 	for _, pkg := range pkgs {
 		initialPkgs[pkg] = true
 	}
 
 	// Build nodes for initial packages.
-	roots := make([]*action, 0, len(pkgs)*len(analyzers))
+	roots = make([]*action, 0, len(pkgs)*len(analyzers))
 	for _, a := range analyzers {
 		for _, pkg := range pkgs {
 			root := r.makeAction(a, pkg, initialPkgs, actions, actAlloc)
@@ -212,10 +214,7 @@ func (r *runner) prepareAnalysis(pkgs []*packages.Package,
 		}
 	}
 
-	allActions := make([]*action, 0, len(actions))
-	for _, act := range actions {
-		allActions = append(allActions, act)
-	}
+	allActions = maps.Values(actions)
 
 	debugf("Built %d actions", len(actions))
 
@@ -281,7 +280,6 @@ func (r *runner) analyze(pkgs []*packages.Package, analyzers []*analysis.Analyze
 	return rootActions
 }
 
-//nolint:nakedret
 func extractDiagnostics(roots []*action) (retDiags []Diagnostic, retErrors []error) {
 	extracted := make(map[*action]bool)
 	var extract func(*action)
@@ -338,5 +336,5 @@ func extractDiagnostics(roots []*action) (retDiags []Diagnostic, retErrors []err
 		}
 	}
 	visitAll(roots)
-	return
+	return retDiags, retErrors
 }
