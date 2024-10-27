@@ -1,4 +1,4 @@
-# github.com/adrg/xdg v0.5.0
+# github.com/adrg/xdg v0.5.1
 ## explicit; go 1.19
 github.com/adrg/xdg
 github.com/adrg/xdg/internal/pathutil
@@ -277,7 +277,7 @@ github.com/pmezard/go-difflib/difflib
 # github.com/quic-go/qpack v0.5.1
 ## explicit; go 1.22
 github.com/quic-go/qpack
-# github.com/quic-go/quic-go v0.47.0
+# github.com/quic-go/quic-go v0.48.1
 ## explicit; go 1.22
 github.com/quic-go/quic-go
 github.com/quic-go/quic-go/internal/ackhandler
