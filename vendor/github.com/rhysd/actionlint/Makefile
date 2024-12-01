@@ -23,12 +23,14 @@ all: build test lint
 
 t test: .testtimestamp
 
-.staticchecktimestamp: $(TESTS) $(SRCS) $(TOOL)
+.linttimestamp: $(TESTS) $(SRCS) $(TOOL)
+	go vet ./...
 	staticcheck ./...
 	GOOS=js GOARCH=wasm staticcheck ./playground
-	touch .staticchecktimestamp
+	go run ./scripts/check-checks -quiet ./docs/checks.md
+	touch .linttimestamp
 
-l lint: .staticchecktimestamp
+l lint: .linttimestamp
 
 popular_actions.go all_webhooks.go availability.go: $(GO_GEN_SRCS)
 ifdef SKIP_GO_GENERATE
@@ -67,7 +69,7 @@ scripts/generate-actionlint-matcher/test/want.json: actionlint
 	./actionlint -format '{{json .}}' ./testdata/err/one_error.yaml > scripts/generate-actionlint-matcher/test/want.json || true
 
 c clean:
-	rm -f ./actionlint ./.testtimestamp ./.staticchecktimestamp ./actionlint_fuzz-fuzz.zip ./man/actionlint.1 ./man/actionlint.1.html ./actionlint-workflow-ast
+	rm -f ./actionlint ./.testtimestamp ./.linttimestamp ./actionlint_fuzz-fuzz.zip ./man/actionlint.1 ./man/actionlint.1.html ./actionlint-workflow-ast
 	rm -rf ./corpus ./crashers
 
 .git-hooks/.timestamp: .git-hooks/pre-push

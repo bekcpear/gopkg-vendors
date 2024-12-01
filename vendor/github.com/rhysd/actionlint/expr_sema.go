@@ -511,6 +511,12 @@ func (sema *ExprSemanticsChecker) checkSpecialFunctionAvailability(n *FuncCallNo
 	)
 }
 
+func (sema *ExprSemanticsChecker) visitUntrustedCheckerOnEnterNode(n ExprNode) {
+	if sema.untrusted != nil {
+		sema.untrusted.OnVisitNodeEnter(n)
+	}
+}
+
 func (sema *ExprSemanticsChecker) visitUntrustedCheckerOnLeaveNode(n ExprNode) {
 	if sema.untrusted != nil {
 		sema.untrusted.OnVisitNodeLeave(n)
@@ -780,11 +786,11 @@ func checkFuncSignature(n *FuncCallNode, sig *FuncSignature, args []ExprType) *E
 	return nil
 }
 
-func (sema *ExprSemanticsChecker) checkBuiltinFunctionCall(n *FuncCallNode, sig *FuncSignature) {
+func (sema *ExprSemanticsChecker) checkBuiltinFunctionCall(n *FuncCallNode, _ *FuncSignature) {
 	sema.checkSpecialFunctionAvailability(n)
 
 	// Special checks for specific built-in functions
-	switch n.Callee {
+	switch strings.ToLower(n.Callee) {
 	case "format":
 		lit, ok := n.Args[0].(*StringNode)
 		if !ok {
@@ -972,6 +978,7 @@ func (sema *ExprSemanticsChecker) checkLogicalOp(n *LogicalOpNode) ExprType {
 }
 
 func (sema *ExprSemanticsChecker) check(expr ExprNode) ExprType {
+	sema.visitUntrustedCheckerOnEnterNode(expr)
 	defer sema.visitUntrustedCheckerOnLeaveNode(expr) // Call this method in bottom-up order
 
 	switch e := expr.(type) {
