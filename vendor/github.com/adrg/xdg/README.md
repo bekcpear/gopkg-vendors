@@ -79,7 +79,7 @@ Sensible fallback locations are used for the folders which are not set.
 | <kbd><b>XDG_CONFIG_DIRS</b></kbd>                              | <kbd>/etc/xdg</kbd>                                                       | <kbd>~/Library/Preferences</kbd><br/><kbd>/Library/Application&nbsp;Support</kbd><br/><kbd>/Library/Preferences</kbd><br/><kbd>&#126;/.config</kbd> | <kbd>/lib</kbd>                                                             |
 | <kbd><b>XDG_STATE_HOME</b></kbd>                               | <kbd>~/.local/state</kbd>                                                 | <kbd>~/Library/Application&nbsp;Support</kbd>                                                                                                       | <kbd>$home/lib/state</kbd>                                                  |
 | <kbd><b>XDG_CACHE_HOME</b></kbd>                               | <kbd>~/.cache</kbd>                                                       | <kbd>~/Library/Caches</kbd>                                                                                                                         | <kbd>$home/lib/cache</kbd>                                                  |
-| <kbd><b>XDG_RUNTIME_DIR</b></kbd>                              | <kbd>/run/user/UID</kbd>                                                  | <kbd>~/Library/Application&nbsp;Support</kbd>                                                                                                       | <kbd>/tmp</kbd>                                                             |
+| <kbd><b>XDG_RUNTIME_DIR</b></kbd>                              | <kbd>/run/user/$UID</kbd>                                                 | <kbd>~/Library/Application&nbsp;Support</kbd>                                                                                                       | <kbd>/tmp</kbd>                                                             |
 | <kbd><b>XDG_BIN_HOME</b></kbd>                                 | <kbd>~/.local/bin</kbd>                                                   | <kbd>~/.local/bin</kbd>                                                                                                                             | <kbd>$home/bin</kbd>                                                        |
 
 </details>
@@ -97,7 +97,7 @@ Sensible fallback locations are used for the folders which are not set.
 | <kbd><b>XDG_STATE_HOME</b></kbd>                               | <kbd>LocalAppData</kbd>                                                                   | <kbd>%LOCALAPPDATA%</kbd>                                                        |
 | <kbd><b>XDG_CACHE_HOME</b></kbd>                               | <kbd>LocalAppData\cache</kbd>                                                             | <kbd>%LOCALAPPDATA%\cache</kbd>                                                  |
 | <kbd><b>XDG_RUNTIME_DIR</b></kbd>                              | <kbd>LocalAppData</kbd>                                                                   | <kbd>%LOCALAPPDATA%</kbd>                                                        |
-| <kbd><b>XDG_BIN_HOME</b></kbd>                                 | <kbd>UserProgramFiles</kbd>                                                               | <kbd>%LOCALAPPDATA%/Programs</kbd>                                               |
+| <kbd><b>XDG_BIN_HOME</b></kbd>                                 | <kbd>UserProgramFiles</kbd>                                                               | <kbd>%LOCALAPPDATA%\Programs</kbd>                                               |
 
 </details>
 
@@ -207,6 +207,9 @@ func main() {
 	// ConfigFile takes one parameter which must contain the name of the file,
 	// but it can also contain a set of parent directories. If the directories
 	// don't exist, they will be created relative to the base config directory.
+	// It is recommended for files to be saved inside an application directory
+	// relative to the base directory rather than directly inside the base
+	// directory (e.g. `appname/config.yaml` instead of `appname-config.yaml`).
 	configFilePath, err := xdg.ConfigFile("appname/config.yaml")
 	if err != nil {
 		log.Fatal(err)
