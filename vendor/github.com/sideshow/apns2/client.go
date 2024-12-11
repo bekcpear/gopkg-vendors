@@ -192,6 +192,7 @@ func (c *Client) PushWithContext(ctx Context, n *Notification) (*Response, error
 	r := &Response{}
 	r.StatusCode = response.StatusCode
 	r.ApnsID = response.Header.Get("apns-id")
+	r.ApnsUniqueID = response.Header.Get("apns-unique-id")
 
 	decoder := json.NewDecoder(response.Body)
 	if err := decoder.Decode(r); err != nil && err != io.EOF {
@@ -226,7 +227,7 @@ func setHeaders(r *http.Request, n *Notification) {
 	if n.Priority > 0 {
 		r.Header.Set("apns-priority", strconv.Itoa(n.Priority))
 	}
-	if !n.Expiration.IsZero() {
+	if n.Expiration.After(time.Unix(0, 0)) {
 		r.Header.Set("apns-expiration", strconv.FormatInt(n.Expiration.Unix(), 10))
 	}
 	if n.PushType != "" {
@@ -234,5 +235,4 @@ func setHeaders(r *http.Request, n *Notification) {
 	} else {
 		r.Header.Set("apns-push-type", string(PushTypeAlert))
 	}
-
 }
