@@ -181,7 +181,7 @@ var dnsForwarderFailing = health.Register(&health.Warnable{
 	DependsOn:           []*health.Warnable{health.NetworkStatusWarnable},
 	Text:                health.StaticMessage("Tailscale can't reach the configured DNS servers. Internet connectivity may be affected."),
 	ImpactsConnectivity: true,
-	TimeToVisible:       5 * time.Second,
+	TimeToVisible:       15 * time.Second,
 })
 
 type route struct {
@@ -834,6 +834,17 @@ func (f *forwarder) resolvers(domain dnsname.FQDN) []resolverAndDelay {
 	return cloudHostFallback // or nil if no fallback
 }
 
+// GetUpstreamResolvers returns the resolvers that would be used to resolve
+// the given FQDN.
+func (f *forwarder) GetUpstreamResolvers(name dnsname.FQDN) []*dnstype.Resolver {
+	resolvers := f.resolvers(name)
+	upstreamResolvers := make([]*dnstype.Resolver, 0, len(resolvers))
+	for _, r := range resolvers {
+		upstreamResolvers = append(upstreamResolvers, r.name)
+	}
+	return upstreamResolvers
+}
+
 // forwardQuery is information and state about a forwarded DNS query that's
 // being sent to 1 or more upstreams.
 //
@@ -1093,6 +1104,8 @@ func nxDomainResponse(req packet) (res packet, err error) {
 	// TODO(bradfitz): should we add an SOA record in the Authority
 	// section too? (for the nxdomain negative caching TTL)
 	// For which zone? Does iOS care?
+	b.StartQuestions()
+	b.Question(p.Question)
 	res.bs, err = b.Finish()
 	res.addr = req.addr
 	return res, err

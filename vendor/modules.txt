@@ -155,6 +155,11 @@ github.com/cenkalti/backoff/v4
 # github.com/cespare/xxhash/v2 v2.3.0
 ## explicit; go 1.11
 github.com/cespare/xxhash/v2
+# github.com/chasefleming/elem-go v0.29.0
+## explicit; go 1.21.1
+github.com/chasefleming/elem-go
+github.com/chasefleming/elem-go/attrs
+github.com/chasefleming/elem-go/styles
 # github.com/coder/websocket v1.8.12
 ## explicit; go 1.19
 github.com/coder/websocket
@@ -166,8 +171,8 @@ github.com/coder/websocket/internal/xsync
 # github.com/containerd/console v1.0.4
 ## explicit; go 1.13
 github.com/containerd/console
-# github.com/containerd/continuity v0.4.3
-## explicit; go 1.19
+# github.com/containerd/continuity v0.4.5
+## explicit; go 1.21
 github.com/containerd/continuity/pathdriver
 # github.com/coreos/go-iptables v0.7.1-0.20240112124308-65c67c9f46e6
 ## explicit; go 1.16
@@ -190,13 +195,10 @@ github.com/dblohm7/wingoes/com
 github.com/dblohm7/wingoes/com/automation
 github.com/dblohm7/wingoes/internal
 github.com/dblohm7/wingoes/pe
-# github.com/deckarep/golang-set/v2 v2.6.0
-## explicit; go 1.18
-github.com/deckarep/golang-set/v2
 # github.com/digitalocean/go-smbios v0.0.0-20180907143718-390a4f403a8e
 ## explicit
 github.com/digitalocean/go-smbios/smbios
-# github.com/docker/cli v27.2.0+incompatible
+# github.com/docker/cli v27.3.1+incompatible
 ## explicit
 github.com/docker/cli/cli/compose/interpolation
 github.com/docker/cli/cli/compose/loader
@@ -204,7 +206,7 @@ github.com/docker/cli/cli/compose/schema
 github.com/docker/cli/cli/compose/template
 github.com/docker/cli/cli/compose/types
 github.com/docker/cli/opts
-# github.com/docker/docker v27.2.0+incompatible
+# github.com/docker/docker v27.3.1+incompatible
 ## explicit
 github.com/docker/docker/api/types/blkiodev
 github.com/docker/docker/api/types/container
@@ -228,9 +230,10 @@ github.com/dustin/go-humanize
 # github.com/felixge/fgprof v0.9.5
 ## explicit; go 1.14
 github.com/felixge/fgprof
-# github.com/fsnotify/fsnotify v1.7.0
+# github.com/fsnotify/fsnotify v1.8.0
 ## explicit; go 1.17
 github.com/fsnotify/fsnotify
+github.com/fsnotify/fsnotify/internal
 # github.com/fxamacker/cbor/v2 v2.6.0
 ## explicit; go 1.17
 github.com/fxamacker/cbor/v2
@@ -268,7 +271,7 @@ github.com/go-json-experiment/json/jsontext
 ## explicit; go 1.12
 github.com/go-ole/go-ole
 github.com/go-ole/go-ole/oleutil
-# github.com/go-viper/mapstructure/v2 v2.1.0
+# github.com/go-viper/mapstructure/v2 v2.2.1
 ## explicit; go 1.18
 github.com/go-viper/mapstructure/v2
 github.com/go-viper/mapstructure/v2/internal/errors
@@ -351,9 +354,9 @@ github.com/hashicorp/go-version
 # github.com/hdevalence/ed25519consensus v0.2.0
 ## explicit; go 1.19
 github.com/hdevalence/ed25519consensus
-# github.com/illarion/gonotify v1.0.1
+# github.com/illarion/gonotify/v2 v2.0.3
 ## explicit; go 1.12
-github.com/illarion/gonotify
+github.com/illarion/gonotify/v2
 # github.com/inconshreveable/mousetrap v1.1.0
 ## explicit; go 1.18
 github.com/inconshreveable/mousetrap
@@ -427,6 +430,11 @@ github.com/kr/pretty
 # github.com/kr/text v0.2.0
 ## explicit
 github.com/kr/text
+# github.com/lib/pq v1.10.9
+## explicit; go 1.13
+github.com/lib/pq
+github.com/lib/pq/oid
+github.com/lib/pq/scram
 # github.com/lithammer/fuzzysearch v1.1.8
 ## explicit; go 1.15
 github.com/lithammer/fuzzysearch/fuzzy
@@ -465,6 +473,9 @@ github.com/mitchellh/go-ps
 # github.com/moby/docker-image-spec v1.3.1
 ## explicit; go 1.18
 github.com/moby/docker-image-spec/specs-go/v1
+# github.com/moby/sys/user v0.3.0
+## explicit; go 1.17
+github.com/moby/sys/user
 # github.com/moby/term v0.5.0
 ## explicit; go 1.18
 github.com/moby/term
@@ -485,8 +496,8 @@ github.com/opencontainers/go-digest
 ## explicit; go 1.18
 github.com/opencontainers/image-spec/specs-go
 github.com/opencontainers/image-spec/specs-go/v1
-# github.com/opencontainers/runc v1.1.14
-## explicit; go 1.18
+# github.com/opencontainers/runc v1.2.2
+## explicit; go 1.22
 github.com/opencontainers/runc/libcontainer/user
 # github.com/ory/dockertest/v3 v3.11.0
 ## explicit; go 1.22
@@ -513,9 +524,6 @@ github.com/ory/dockertest/v3/docker/types/network
 github.com/ory/dockertest/v3/docker/types/registry
 github.com/ory/dockertest/v3/docker/types/strslice
 github.com/ory/dockertest/v3/docker/types/versions
-# github.com/patrickmn/go-cache v2.1.0+incompatible
-## explicit
-github.com/patrickmn/go-cache
 # github.com/pelletier/go-toml/v2 v2.2.3
 ## explicit; go 1.21.0
 github.com/pelletier/go-toml/v2
@@ -638,6 +646,7 @@ github.com/spf13/viper/internal/features
 # github.com/stretchr/testify v1.9.0
 ## explicit; go 1.17
 github.com/stretchr/testify/assert
+github.com/stretchr/testify/require
 # github.com/subosito/gotenv v1.6.0
 ## explicit; go 1.18
 github.com/subosito/gotenv
@@ -668,9 +677,10 @@ github.com/tailscale/goupnp/ssdp
 # github.com/tailscale/hujson v0.0.0-20221223112325-20486734a56a
 ## explicit; go 1.18
 github.com/tailscale/hujson
-# github.com/tailscale/netlink v1.1.1-0.20211101221916-cabfb018fe85
+# github.com/tailscale/netlink v1.1.1-0.20240822203006-4d49adab4de7
 ## explicit; go 1.12
 github.com/tailscale/netlink
+github.com/tailscale/netlink/nl
 # github.com/tailscale/peercred v0.0.0-20240214030740-b535050b2aa4
 ## explicit; go 1.18
 github.com/tailscale/peercred
@@ -687,7 +697,7 @@ github.com/tailscale/tailsql/server/tailsql
 # github.com/tailscale/web-client-prebuilt v0.0.0-20240226180453-5db17b287bf1
 ## explicit; go 1.21
 github.com/tailscale/web-client-prebuilt
-# github.com/tailscale/wireguard-go v0.0.0-20240731203015-71393c576b98
+# github.com/tailscale/wireguard-go v0.0.0-20240905161824-799c1978fafc
 ## explicit; go 1.20
 github.com/tailscale/wireguard-go/conn
 github.com/tailscale/wireguard-go/conn/winrio
@@ -709,9 +719,6 @@ github.com/tcnksm/go-latest
 ## explicit; go 1.16
 github.com/u-root/uio/rand
 github.com/u-root/uio/uio
-# github.com/vishvananda/netlink v1.2.1-beta.2
-## explicit; go 1.12
-github.com/vishvananda/netlink/nl
 # github.com/vishvananda/netns v0.0.4
 ## explicit; go 1.17
 github.com/vishvananda/netns
@@ -798,7 +805,7 @@ golang.org/x/oauth2/internal
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
 golang.org/x/sync/singleflight
-# golang.org/x/sys v0.24.0
+# golang.org/x/sys v0.28.0
 ## explicit; go 1.18
 golang.org/x/sys/cpu
 golang.org/x/sys/plan9
@@ -927,8 +934,8 @@ google.golang.org/grpc/serviceconfig
 google.golang.org/grpc/stats
 google.golang.org/grpc/status
 google.golang.org/grpc/tap
-# google.golang.org/protobuf v1.34.2
-## explicit; go 1.20
+# google.golang.org/protobuf v1.35.1
+## explicit; go 1.21
 google.golang.org/protobuf/encoding/protodelim
 google.golang.org/protobuf/encoding/protojson
 google.golang.org/protobuf/encoding/prototext
@@ -1035,7 +1042,7 @@ gvisor.dev/gvisor/pkg/tcpip/transport/tcp
 gvisor.dev/gvisor/pkg/tcpip/transport/tcpconntrack
 gvisor.dev/gvisor/pkg/tcpip/transport/udp
 gvisor.dev/gvisor/pkg/waiter
-# modernc.org/libc v1.60.1
+# modernc.org/libc v1.55.3
 ## explicit; go 1.20
 modernc.org/libc
 modernc.org/libc/errno
@@ -1069,11 +1076,11 @@ modernc.org/mathutil
 # modernc.org/memory v1.8.0
 ## explicit; go 1.18
 modernc.org/memory
-# modernc.org/sqlite v1.32.0
+# modernc.org/sqlite v1.33.1
 ## explicit; go 1.20
 modernc.org/sqlite/lib
-# tailscale.com v1.72.1
-## explicit; go 1.22.0
+# tailscale.com v1.75.0-pre.0.20240926101731-7d1160ddaab7
+## explicit; go 1.23.1
 tailscale.com
 tailscale.com/appc
 tailscale.com/atomicfile
@@ -1110,7 +1117,9 @@ tailscale.com/ipn/store
 tailscale.com/ipn/store/awsstore
 tailscale.com/ipn/store/kubestore
 tailscale.com/ipn/store/mem
-tailscale.com/kube
+tailscale.com/kube/kubeapi
+tailscale.com/kube/kubeclient
+tailscale.com/kube/kubetypes
 tailscale.com/licenses
 tailscale.com/log/filelogger
 tailscale.com/log/sockstatlog
@@ -1236,6 +1245,7 @@ tailscale.com/util/systemd
 tailscale.com/util/testenv
 tailscale.com/util/truncate
 tailscale.com/util/uniq
+tailscale.com/util/usermetric
 tailscale.com/util/vizerror
 tailscale.com/util/winutil
 tailscale.com/util/winutil/authenticode
@@ -1252,9 +1262,16 @@ tailscale.com/wgengine/filter/filtertype
 tailscale.com/wgengine/magicsock
 tailscale.com/wgengine/netlog
 tailscale.com/wgengine/netstack
+tailscale.com/wgengine/netstack/gro
 tailscale.com/wgengine/router
 tailscale.com/wgengine/wgcfg
 tailscale.com/wgengine/wgcfg/nmcfg
 tailscale.com/wgengine/wgint
 tailscale.com/wgengine/wglog
 tailscale.com/wgengine/winnet
+# zgo.at/zcache/v2 v2.1.0
+## explicit; go 1.18
+zgo.at/zcache/v2
+# zombiezen.com/go/postgrestest v1.0.1
+## explicit; go 1.14
+zombiezen.com/go/postgrestest

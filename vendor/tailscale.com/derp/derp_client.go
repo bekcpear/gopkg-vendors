@@ -121,6 +121,8 @@ func newClient(privateKey key.NodePrivate, nc Conn, brw *bufio.ReadWriter, logf 
 	return c, nil
 }
 
+func (c *Client) PublicKey() key.NodePublic { return c.publicKey }
+
 func (c *Client) recvServerKey() error {
 	var buf [40]byte
 	t, flen, err := readFrame(c.br, 1<<10, buf[:])
@@ -354,6 +356,10 @@ func (ReceivedPacket) msg() {}
 // PeerGoneMessage is a ReceivedMessage that indicates that the client
 // identified by the underlying public key is not connected to this
 // server.
+//
+// It has only historically been sent by the server when the client
+// connection count decremented from 1 to 0 and not from e.g. 2 to 1.
+// See https://github.com/tailscale/tailscale/issues/13566 for details.
 type PeerGoneMessage struct {
 	Peer   key.NodePublic
 	Reason PeerGoneReasonType
@@ -361,8 +367,13 @@ type PeerGoneMessage struct {
 
 func (PeerGoneMessage) msg() {}
 
-// PeerPresentMessage is a ReceivedMessage that indicates that the client
-// is connected to the server. (Only used by trusted mesh clients)
+// PeerPresentMessage is a ReceivedMessage that indicates that the client is
+// connected to the server. (Only used by trusted mesh clients)
+//
+// It will be sent to client watchers for every new connection from a client,
+// even if the client's already connected with that public key.
+// See https://github.com/tailscale/tailscale/issues/13566 for PeerPresentMessage
+// and PeerGoneMessage not being 1:1.
 type PeerPresentMessage struct {
 	// Key is the public key of the client.
 	Key key.NodePublic
