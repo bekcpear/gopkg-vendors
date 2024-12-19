@@ -16,6 +16,7 @@ const (
 
 	// Link/Script Attributes
 
+	As    = "as"
 	Async = "async"
 	// Deprecated: Use Crossorigin instead
 	CrossOrigin = "crossorigin"
@@ -23,6 +24,7 @@ const (
 	Defer       = "defer"
 	Href        = "href"
 	Integrity   = "integrity"
+	Nomodule    = "nomodule"
 	Rel         = "rel"
 	Src         = "src"
 	Target      = "target"

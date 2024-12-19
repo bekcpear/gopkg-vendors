@@ -5,7 +5,6 @@ package tailsql
 
 import (
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -31,12 +30,13 @@ type LocalClient interface {
 
 // uiData is the concrete type of the data value passed to the UI template.
 type uiData struct {
-	Query   string      // the original query
-	Sources []*dbHandle // the available databases
-	Source  string      // the selected source
-	Output  *dbResult   // query results (may be nil)
-	Error   *string     // error results (may be nil)
-	Links   []UILink    // static UI links
+	Query       string      // the original query
+	Sources     []*dbHandle // the available databases
+	Source      string      // the selected source
+	Output      *dbResult   // query results (may be nil)
+	Error       *string     // error results (may be nil)
+	Links       []UILink    // static UI links
+	RoutePrefix string      // for links to the API and static files
 }
 
 // Version reports the version string of the currently running binary.
@@ -148,12 +148,12 @@ func isBinaryData(data []byte) bool {
 	return false
 }
 
-// runQueryInTx executes query using h.Tx, and returns its results.
-func runQueryInTx[T any](ctx context.Context, h *dbHandle, query func(context.Context, *sql.Tx) (T, error)) (T, error) {
+// runQuery executes query using h.WithLock, and returns its results.
+func runQuery[T any](ctx context.Context, h *dbHandle, run func(context.Context, Queryable) (T, error)) (T, error) {
 	var out T
-	err := h.Tx(ctx, func(fctx context.Context, tx *sql.Tx) error {
+	err := h.WithLock(ctx, func(fctx context.Context, q Queryable) error {
 		var err error
-		out, err = query(fctx, tx)
+		out, err = run(fctx, q)
 		return err
 	})
 
@@ -212,16 +212,17 @@ func errorCode(err error) int {
 	return http.StatusInternalServerError
 }
 
-// checkQuery reports whether query is safe to send to the database.
+// checkQuerySyntax reports whether query is safe to send to the database.
 //
 // A read-only SQLite database will correctly report errors for operations that
 // modify the database or its schema if it is opened read-only. However, the
 // ATTACH and DETACH verbs modify only the connection, permitting the caller to
-// mention any database accessible from the filesystem.
-func checkQuery(query string) error {
+// mention any database accessible from the filesystem. Similarly, VACUUM INTO
+// can be run even on a read-only database, so don't allow it in any form.
+func checkQuerySyntax(query string) error {
 	for _, tok := range sqlTokens(query) {
 		switch tok {
-		case "ATTACH", "DETACH", "TEMP", "TEMPORARY":
+		case "ATTACH", "DETACH", "TEMP", "TEMPORARY", "VACUUM":
 			return fmt.Errorf("statement %q is not allowed", tok)
 		}
 	}

@@ -112,7 +112,7 @@ func (d *Detector) detectCaptivePortalWithGOOS(ctx context.Context, netMon *netm
 // interfaces on iOS and Android, respectively, and would be needlessly battery-draining.
 func interfaceNameDoesNotNeedCaptiveDetection(ifName string, goos string) bool {
 	ifName = strings.ToLower(ifName)
-	excludedPrefixes := []string{"tailscale", "tun", "tap", "docker", "kube", "wg"}
+	excludedPrefixes := []string{"tailscale", "tun", "tap", "docker", "kube", "wg", "ipsec"}
 	if goos == "windows" {
 		excludedPrefixes = append(excludedPrefixes, "loopback", "tunnel", "ppp", "isatap", "teredo", "6to4")
 	} else if goos == "darwin" || goos == "ios" {
@@ -136,26 +136,31 @@ func interfaceNameDoesNotNeedCaptiveDetection(ifName string, goos string) bool {
 func (d *Detector) detectOnInterface(ctx context.Context, ifIndex int, endpoints []Endpoint) bool {
 	defer d.httpClient.CloseIdleConnections()
 
-	d.logf("[v2] %d available captive portal detection endpoints: %v", len(endpoints), endpoints)
+	use := min(len(endpoints), 5)
+	endpoints = endpoints[:use]
+	d.logf("[v2] %d available captive portal detection endpoints; trying %v", len(endpoints), use)
 
 	// We try to detect the captive portal more quickly by making requests to multiple endpoints concurrently.
 	var wg sync.WaitGroup
 	resultCh := make(chan bool, len(endpoints))
 
-	for i, e := range endpoints {
-		if i >= 5 {
-			// Try a maximum of 5 endpoints, break out (returning false) if we run of attempts.
-			break
-		}
+	// Once any goroutine detects a captive portal, we shut down the others.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	for _, e := range endpoints {
 		wg.Add(1)
 		go func(endpoint Endpoint) {
 			defer wg.Done()
 			found, err := d.verifyCaptivePortalEndpoint(ctx, endpoint, ifIndex)
 			if err != nil {
-				d.logf("[v1] checkCaptivePortalEndpoint failed with endpoint %v: %v", endpoint, err)
+				if ctx.Err() == nil {
+					d.logf("[v1] checkCaptivePortalEndpoint failed with endpoint %v: %v", endpoint, err)
+				}
 				return
 			}
 			if found {
+				cancel() // one match is good enough
 				resultCh <- true
 			}
 		}(e)
@@ -179,6 +184,9 @@ func (d *Detector) detectOnInterface(ctx context.Context, ifIndex int, endpoints
 // verifyCaptivePortalEndpoint checks if the given Endpoint is a captive portal by making an HTTP request to the
 // given Endpoint URL using the interface with index ifIndex, and checking if the response looks like a captive portal.
 func (d *Detector) verifyCaptivePortalEndpoint(ctx context.Context, e Endpoint, ifIndex int) (found bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, Timeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, "GET", e.URL.String(), nil)
 	if err != nil {
 		return false, err
@@ -213,7 +221,8 @@ func (d *Detector) dialContext(ctx context.Context, network, addr string) (net.C
 
 	ifIndex := d.currIfIndex
 
-	dl := net.Dialer{
+	dl := &net.Dialer{
+		Timeout: Timeout,
 		Control: func(network, address string, c syscall.RawConn) error {
 			return setSocketInterfaceIndex(c, ifIndex, d.logf)
 		},

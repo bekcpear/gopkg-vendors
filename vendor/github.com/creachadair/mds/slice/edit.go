@@ -1,14 +1,22 @@
 package slice
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // LCS computes a longest common subsequence of as and bs.
 //
 // This implementation takes Θ(mn) time and O(P·min(m, n)) space for inputs of
 // length m = len(as) and n = len(bs) and longest subsequence length P.
-func LCS[T comparable, Slice ~[]T](as, bs Slice) Slice { return lcs(equal, as, bs) }
+func LCS[T comparable, Slice ~[]T](as, bs Slice) Slice { return LCSFunc(as, bs, equal) }
 
-func lcs[T any, Slice ~[]T](eq func(a, b T) bool, as, bs Slice) Slice {
+// LCSFunc computes a longest common subsequence of as and bs, using
+// eq to compare elements.
+//
+// This implementation takes Θ(mn) time and O(P·min(m, n)) space for inputs of
+// length m = len(as) and n = len(bs) and longest subsequence length P.
+func LCSFunc[T any, Slice ~[]T](as, bs Slice, eq func(a, b T) bool) Slice {
 	if len(as) == 0 || len(bs) == 0 {
 		return nil
 	}
@@ -59,7 +67,7 @@ func lcs[T any, Slice ~[]T](eq func(a, b T) bool, as, bs Slice) Slice {
 	for p := c[len(as)]; p.n > 0; p = p.prev {
 		out = append(out, as[p.i])
 	}
-	Reverse(out)
+	slices.Reverse(out)
 	return out
 }
 
@@ -132,7 +140,7 @@ func EditScript[T comparable, Slice ~[]T](lhs, rhs Slice) []Edit[T] {
 
 // editScriptFunc computes an edit script using eq as an equality comparison.
 func editScriptFunc[T any, Slice ~[]T](eq func(a, b T) bool, lhs, rhs Slice) []Edit[T] {
-	lcs := lcs(eq, lhs, rhs)
+	lcs := LCSFunc(lhs, rhs, eq)
 
 	// To construct the edit sequence, i scans forward through lcs.
 	// For each i, we find the unclaimed elements of lhs and rhs prior to the

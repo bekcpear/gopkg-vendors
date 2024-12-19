@@ -68,6 +68,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tailscale/setec/client/setec"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/httpm"
@@ -111,13 +112,15 @@ type Server struct {
 	state     *localState // local state database (for query logs)
 	self      string      // if non-empty, the local state source label
 	links     []UILink
+	prefix    string
 	rules     []UIRewriteRule
 	authorize func(string, *apitype.WhoIsResponse) error
+	qcheck    func(Query) (Query, error)
 	qtimeout  time.Duration
 	logf      logger.Logf
 
 	mu  sync.Mutex
-	dbs []*dbHandle
+	dbs []*setec.Updater[*dbHandle]
 }
 
 // NewServer constructs a new server with the given Options.
@@ -132,7 +135,7 @@ func NewServer(opts Options) (*Server, error) {
 		return nil, fmt.Errorf("have %d named secrets but no secret store", len(sec))
 	}
 
-	dbs, err := opts.openSources(opts.SecretStore)
+	dbs, err := opts.openSources(context.Background(), opts.SecretStore)
 	if err != nil {
 		return nil, fmt.Errorf("opening sources: %w", err)
 	}
@@ -141,18 +144,14 @@ func NewServer(opts Options) (*Server, error) {
 		return nil, fmt.Errorf("local state: %w", err)
 	}
 	if state != nil && opts.LocalSource != "" {
-		db, err := opts.readOnlyLocalState()
-		if err != nil {
-			return nil, fmt.Errorf("read-only local state: %w", err)
-		}
-		dbs = append(dbs, &dbHandle{
+		dbs = append(dbs, setec.StaticUpdater(&dbHandle{
 			src:   opts.LocalSource,
 			label: "tailsql local state",
-			db:    db,
+			db:    state,
 			named: map[string]string{
 				"schema": `select * from sqlite_schema`,
 			},
-		})
+		}))
 	}
 
 	if opts.Metrics != nil {
@@ -163,8 +162,10 @@ func NewServer(opts Options) (*Server, error) {
 		state:     state,
 		self:      opts.LocalSource,
 		links:     opts.UILinks,
+		prefix:    opts.routePrefix(),
 		rules:     opts.UIRewriteRules,
 		authorize: opts.authorize(),
+		qcheck:    opts.checkQuery(),
 		qtimeout:  opts.QueryTimeout.Duration(),
 		logf:      opts.logf(),
 		dbs:       dbs,
@@ -172,32 +173,38 @@ func NewServer(opts Options) (*Server, error) {
 }
 
 // SetDB adds or replaces the database associated with the specified source in
-// s with the given open db and options.
+// s with the given open db and options. See [SetSource].
+func (s *Server) SetDB(source string, db *sql.DB, opts *DBOptions) bool {
+	return s.SetSource(source, sqlDB{DB: db}, opts)
+}
+
+// SetSource adds or replaces the database associated with the specified source
+// in s with the given open db and options.
 //
 // If a database was already open for the given source, its value is replaced,
 // the old database handle is closed, and SetDB reports true.
 //
 // If no database was already open for the given source, a new source is added
 // and SetDB reports false.
-func (s *Server) SetDB(source string, db *sql.DB, opts *DBOptions) bool {
+func (s *Server) SetSource(source string, db Queryable, opts *DBOptions) bool {
 	if db == nil {
 		panic("new database is nil")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, src := range s.dbs {
-		if src.Source() == source {
+	for _, u := range s.dbs {
+		if src := u.Get(); src.Source() == source {
 			src.swap(db, opts)
 			return true
 		}
 	}
-	s.dbs = append(s.dbs, &dbHandle{
+	s.dbs = append(s.dbs, setec.StaticUpdater(&dbHandle{
 		db:    db,
 		src:   source,
 		label: opts.label(),
 		named: opts.namedQueries(),
-	})
+	}))
 	return false
 }
 
@@ -215,8 +222,11 @@ func (s *Server) Close() error {
 // NewMux constructs an HTTP router for the service.
 func (s *Server) NewMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.serveUI)
-	mux.Handle("/static/", http.FileServer(http.FS(staticFS)))
+	mux.Handle(s.prefix+"/", http.StripPrefix(s.prefix, http.HandlerFunc(s.serveUI)))
+
+	// N.B. We have to strip the prefix back off for the static files, since the
+	// embedded FS thinks it is rooted at "/".
+	mux.Handle(s.prefix+"/static/", http.StripPrefix(s.prefix, http.FileServer(http.FS(staticFS))))
 	return mux
 }
 
@@ -225,40 +235,37 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	src := r.FormValue("src")
-	if src == "" {
+	q, err := s.qcheck(Query{
+		Source: r.FormValue("src"),
+		Query:  strings.TrimSpace(r.FormValue("q")),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if q.Source == "" {
 		dbs := s.getHandles()
 		if len(dbs) != 0 {
-			src = dbs[0].Source() // default to the first source
+			q.Source = dbs[0].Source() // default to the first source
 		}
 	}
 
-	// Reject query strings that are egregiously too long.
-	const maxQueryBytes = 4000
-
-	query := strings.TrimSpace(r.FormValue("q"))
-	if len(query) > maxQueryBytes {
-		http.Error(w, "query too long", http.StatusBadRequest)
-		return
-	}
-
-	caller, isAuthorized := s.checkAuth(w, r, src, query)
+	caller, isAuthorized := s.checkAuth(w, r, q.Source, q.Query)
 	if !isAuthorized {
 		authErrorCount.Add(1)
 		return
 	}
 
-	var err error
 	switch r.URL.Path {
 	case "/":
 		htmlRequestCount.Add(1)
-		err = s.serveUIInternal(w, r, caller, src, query)
+		err = s.serveUIInternal(w, r, caller, q)
 	case "/csv":
 		csvRequestCount.Add(1)
-		err = s.serveCSVInternal(w, r, caller, src, query)
+		err = s.serveCSVInternal(w, r, caller, q)
 	case "/json":
 		jsonRequestCount.Add(1)
-		err = s.serveJSONInternal(w, r, caller, src, query)
+		err = s.serveJSONInternal(w, r, caller, q)
 	case "/meta":
 		metaRequestCount.Add(1)
 		err = s.serveMetaInternal(w, r)
@@ -283,25 +290,26 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveUIInternal handles the root GET "/" route.
-func (s *Server) serveUIInternal(w http.ResponseWriter, r *http.Request, caller, src, query string) error {
+func (s *Server) serveUIInternal(w http.ResponseWriter, r *http.Request, caller string, q Query) error {
 	http.SetCookie(w, siteAccessCookie)
 	w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
 	w.Header().Set("X-Frame-Options", "DENY")
 
 	// If a non-empty query is present, require either a site access cookie or a
 	// no-browsers header.
-	if query != "" && !requestHasSecureHeader(r) && !requestHasSiteAccess(r) {
+	if q.Query != "" && !requestHasSecureHeader(r) && !requestHasSiteAccess(r) {
 		return statusErrorf(http.StatusFound, "access cookie not found (redirecting)")
 	}
 
 	w.Header().Set("Content-Type", "text/html")
 	data := &uiData{
-		Query:   query,
-		Source:  src,
-		Sources: s.getHandles(),
-		Links:   s.links,
+		Query:       q.Query,
+		Source:      q.Source,
+		Sources:     s.getHandles(),
+		Links:       s.links,
+		RoutePrefix: s.prefix,
 	}
-	out, err := s.queryContext(r.Context(), caller, src, query)
+	out, err := s.queryContext(r.Context(), caller, q)
 	if errors.Is(err, errTooManyRows) {
 		out.More = true
 	} else if err != nil {
@@ -324,8 +332,8 @@ func (s *Server) serveUIInternal(w http.ResponseWriter, r *http.Request, caller,
 }
 
 // serveCSVInternal handles the GET /csv route.
-func (s *Server) serveCSVInternal(w http.ResponseWriter, r *http.Request, caller, src, query string) error {
-	if query == "" {
+func (s *Server) serveCSVInternal(w http.ResponseWriter, r *http.Request, caller string, q Query) error {
+	if q.Query == "" {
 		return statusErrorf(http.StatusBadRequest, "no query provided")
 	}
 
@@ -334,7 +342,7 @@ func (s *Server) serveCSVInternal(w http.ResponseWriter, r *http.Request, caller
 		return statusErrorf(http.StatusForbidden, "query access denied")
 	}
 
-	out, err := s.queryContext(r.Context(), caller, src, query)
+	out, err := s.queryContext(r.Context(), caller, q)
 	if errors.Is(err, errTooManyRows) {
 		// fall through to serve what we got
 	} else if err != nil {
@@ -351,15 +359,15 @@ func (s *Server) serveCSVInternal(w http.ResponseWriter, r *http.Request, caller
 }
 
 // serveJSONInternal handles the GET /json route.
-func (s *Server) serveJSONInternal(w http.ResponseWriter, r *http.Request, caller, src, query string) error {
-	if query == "" {
+func (s *Server) serveJSONInternal(w http.ResponseWriter, r *http.Request, caller string, q Query) error {
+	if q.Query == "" {
 		return statusErrorf(http.StatusBadRequest, "no query provided")
 	}
 	if !requestHasSecureHeader(r) {
 		return statusErrorf(http.StatusForbidden, "query access denied")
 	}
 
-	out, err := s.queryContextJSON(r.Context(), caller, src, query)
+	out, err := s.queryContextJSON(r.Context(), caller, q)
 	if err != nil {
 		queryErrorCount.Add(1)
 		return err
@@ -404,24 +412,24 @@ var errTooManyRows = errors.New("too many rows")
 // If the number of rows exceeds a sensible limit, it reports errTooManyRows.
 // In that case, the result set is still valid, and contains the results that
 // were read up to that point.
-func (s *Server) queryContext(ctx context.Context, caller, src, query string) (*dbResult, error) {
-	if query == "" {
+func (s *Server) queryContext(ctx context.Context, caller string, q Query) (*dbResult, error) {
+	if q.Query == "" {
 		return nil, nil
 	}
 
 	// As a special case, treat a query prefixed with "meta:" as a meta-query to
 	// be answered regardless of source.
-	if strings.HasPrefix(query, "meta:") {
-		return s.queryMeta(ctx, query)
+	if strings.HasPrefix(q.Query, "meta:") {
+		return s.queryMeta(ctx, q.Query)
 	}
 
-	h := s.dbHandleForSource(src)
+	h := s.dbHandleForSource(q.Source)
 	if h == nil {
-		return nil, statusErrorf(http.StatusBadRequest, "unknown source %q", src)
+		return nil, statusErrorf(http.StatusBadRequest, "unknown source %q", q.Source)
 	}
 	// Verify that the query does not contain statements we should not ask the
 	// database to execute.
-	if err := checkQuery(query); err != nil {
+	if err := checkQuerySyntax(q.Query); err != nil {
 		return nil, statusErrorf(http.StatusBadRequest, "invalid query: %w", err)
 	}
 
@@ -433,19 +441,19 @@ func (s *Server) queryContext(ctx context.Context, caller, src, query string) (*
 		defer cancel()
 	}
 
-	return runQueryInTx(ctx, h,
-		func(fctx context.Context, tx *sql.Tx) (_ *dbResult, err error) {
+	return runQuery(ctx, h,
+		func(fctx context.Context, db Queryable) (_ *dbResult, err error) {
 			start := time.Now()
 			var out dbResult
 			defer func() {
 				out.Elapsed = time.Since(start)
-				s.logf("[tailsql] query src=%q query=%q elapsed=%v err=%v",
-					src, query, out.Elapsed.Round(time.Millisecond), err)
+				s.logf("[tailsql] query who=%q src=%q query=%q elapsed=%v err=%v",
+					caller, q.Source, q.Query, out.Elapsed.Round(time.Millisecond), err)
 
 				// Record successful queries in the persistent log.  But don't log
 				// queries to the state database itself.
-				if err == nil && src != s.self {
-					serr := s.state.LogQuery(ctx, caller, src, query, out.Elapsed)
+				if err == nil && q.Source != s.self {
+					serr := s.state.LogQuery(ctx, caller, q, out.Elapsed)
 					if serr != nil {
 						s.logf("[tailsql] WARNING: Error logging query: %v", serr)
 					}
@@ -453,28 +461,26 @@ func (s *Server) queryContext(ctx context.Context, caller, src, query string) (*
 			}()
 
 			// Check for a named query.
-			if name, ok := strings.CutPrefix(query, "named:"); ok {
+			if name, ok := strings.CutPrefix(q.Query, "named:"); ok {
 				real, ok := lookupNamedQuery(fctx, name)
 				if !ok {
 					return nil, statusErrorf(http.StatusBadRequest, "named query %q not recognized", name)
 				}
 				s.logf("[tailsql] resolved named query %q to %#q", name, real)
-				query = real
+				q.Query = real
 			}
 
-			rows, err := tx.QueryContext(fctx, query)
+			rows, err := db.Query(fctx, q.Query)
 			if err != nil {
 				return nil, err
 			}
 			defer rows.Close()
 
-			cols, err := rows.ColumnTypes()
+			cols, err := rows.Columns()
 			if err != nil {
-				return nil, fmt.Errorf("listing column types: %w", err)
+				return nil, fmt.Errorf("listing column names: %w", err)
 			}
-			for _, col := range cols {
-				out.Columns = append(out.Columns, col.Name())
-			}
+			out.Columns = cols
 
 			var tooMany bool
 			for rows.Next() && !tooMany {
@@ -529,12 +535,12 @@ func (s *Server) queryMeta(ctx context.Context, metaQuery string) (*dbResult, er
 
 // queryContextJSON calls s.queryContextAny and, if it succeeds, converts its
 // results into values suitable for JSON encoding.
-func (s *Server) queryContextJSON(ctx context.Context, caller, src, query string) ([]jsonRow, error) {
-	if query == "" {
+func (s *Server) queryContextJSON(ctx context.Context, caller string, q Query) ([]jsonRow, error) {
+	if q.Query == "" {
 		return nil, nil
 	}
 
-	out, err := s.queryContext(ctx, caller, src, query)
+	out, err := s.queryContext(ctx, caller, q)
 	if errors.Is(err, errTooManyRows) {
 		// fall through to serve what we got
 	} else if err != nil {
@@ -608,12 +614,15 @@ func (s *Server) getHandles() []*dbHandle {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	out := make([]*dbHandle, len(s.dbs))
+
 	// Check for pending updates.
-	for _, h := range s.dbs {
-		h.tryUpdate()
+	for i, u := range s.dbs {
+		out[i] = u.Get()
+		out[i].tryUpdate()
 	}
 
 	// It is safe to return the slice because we never remove any elements, new
 	// data are only ever appended to the end.
-	return s.dbs
+	return out
 }

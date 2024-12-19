@@ -5,6 +5,7 @@
 package netstack
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"expvar"
@@ -31,7 +32,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
-	"tailscale.com/drive"
 	"tailscale.com/envknob"
 	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/metrics"
@@ -173,19 +173,18 @@ type Impl struct {
 	// It can only be set before calling Start.
 	ProcessSubnets bool
 
-	ipstack       *stack.Stack
-	linkEP        *linkEndpoint
-	tundev        *tstun.Wrapper
-	e             wgengine.Engine
-	pm            *proxymap.Mapper
-	mc            *magicsock.Conn
-	logf          logger.Logf
-	dialer        *tsdial.Dialer
-	ctx           context.Context        // alive until Close
-	ctxCancel     context.CancelFunc     // called on Close
-	lb            *ipnlocal.LocalBackend // or nil
-	dns           *dns.Manager
-	driveForLocal drive.FileSystemForLocal // or nil
+	ipstack   *stack.Stack
+	linkEP    *linkEndpoint
+	tundev    *tstun.Wrapper
+	e         wgengine.Engine
+	pm        *proxymap.Mapper
+	mc        *magicsock.Conn
+	logf      logger.Logf
+	dialer    *tsdial.Dialer
+	ctx       context.Context        // alive until Close
+	ctxCancel context.CancelFunc     // called on Close
+	lb        *ipnlocal.LocalBackend // or nil
+	dns       *dns.Manager
 
 	// loopbackPort, if non-nil, will enable Impl to loop back (dnat to
 	// <address-family-loopback>:loopbackPort) TCP & UDP flows originally
@@ -287,7 +286,7 @@ func setTCPBufSizes(ipstack *stack.Stack) error {
 }
 
 // Create creates and populates a new Impl.
-func Create(logf logger.Logf, tundev *tstun.Wrapper, e wgengine.Engine, mc *magicsock.Conn, dialer *tsdial.Dialer, dns *dns.Manager, pm *proxymap.Mapper, driveForLocal drive.FileSystemForLocal) (*Impl, error) {
+func Create(logf logger.Logf, tundev *tstun.Wrapper, e wgengine.Engine, mc *magicsock.Conn, dialer *tsdial.Dialer, dns *dns.Manager, pm *proxymap.Mapper) (*Impl, error) {
 	if mc == nil {
 		return nil, errors.New("nil magicsock.Conn")
 	}
@@ -381,7 +380,6 @@ func Create(logf logger.Logf, tundev *tstun.Wrapper, e wgengine.Engine, mc *magi
 		connsInFlightByClient: make(map[netip.Addr]int),
 		packetsInFlight:       make(map[stack.TransportEndpointID]struct{}),
 		dns:                   dns,
-		driveForLocal:         driveForLocal,
 	}
 	loopbackPort, ok := envknob.LookupInt("TS_DEBUG_NETSTACK_LOOPBACK_PORT")
 	if ok && loopbackPort >= 0 && loopbackPort <= math.MaxUint16 {
@@ -413,15 +411,14 @@ func init() {
 	// endpoint, and name collisions will result in Prometheus scraping errors.
 	clientmetric.NewCounterFunc("netstack_tcp_forward_dropped_attempts", func() int64 {
 		var total uint64
-		stacksForMetrics.Range(func(ns *Impl, _ struct{}) bool {
+		for ns := range stacksForMetrics.Keys() {
 			delta := ns.ipstack.Stats().TCP.ForwardMaxInFlightDrop.Value()
 			if total+delta > math.MaxInt64 {
 				total = math.MaxInt64
-				return false
+				break
 			}
 			total += delta
-			return true
-		})
+		}
 		return int64(total)
 	})
 }
@@ -646,13 +643,11 @@ func (ns *Impl) UpdateNetstackIPs(nm *netmap.NetworkMap) {
 	newPfx := make(map[netip.Prefix]bool)
 
 	if selfNode.Valid() {
-		for i := range selfNode.Addresses().Len() {
-			p := selfNode.Addresses().At(i)
+		for _, p := range selfNode.Addresses().All() {
 			newPfx[p] = true
 		}
 		if ns.ProcessSubnets {
-			for i := range selfNode.AllowedIPs().Len() {
-				p := selfNode.AllowedIPs().At(i)
+			for _, p := range selfNode.AllowedIPs().All() {
 				newPfx[p] = true
 			}
 		}
@@ -1908,4 +1903,36 @@ func (ns *Impl) ExpVar() expvar.Var {
 	}))
 
 	return m
+}
+
+// windowsPingOutputIsSuccess reports whether the ping.exe output b contains a
+// success ping response for ip.
+//
+// See https://github.com/tailscale/tailscale/issues/13654
+//
+// TODO(bradfitz,nickkhyl): delete this and use the proper Windows APIs.
+func windowsPingOutputIsSuccess(ip netip.Addr, b []byte) bool {
+	// Look for a line that contains " <ip>: " and then three equal signs.
+	// As a special case, the 2nd equal sign may be a '<' character
+	// for sub-millisecond pings.
+	// This heuristic seems to match the ping.exe output in any language.
+	sub := fmt.Appendf(nil, " %s: ", ip)
+
+	eqSigns := func(bb []byte) (n int) {
+		for _, b := range bb {
+			if b == '=' || (b == '<' && n == 1) {
+				n++
+			}
+		}
+		return
+	}
+
+	for len(b) > 0 {
+		var line []byte
+		line, b, _ = bytes.Cut(b, []byte("\n"))
+		if _, rest, ok := bytes.Cut(line, sub); ok && eqSigns(rest) == 3 {
+			return true
+		}
+	}
+	return false
 }

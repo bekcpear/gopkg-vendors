@@ -158,10 +158,10 @@ func (c *Conn) maybeSetNearestDERP(report *netcheck.Report) (preferredDERP int) 
 	} else {
 		connectedToControl = c.health.GetInPollNetMap()
 	}
+	c.mu.Lock()
+	myDerp := c.myDerp
+	c.mu.Unlock()
 	if !connectedToControl {
-		c.mu.Lock()
-		myDerp := c.myDerp
-		c.mu.Unlock()
 		if myDerp != 0 {
 			metricDERPHomeNoChangeNoControl.Add(1)
 			return myDerp
@@ -177,6 +177,11 @@ func (c *Conn) maybeSetNearestDERP(report *netcheck.Report) (preferredDERP int) 
 		// Perhaps UDP is blocked. Pick a deterministic but arbitrary
 		// one.
 		preferredDERP = c.pickDERPFallback()
+	}
+	if preferredDERP != myDerp {
+		c.logf(
+			"magicsock: home DERP changing from derp-%d [%dms] to derp-%d [%dms]",
+			c.myDerp, report.RegionLatency[myDerp].Milliseconds(), preferredDERP, report.RegionLatency[preferredDERP].Milliseconds())
 	}
 	if !c.setNearestDERP(preferredDERP) {
 		preferredDERP = 0
@@ -644,9 +649,10 @@ func (c *Conn) runDerpReader(ctx context.Context, regionID int, dc *derphttp.Cli
 }
 
 type derpWriteRequest struct {
-	addr   netip.AddrPort
-	pubKey key.NodePublic
-	b      []byte // copied; ownership passed to receiver
+	addr    netip.AddrPort
+	pubKey  key.NodePublic
+	b       []byte // copied; ownership passed to receiver
+	isDisco bool
 }
 
 // runDerpWriter runs in a goroutine for the life of a DERP
@@ -668,8 +674,12 @@ func (c *Conn) runDerpWriter(ctx context.Context, dc *derphttp.Client, ch <-chan
 			if err != nil {
 				c.logf("magicsock: derp.Send(%v): %v", wr.addr, err)
 				metricSendDERPError.Add(1)
-			} else {
-				metricSendDERP.Add(1)
+				if !wr.isDisco {
+					c.metrics.outboundPacketsDroppedErrors.Add(1)
+				}
+			} else if !wr.isDisco {
+				c.metrics.outboundPacketsDERPTotal.Add(1)
+				c.metrics.outboundBytesDERPTotal.Add(int64(len(wr.b)))
 			}
 		}
 	}
@@ -690,7 +700,6 @@ func (c *connBind) receiveDERP(buffs [][]byte, sizes []int, eps []conn.Endpoint)
 			// No data read occurred. Wait for another packet.
 			continue
 		}
-		metricRecvDataDERP.Add(1)
 		sizes[0] = n
 		eps[0] = ep
 		return 1, nil
@@ -728,8 +737,11 @@ func (c *Conn) processDERPReadResult(dm derpReadResult, b []byte) (n int, ep *en
 
 	ep.noteRecvActivity(ipp, mono.Now())
 	if stats := c.stats.Load(); stats != nil {
-		stats.UpdateRxPhysical(ep.nodeAddr, ipp, dm.n)
+		stats.UpdateRxPhysical(ep.nodeAddr, ipp, 1, dm.n)
 	}
+
+	c.metrics.inboundPacketsDERPTotal.Add(1)
+	c.metrics.inboundBytesDERPTotal.Add(int64(n))
 	return n, ep
 }
 

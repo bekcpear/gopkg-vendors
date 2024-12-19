@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,32 +43,50 @@ var schema = &squibble.Schema{
 type localState struct {
 	// Exclusive: Write transaction
 	// Shared: Read transaction
-	txmu sync.RWMutex
-	db   *sql.DB
+	txmu   sync.RWMutex
+	rw, ro *sql.DB
 }
 
-// newLocalState constructs a new LocalState helper using the given database.
-func newLocalState(db *sql.DB) (*localState, error) {
-	if err := schema.Apply(context.Background(), db); err != nil {
-		db.Close()
+// newLocalState constructs a new LocalState helper for the given database URL.
+func newLocalState(url string) (*localState, error) {
+	if !strings.HasPrefix(url, "file:") {
+		url = "file:" + url
+	}
+	urlRO := url + "?mode=ro"
+
+	// Open separate copies of the database for writing query logs vs. serving
+	// queries to the UI.
+	rw, err := openAndPing("sqlite", url)
+	if err != nil {
+		return nil, err
+	}
+	if err := schema.Apply(context.Background(), rw); err != nil {
+		rw.Close()
 		return nil, fmt.Errorf("initializing schema: %w", err)
 	}
-	return &localState{db: db}, nil
+
+	ro, err := openAndPing("sqlite", urlRO)
+	if err != nil {
+		rw.Close()
+		return nil, err
+	}
+
+	return &localState{rw: rw, ro: ro}, nil
 }
 
 // LogQuery adds the specified query to the query log.
-// The user is the login of the user originating the query, source is the
-// target database, and query is the SQL of the query itself.
+// The user is the login of the user originating the query, q is the source
+// database and query SQL text.
 // If elapsed > 0, it is recorded as the elapsed execution time.
 //
 // If s == nil, the query is discarded without error.
-func (s *localState) LogQuery(ctx context.Context, user, source, query string, elapsed time.Duration) error {
+func (s *localState) LogQuery(ctx context.Context, user string, q Query, elapsed time.Duration) error {
 	if s == nil {
 		return nil // OK, nothing to do
 	}
 	s.txmu.Lock()
 	defer s.txmu.Unlock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.rw.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -75,11 +94,9 @@ func (s *localState) LogQuery(ctx context.Context, user, source, query string, e
 
 	// Look up or insert the query into the queries table to get an ID.
 	var queryID int64
-	err = tx.QueryRow(`SELECT query_id FROM queries WHERE query = ?`,
-		query).Scan(&queryID)
+	err = tx.QueryRow(`SELECT query_id FROM queries WHERE query = ?`, q.Query).Scan(&queryID)
 	if errors.Is(err, sql.ErrNoRows) {
-		err = tx.QueryRow(`INSERT INTO QUERIES (query) VALUES (?) RETURNING (query_id)`,
-			query).Scan(&queryID)
+		err = tx.QueryRow(`INSERT INTO QUERIES (query) VALUES (?) RETURNING (query_id)`, q.Query).Scan(&queryID)
 	}
 	if err != nil {
 		return fmt.Errorf("update query ID: %w", err)
@@ -88,10 +105,21 @@ func (s *localState) LogQuery(ctx context.Context, user, source, query string, e
 	// Add a log entry referencing the query ID.
 	ecol := sql.NullInt64{Int64: int64(elapsed / time.Microsecond), Valid: elapsed > 0}
 	_, err = tx.Exec(`INSERT INTO raw_query_log (author, source, query_id, elapsed) VALUES (?, ?, ?, ?)`,
-		user, source, queryID, ecol)
+		user, q.Source, queryID, ecol)
 	if err != nil {
 		return fmt.Errorf("update query log: %w", err)
 	}
 
 	return tx.Commit()
 }
+
+// Query satisfies part of the Queryable interface. It supports only read queries.
+func (s *localState) Query(ctx context.Context, query string, params ...any) (RowSet, error) {
+	s.txmu.RLock()
+	defer s.txmu.RUnlock()
+	return s.ro.QueryContext(ctx, query, params...)
+}
+
+// Close satisfies part of the Queryable interface.  For this database the
+// implementation is a no-op without error.
+func (*localState) Close() error { return nil }

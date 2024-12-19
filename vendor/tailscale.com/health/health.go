@@ -96,6 +96,7 @@ type Tracker struct {
 	inMapPollSince          time.Time
 	lastMapPollEndedAt      time.Time
 	lastStreamedMapResponse time.Time
+	lastNoiseDial           time.Time
 	derpHomeRegion          int
 	derpHomeless            bool
 	derpRegionConnected     map[int]bool
@@ -127,9 +128,6 @@ const (
 	// SysDNS is the name of the net/dns subsystem.
 	SysDNS = Subsystem("dns")
 
-	// SysDNSOS is the name of the net/dns OSConfigurator subsystem.
-	SysDNSOS = Subsystem("dns-os")
-
 	// SysDNSManager is the name of the net/dns manager subsystem.
 	SysDNSManager = Subsystem("dns-manager")
 
@@ -140,7 +138,7 @@ const (
 var subsystemsWarnables = map[Subsystem]*Warnable{}
 
 func init() {
-	for _, s := range []Subsystem{SysRouter, SysDNS, SysDNSOS, SysDNSManager, SysTKA} {
+	for _, s := range []Subsystem{SysRouter, SysDNS, SysDNSManager, SysTKA} {
 		w := Register(&Warnable{
 			Code:     WarnableCode(s),
 			Severity: SeverityMedium,
@@ -333,7 +331,7 @@ func (t *Tracker) SetMetricsRegistry(reg *usermetric.Registry) {
 	)
 
 	t.metricHealthMessage.Set(metricHealthMessageLabel{
-		Type: "warning",
+		Type: MetricLabelWarning,
 	}, expvar.Func(func() any {
 		if t.nil() {
 			return 0
@@ -509,21 +507,11 @@ func (t *Tracker) SetDNSHealth(err error) { t.setErr(SysDNS, err) }
 // Deprecated: Warnables should be preferred over Subsystem errors.
 func (t *Tracker) DNSHealth() error { return t.get(SysDNS) }
 
-// SetDNSOSHealth sets the state of the net/dns.OSConfigurator
-//
-// Deprecated: Warnables should be preferred over Subsystem errors.
-func (t *Tracker) SetDNSOSHealth(err error) { t.setErr(SysDNSOS, err) }
-
 // SetDNSManagerHealth sets the state of the Linux net/dns manager's
 // discovery of the /etc/resolv.conf situation.
 //
 // Deprecated: Warnables should be preferred over Subsystem errors.
 func (t *Tracker) SetDNSManagerHealth(err error) { t.setErr(SysDNSManager, err) }
-
-// DNSOSHealth returns the net/dns.OSConfigurator error state.
-//
-// Deprecated: Warnables should be preferred over Subsystem errors.
-func (t *Tracker) DNSOSHealth() error { return t.get(SysDNSOS) }
 
 // SetTKAHealth sets the health of the tailnet key authority.
 //
@@ -1050,11 +1038,15 @@ func (t *Tracker) updateBuiltinWarnablesLocked() {
 				ArgDuration:       d.Round(time.Second).String(),
 			})
 		}
-	} else {
+	} else if homeDERP != 0 {
 		t.setUnhealthyLocked(noDERPConnectionWarnable, Args{
 			ArgDERPRegionID:   fmt.Sprint(homeDERP),
 			ArgDERPRegionName: t.derpRegionNameLocked(homeDERP),
 		})
+	} else {
+		// No DERP home yet determined yet. There's probably some
+		// other problem or things are just starting up.
+		t.setHealthyLocked(noDERPConnectionWarnable)
 	}
 
 	if !t.ipnWantRunning {
@@ -1272,6 +1264,26 @@ func (t *Tracker) checkReceiveFuncsLocked() {
 		f.missing = true
 	}
 }
+
+// LastNoiseDialWasRecent notes that we're attempting to dial control via the
+// ts2021 noise protocol and reports whether the prior dial was "recent"
+// (currently defined as 2 minutes but subject to change).
+//
+// If t is nil, it reports false.
+func (t *Tracker) LastNoiseDialWasRecent() bool {
+	if t.nil() {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	now := time.Now()
+	dur := now.Sub(t.lastNoiseDial)
+	t.lastNoiseDial = now
+	return dur < 2*time.Minute
+}
+
+const MetricLabelWarning = "warning"
 
 type metricHealthMessageLabel struct {
 	// TODO: break down by warnable.severity as well?

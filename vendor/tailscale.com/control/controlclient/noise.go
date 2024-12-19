@@ -5,6 +5,7 @@ package controlclient
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -56,8 +57,8 @@ type NoiseClient struct {
 	privKey      key.MachinePrivate
 	serverPubKey key.MachinePublic
 	host         string // the host part of serverURL
-	httpPort     string // the default port to call
-	httpsPort    string // the fallback Noise-over-https port
+	httpPort     string // the default port to dial
+	httpsPort    string // the fallback Noise-over-https port or empty if none
 
 	// dialPlan optionally returns a ControlDialPlan previously received
 	// from the control server; either the function or the return value can
@@ -116,14 +117,17 @@ func NewNoiseClient(opts NoiseOpts) (*NoiseClient, error) {
 	}
 	var httpPort string
 	var httpsPort string
-	if u.Port() != "" {
+	if port := u.Port(); port != "" {
 		// If there is an explicit port specified, trust the scheme and hope for the best
 		if u.Scheme == "http" {
-			httpPort = u.Port()
+			httpPort = port
 			httpsPort = "443"
+			if u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost" {
+				httpsPort = ""
+			}
 		} else {
 			httpPort = "80"
-			httpsPort = u.Port()
+			httpsPort = port
 		}
 	} else {
 		// Otherwise, use the standard ports
@@ -340,7 +344,7 @@ func (nc *NoiseClient) dial(ctx context.Context) (*noiseconn.Conn, error) {
 	clientConn, err := (&controlhttp.Dialer{
 		Hostname:        nc.host,
 		HTTPPort:        nc.httpPort,
-		HTTPSPort:       nc.httpsPort,
+		HTTPSPort:       cmp.Or(nc.httpsPort, controlhttp.NoPort),
 		MachineKey:      nc.privKey,
 		ControlKey:      nc.serverPubKey,
 		ProtocolVersion: uint16(tailcfg.CurrentCapabilityVersion),
