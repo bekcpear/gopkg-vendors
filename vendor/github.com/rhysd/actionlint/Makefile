@@ -23,7 +23,7 @@ all: build test lint
 
 t test: .testtimestamp
 
-.linttimestamp: $(TESTS) $(SRCS) $(TOOL)
+.linttimestamp: $(TESTS) $(SRCS) $(TOOL) docs/checks.md
 	go vet ./...
 	staticcheck ./...
 	GOOS=js GOARCH=wasm staticcheck ./playground
@@ -58,8 +58,8 @@ man: man/actionlint.1
 bench:
 	go test -bench Lint -benchmem
 
-.github/actionlint-matcher.json: scripts/generate-actionlint-matcher/object.js
-	node ./scripts/generate-actionlint-matcher/main.js .github/actionlint-matcher.json
+.github/actionlint-matcher.json: scripts/generate-actionlint-matcher/object.mjs
+	node ./scripts/generate-actionlint-matcher/main.mjs .github/actionlint-matcher.json
 
 scripts/generate-actionlint-matcher/test/escape.txt: actionlint
 	./actionlint -color ./testdata/err/one_error.yaml > ./scripts/generate-actionlint-matcher/test/escape.txt || true
@@ -67,6 +67,9 @@ scripts/generate-actionlint-matcher/test/no_escape.txt: actionlint
 	./actionlint -no-color ./testdata/err/one_error.yaml > ./scripts/generate-actionlint-matcher/test/no_escape.txt || true
 scripts/generate-actionlint-matcher/test/want.json: actionlint
 	./actionlint -format '{{json .}}' ./testdata/err/one_error.yaml > scripts/generate-actionlint-matcher/test/want.json || true
+
+CHANGELOG.md: .bumptimestamp
+	changelog-from-release > CHANGELOG.md
 
 c clean:
 	rm -f ./actionlint ./.testtimestamp ./.linttimestamp ./actionlint_fuzz-fuzz.zip ./man/actionlint.1 ./man/actionlint.1.html ./actionlint-workflow-ast

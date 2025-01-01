@@ -124,7 +124,7 @@ var PopularActions = map[string]*ActionMetadata{
 			"json": {"json"},
 		},
 	},
-	"JamesIves/github-pages-deploy-action@releases/v4": {
+	"JamesIves/github-pages-deploy-action@v4": {
 		Name: "Deploy to GitHub Pages",
 		Inputs: ActionMetadataInputs{
 			"branch":           {"branch", false},
@@ -182,12 +182,14 @@ var PopularActions = map[string]*ActionMetadata{
 		Name: "Rust Cache",
 		Inputs: ActionMetadataInputs{
 			"cache-all-crates":  {"cache-all-crates", false},
+			"cache-bin":         {"cache-bin", false},
 			"cache-directories": {"cache-directories", false},
 			"cache-on-failure":  {"cache-on-failure", false},
 			"cache-provider":    {"cache-provider", false},
 			"cache-targets":     {"cache-targets", false},
 			"env-vars":          {"env-vars", false},
 			"key":               {"key", false},
+			"lookup-only":       {"lookup-only", false},
 			"prefix-key":        {"prefix-key", false},
 			"save-if":           {"save-if", false},
 			"shared-key":        {"shared-key", false},
@@ -279,6 +281,22 @@ var PopularActions = map[string]*ActionMetadata{
 			"bundle-path": {"bundle-path"},
 		},
 	},
+	"actions/attest-build-provenance@v2": {
+		Name: "Attest Build Provenance",
+		Inputs: ActionMetadataInputs{
+			"github-token":     {"github-token", false},
+			"push-to-registry": {"push-to-registry", false},
+			"show-summary":     {"show-summary", false},
+			"subject-digest":   {"subject-digest", false},
+			"subject-name":     {"subject-name", false},
+			"subject-path":     {"subject-path", false},
+		},
+		Outputs: ActionMetadataOutputs{
+			"attestation-id":  {"attestation-id"},
+			"attestation-url": {"attestation-url"},
+			"bundle-path":     {"bundle-path"},
+		},
+	},
 	"actions/cache/restore@v4": {
 		Name: "Restore Cache",
 		Inputs: ActionMetadataInputs{
@@ -318,19 +336,6 @@ var PopularActions = map[string]*ActionMetadata{
 		},
 		Outputs: ActionMetadataOutputs{
 			"cache-hit": {"cache-hit"},
-		},
-	},
-	"actions/checkout@v1": {
-		Name: "Checkout",
-		Inputs: ActionMetadataInputs{
-			"clean":       {"clean", false},
-			"fetch-depth": {"fetch-depth", false},
-			"lfs":         {"lfs", false},
-			"path":        {"path", false},
-			"ref":         {"ref", false},
-			"repository":  {"repository", false},
-			"submodules":  {"submodules", false},
-			"token":       {"token", false},
 		},
 	},
 	"actions/checkout@v4": {
@@ -468,11 +473,14 @@ var PopularActions = map[string]*ActionMetadata{
 			"page_url": {"page_url"},
 		},
 	},
-	"actions/download-artifact@v1": {
+	"actions/download-artifact@v3-node20": {
 		Name: "Download a Build Artifact",
 		Inputs: ActionMetadataInputs{
-			"name": {"name", true},
+			"name": {"name", false},
 			"path": {"path", false},
+		},
+		Outputs: ActionMetadataOutputs{
+			"download-path": {"download-path"},
 		},
 	},
 	"actions/download-artifact@v4": {
@@ -693,11 +701,14 @@ var PopularActions = map[string]*ActionMetadata{
 			"staled-issues-prs": {"staled-issues-prs"},
 		},
 	},
-	"actions/upload-artifact@v1": {
+	"actions/upload-artifact@v3-node20": {
 		Name: "Upload a Build Artifact",
 		Inputs: ActionMetadataInputs{
-			"name": {"name", true},
-			"path": {"path", true},
+			"if-no-files-found":    {"if-no-files-found", false},
+			"include-hidden-files": {"include-hidden-files", false},
+			"name":                 {"name", false},
+			"path":                 {"path", true},
+			"retention-days":       {"retention-days", false},
 		},
 	},
 	"actions/upload-artifact@v4": {
@@ -712,8 +723,9 @@ var PopularActions = map[string]*ActionMetadata{
 			"retention-days":       {"retention-days", false},
 		},
 		Outputs: ActionMetadataOutputs{
-			"artifact-id":  {"artifact-id"},
-			"artifact-url": {"artifact-url"},
+			"artifact-digest": {"artifact-digest"},
+			"artifact-id":     {"artifact-id"},
+			"artifact-url":    {"artifact-url"},
 		},
 	},
 	"actions/upload-pages-artifact@v1": {
@@ -852,6 +864,54 @@ var PopularActions = map[string]*ActionMetadata{
 			"working-directory":          {"working-directory", false},
 		},
 	},
+	"codecov/codecov-action@v5": {
+		Name: "Codecov",
+		Inputs: ActionMetadataInputs{
+			"binary":                     {"binary", false},
+			"codecov_yml_path":           {"codecov_yml_path", false},
+			"commit_parent":              {"commit_parent", false},
+			"directory":                  {"directory", false},
+			"disable_file_fixes":         {"disable_file_fixes", false},
+			"disable_safe_directory":     {"disable_safe_directory", false},
+			"disable_search":             {"disable_search", false},
+			"dry_run":                    {"dry_run", false},
+			"env_vars":                   {"env_vars", false},
+			"exclude":                    {"exclude", false},
+			"fail_ci_if_error":           {"fail_ci_if_error", false},
+			"files":                      {"files", false},
+			"flags":                      {"flags", false},
+			"gcov_args":                  {"gcov_args", false},
+			"gcov_executable":            {"gcov_executable", false},
+			"gcov_ignore":                {"gcov_ignore", false},
+			"gcov_include":               {"gcov_include", false},
+			"git_service":                {"git_service", false},
+			"handle_no_reports_found":    {"handle_no_reports_found", false},
+			"job_code":                   {"job_code", false},
+			"name":                       {"name", false},
+			"network_filter":             {"network_filter", false},
+			"network_prefix":             {"network_prefix", false},
+			"os":                         {"os", false},
+			"override_branch":            {"override_branch", false},
+			"override_build":             {"override_build", false},
+			"override_build_url":         {"override_build_url", false},
+			"override_commit":            {"override_commit", false},
+			"override_pr":                {"override_pr", false},
+			"plugins":                    {"plugins", false},
+			"report_code":                {"report_code", false},
+			"report_type":                {"report_type", false},
+			"root_dir":                   {"root_dir", false},
+			"skip_validation":            {"skip_validation", false},
+			"slug":                       {"slug", false},
+			"swift_project":              {"swift_project", false},
+			"token":                      {"token", false},
+			"url":                        {"url", false},
+			"use_legacy_upload_endpoint": {"use_legacy_upload_endpoint", false},
+			"use_oidc":                   {"use_oidc", false},
+			"verbose":                    {"verbose", false},
+			"version":                    {"version", false},
+			"working-directory":          {"working-directory", false},
+		},
+	},
 	"dawidd6/action-download-artifact@v3": {
 		Name: "Download workflow artifact",
 		Inputs: ActionMetadataInputs{
@@ -945,6 +1005,37 @@ var PopularActions = map[string]*ActionMetadata{
 			"found_artifact": {"found_artifact"},
 		},
 	},
+	"dawidd6/action-download-artifact@v7": {
+		Name: "Download workflow artifact",
+		Inputs: ActionMetadataInputs{
+			"allow_forks":          {"allow_forks", false},
+			"branch":               {"branch", false},
+			"check_artifacts":      {"check_artifacts", false},
+			"commit":               {"commit", false},
+			"dry_run":              {"dry_run", false},
+			"event":                {"event", false},
+			"github_token":         {"github_token", false},
+			"if_no_artifact_found": {"if_no_artifact_found", false},
+			"name":                 {"name", false},
+			"name_is_regexp":       {"name_is_regexp", false},
+			"path":                 {"path", false},
+			"pr":                   {"pr", false},
+			"repo":                 {"repo", false},
+			"run_id":               {"run_id", false},
+			"run_number":           {"run_number", false},
+			"search_artifacts":     {"search_artifacts", false},
+			"skip_unpack":          {"skip_unpack", false},
+			"workflow":             {"workflow", false},
+			"workflow_conclusion":  {"workflow_conclusion", false},
+			"workflow_search":      {"workflow_search", false},
+		},
+		Outputs: ActionMetadataOutputs{
+			"artifacts":      {"artifacts"},
+			"dry_run":        {"dry_run"},
+			"error_message":  {"error_message"},
+			"found_artifact": {"found_artifact"},
+		},
+	},
 	"dawidd6/action-send-mail@v1": {
 		Name: "Send email",
 		Inputs: ActionMetadataInputs{
@@ -960,6 +1051,32 @@ var PopularActions = map[string]*ActionMetadata{
 		},
 	},
 	"dawidd6/action-send-mail@v3": {
+		Name: "Send email",
+		Inputs: ActionMetadataInputs{
+			"attachments":      {"attachments", false},
+			"bcc":              {"bcc", false},
+			"body":             {"body", false},
+			"cc":               {"cc", false},
+			"connection_url":   {"connection_url", false},
+			"convert_markdown": {"convert_markdown", false},
+			"from":             {"from", true},
+			"html_body":        {"html_body", false},
+			"ignore_cert":      {"ignore_cert", false},
+			"in_reply_to":      {"in_reply_to", false},
+			"nodemailerdebug":  {"nodemailerdebug", false},
+			"nodemailerlog":    {"nodemailerlog", false},
+			"password":         {"password", false},
+			"priority":         {"priority", false},
+			"reply_to":         {"reply_to", false},
+			"secure":           {"secure", false},
+			"server_address":   {"server_address", false},
+			"server_port":      {"server_port", false},
+			"subject":          {"subject", true},
+			"to":               {"to", false},
+			"username":         {"username", false},
+		},
+	},
+	"dawidd6/action-send-mail@v4": {
 		Name: "Send email",
 		Inputs: ActionMetadataInputs{
 			"attachments":      {"attachments", false},
@@ -1114,6 +1231,7 @@ var PopularActions = map[string]*ActionMetadata{
 			"builder":          {"builder", false},
 			"cache-from":       {"cache-from", false},
 			"cache-to":         {"cache-to", false},
+			"call":             {"call", false},
 			"cgroup-parent":    {"cgroup-parent", false},
 			"context":          {"context", false},
 			"file":             {"file", false},
@@ -1408,6 +1526,7 @@ var PopularActions = map[string]*ActionMetadata{
 			"debug":                     {"debug", false},
 			"debug-artifact-name":       {"debug-artifact-name", false},
 			"debug-database-name":       {"debug-database-name", false},
+			"dependency-caching":        {"dependency-caching", false},
 			"external-repository-token": {"external-repository-token", false},
 			"languages":                 {"languages", false},
 			"matrix":                    {"matrix", false},
@@ -2038,6 +2157,7 @@ var PopularActions = map[string]*ActionMetadata{
 		Name: "actionlint with reviewdog",
 		Inputs: ActionMetadataInputs{
 			"actionlint_flags": {"actionlint_flags", false},
+			"fail_level":       {"fail_level", false},
 			"fail_on_error":    {"fail_on_error", false},
 			"filter_mode":      {"filter_mode", false},
 			"github_token":     {"github_token", false},
@@ -2051,6 +2171,7 @@ var PopularActions = map[string]*ActionMetadata{
 		Name: "Run eslint with reviewdog",
 		Inputs: ActionMetadataInputs{
 			"eslint_flags":    {"eslint_flags", false},
+			"fail_level":      {"fail_level", false},
 			"fail_on_error":   {"fail_on_error", false},
 			"filter_mode":     {"filter_mode", false},
 			"github_token":    {"github_token", false},
@@ -2080,6 +2201,7 @@ var PopularActions = map[string]*ActionMetadata{
 		Name: "Run golangci-lint with reviewdog",
 		Inputs: ActionMetadataInputs{
 			"cache":                 {"cache", false},
+			"fail_level":            {"fail_level", false},
 			"fail_on_error":         {"fail_on_error", false},
 			"filter_mode":           {"filter_mode", false},
 			"github_token":          {"github_token", false},
@@ -2099,6 +2221,7 @@ var PopularActions = map[string]*ActionMetadata{
 		Name: "Run hadolint with reviewdog",
 		Inputs: ActionMetadataInputs{
 			"exclude":         {"exclude", false},
+			"fail_level":      {"fail_level", false},
 			"fail_on_error":   {"fail_on_error", false},
 			"filter_mode":     {"filter_mode", false},
 			"github_token":    {"github_token", false},
@@ -2114,6 +2237,7 @@ var PopularActions = map[string]*ActionMetadata{
 		Name: "Run misspell with reviewdog",
 		Inputs: ActionMetadataInputs{
 			"exclude":       {"exclude", false},
+			"fail_level":    {"fail_level", false},
 			"fail_on_error": {"fail_on_error", false},
 			"filter_mode":   {"filter_mode", false},
 			"github_token":  {"github_token", false},
@@ -2146,6 +2270,7 @@ var PopularActions = map[string]*ActionMetadata{
 	"reviewdog/action-rubocop@v2": {
 		Name: "Run rubocop with reviewdog",
 		Inputs: ActionMetadataInputs{
+			"fail_level":         {"fail_level", false},
 			"fail_on_error":      {"fail_on_error", false},
 			"filter_mode":        {"filter_mode", false},
 			"github_token":       {"github_token", false},
@@ -2167,6 +2292,7 @@ var PopularActions = map[string]*ActionMetadata{
 		Inputs: ActionMetadataInputs{
 			"check_all_files_with_shebangs": {"check_all_files_with_shebangs", false},
 			"exclude":                       {"exclude", false},
+			"fail_level":                    {"fail_level", false},
 			"fail_on_error":                 {"fail_on_error", false},
 			"filter_mode":                   {"filter_mode", false},
 			"github_token":                  {"github_token", false},
@@ -2181,6 +2307,7 @@ var PopularActions = map[string]*ActionMetadata{
 	"reviewdog/action-tflint@v1": {
 		Name: "Run tflint with reviewdog",
 		Inputs: ActionMetadataInputs{
+			"fail_level":        {"fail_level", false},
 			"fail_on_error":     {"fail_on_error", false},
 			"filter_mode":       {"filter_mode", false},
 			"flags":             {"flags", false},
@@ -2371,6 +2498,7 @@ var OutdatedPopularActionSpecs = map[string]struct{}{
 	"actions/cache@v1":                                   {},
 	"actions/cache@v2":                                   {},
 	"actions/cache@v3":                                   {},
+	"actions/checkout@v1":                                {},
 	"actions/checkout@v2":                                {},
 	"actions/checkout@v3":                                {},
 	"actions/configure-pages@v1":                         {},
@@ -2383,6 +2511,7 @@ var OutdatedPopularActionSpecs = map[string]struct{}{
 	"actions/dependency-review-action@v3":                {},
 	"actions/deploy-pages@v1":                            {},
 	"actions/deploy-pages@v2":                            {},
+	"actions/download-artifact@v1":                       {},
 	"actions/download-artifact@v2":                       {},
 	"actions/download-artifact@v3":                       {},
 	"actions/github-script@v1":                           {},
@@ -2419,6 +2548,7 @@ var OutdatedPopularActionSpecs = map[string]struct{}{
 	"actions/stale@v6":                                   {},
 	"actions/stale@v7":                                   {},
 	"actions/stale@v8":                                   {},
+	"actions/upload-artifact@v1":                         {},
 	"actions/upload-artifact@v2":                         {},
 	"actions/upload-artifact@v3":                         {},
 	"aws-actions/configure-aws-credentials@v1":           {},

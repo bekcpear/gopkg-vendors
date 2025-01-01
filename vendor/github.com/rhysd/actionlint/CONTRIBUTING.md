@@ -1,3 +1,15 @@
+# Policy for actionlint's features
+
+- actionlint focuses on detecting mistakes. Feature requests and patches for checks that enforces code style or
+  some conventions are generally not accepted.
+- actionlint tries to keep [the configuration](docs/config.md) as minimal as possible. Feature requests and patches
+  for checks that require user configurations are generally not accepted.
+
+These are important to keep actionlint useful and convenient for everyone. I believe that no one wants to create and
+maintain a heavy configuration file just for linting CI workflows.
+
+It's helpful to check if a similar patch has been rejected in the past before submitting it.
+
 # Reporting an issue
 
 To report a bug, please submit a new ticket on GitHub. It's helpful to search similar tickets before making it.
@@ -11,8 +23,6 @@ investigate.
 # Sending a patch
 
 Thank you for taking your time to improve this project. To send a patch, please submit a new pull request on GitHub.
-It's helpful to check if a similar patch was rejected in the past before making it. actionlint focuses on detecting
-mistakes so adding rules related to styles or conventions is basically not accepted.
 
 https://github.com/rhysd/actionlint/pulls
 
@@ -105,7 +115,8 @@ When releasing v1.2.3 as example:
    - The CI job also updates version string in `./scripts/download-actionlint.bash`
 4. Open the pre-release at [release page](https://github.com/rhysd/actionlint/releases) with browser
 5. Write up release notes, uncheck pre-release checkbox and publish the new release
-6. Run `changelog-from-release > CHANGELOG.md` locally to update [CHANGELOG.md](./CHANGELOG.md) and make a commit for the change
+6. Run `make CHANGELOG.md` to update [CHANGELOG.md](./CHANGELOG.md) and make a commit for the change. This step requires
+   [changelog-from-release](https://github.com/rhysd/changelog-from-release).
 7. Run `git pull` to merge upstream changes to local `main` branch and run `git push origin main`
 8. Update the playground by `./playground/deploy.bash` if it is not updated yet for the release
 
@@ -120,7 +131,7 @@ ronn ./man/actionlint.1.ronn
 or
 
 ```sh
-make ./man/actionlint.1
+make man
 ```
 
 ## How to develop playground
