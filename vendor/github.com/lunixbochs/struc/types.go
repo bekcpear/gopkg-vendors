@@ -29,8 +29,6 @@ const (
 	SizeType
 	OffType
 	CustomType
-	CustomTypePointer
-	CustomTypeInterface
 )
 
 func (t Type) Resolve(options *Options) Type {
@@ -106,8 +104,7 @@ var typeLookup = map[string]Type{
 }
 
 var typeNames = map[Type]string{
-	CustomType:        "Custom",
-	CustomTypePointer: "CustomPointer",
+	CustomType: "Custom",
 }
 
 func init() {

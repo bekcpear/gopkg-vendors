@@ -60,6 +60,4 @@ type RTTStatsProvider interface {
 	UpdateRTT(sendDelta, ackDelay time.Duration, now time.Time)
 	SetMaxAckDelay(mad time.Duration)
 	SetInitialRTT(t time.Duration)
-	OnConnectionMigration()
-	ExpireSmoothedMetrics()
 }
