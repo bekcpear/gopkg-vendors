@@ -32,7 +32,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tailscale/golang-x-crypto/acme"
 	"tailscale.com/atomicfile"
 	"tailscale.com/envknob"
 	"tailscale.com/hostinfo"
@@ -40,6 +39,8 @@ import (
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/ipn/store"
 	"tailscale.com/ipn/store/mem"
+	"tailscale.com/net/bakedroots"
+	"tailscale.com/tempfork/acme"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/testenv"
 	"tailscale.com/version"
@@ -555,6 +556,7 @@ func (b *LocalBackend) getCertPEM(ctx context.Context, cs certStore, logf logger
 	}
 
 	logf("requesting cert...")
+	traceACME(csr)
 	der, _, err := ac.CreateOrderCert(ctx, order.FinalizeURL, csr, true)
 	if err != nil {
 		return nil, fmt.Errorf("CreateOrder: %v", err)
@@ -577,10 +579,10 @@ func (b *LocalBackend) getCertPEM(ctx context.Context, cs certStore, logf logger
 }
 
 // certRequest generates a CSR for the given common name cn and optional SANs.
-func certRequest(key crypto.Signer, cn string, ext []pkix.Extension, san ...string) ([]byte, error) {
+func certRequest(key crypto.Signer, name string, ext []pkix.Extension) ([]byte, error) {
 	req := &x509.CertificateRequest{
-		Subject:         pkix.Name{CommonName: cn},
-		DNSNames:        san,
+		Subject:         pkix.Name{CommonName: name},
+		DNSNames:        []string{name},
 		ExtraExtensions: ext,
 	}
 	return x509.CreateCertificateRequest(rand.Reader, req, key)
@@ -657,15 +659,16 @@ func acmeClient(cs certStore) (*acme.Client, error) {
 	// LetsEncrypt), we should make sure that they support ARI extension (see
 	// shouldStartDomainRenewalARI).
 	return &acme.Client{
-		Key:       key,
-		UserAgent: "tailscaled/" + version.Long(),
+		Key:          key,
+		UserAgent:    "tailscaled/" + version.Long(),
+		DirectoryURL: envknob.String("TS_DEBUG_ACME_DIRECTORY_URL"),
 	}, nil
 }
 
 // validCertPEM reports whether the given certificate is valid for domain at now.
 //
 // If roots != nil, it is used instead of the system root pool. This is meant
-// to support testing, and production code should pass roots == nil.
+// to support testing; production code should pass roots == nil.
 func validCertPEM(domain string, keyPEM, certPEM []byte, roots *x509.CertPool, now time.Time) bool {
 	if len(keyPEM) == 0 || len(certPEM) == 0 {
 		return false
@@ -688,15 +691,29 @@ func validCertPEM(domain string, keyPEM, certPEM []byte, roots *x509.CertPool, n
 			intermediates.AddCert(cert)
 		}
 	}
+	return validateLeaf(leaf, intermediates, domain, now, roots)
+}
+
+// validateLeaf is a helper for [validCertPEM].
+//
+// If called with roots == nil, it will use the system root pool as well as the
+// baked-in roots. If non-nil, only those roots are used.
+func validateLeaf(leaf *x509.Certificate, intermediates *x509.CertPool, domain string, now time.Time, roots *x509.CertPool) bool {
 	if leaf == nil {
 		return false
 	}
-	_, err = leaf.Verify(x509.VerifyOptions{
+	_, err := leaf.Verify(x509.VerifyOptions{
 		DNSName:       domain,
 		CurrentTime:   now,
 		Roots:         roots,
 		Intermediates: intermediates,
 	})
+	if err != nil && roots == nil {
+		// If validation failed and they specified nil for roots (meaning to use
+		// the system roots), then give it another chance to validate using the
+		// binary's baked-in roots (LetsEncrypt). See tailscale/tailscale#14690.
+		return validateLeaf(leaf, intermediates, domain, now, bakedroots.Get())
+	}
 	return err == nil
 }
 

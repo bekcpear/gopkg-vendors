@@ -89,8 +89,8 @@ type Server struct {
 type ServerMode string
 
 const (
-	// LoginServerMode serves a readonly login client for logging a
-	// node into a tailnet, and viewing a readonly interface of the
+	// LoginServerMode serves a read-only login client for logging a
+	// node into a tailnet, and viewing a read-only interface of the
 	// node's current Tailscale settings.
 	//
 	// In this mode, API calls are authenticated via platform auth.
@@ -110,7 +110,7 @@ const (
 	// This mode restricts the app to only being assessible over Tailscale,
 	// and API calls are authenticated via browser sessions associated with
 	// the source's Tailscale identity. If the source browser does not have
-	// a valid session, a readonly version of the app is displayed.
+	// a valid session, a read-only version of the app is displayed.
 	ManageServerMode ServerMode = "manage"
 )
 
@@ -211,15 +211,25 @@ func NewServer(opts ServerOpts) (s *Server, err error) {
 	// The client is secured by limiting the interface it listens on,
 	// or by authenticating requests before they reach the web client.
 	csrfProtect := csrf.Protect(s.csrfKey(), csrf.Secure(false))
+
+	// signal to the CSRF middleware that the request is being served over
+	// plaintext HTTP to skip TLS-only header checks.
+	withSetPlaintext := func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r = csrf.PlaintextHTTPRequest(r)
+			h.ServeHTTP(w, r)
+		})
+	}
+
 	switch s.mode {
 	case LoginServerMode:
-		s.apiHandler = csrfProtect(http.HandlerFunc(s.serveLoginAPI))
+		s.apiHandler = csrfProtect(withSetPlaintext(http.HandlerFunc(s.serveLoginAPI)))
 		metric = "web_login_client_initialization"
 	case ReadOnlyServerMode:
-		s.apiHandler = csrfProtect(http.HandlerFunc(s.serveLoginAPI))
+		s.apiHandler = csrfProtect(withSetPlaintext(http.HandlerFunc(s.serveLoginAPI)))
 		metric = "web_readonly_client_initialization"
 	case ManageServerMode:
-		s.apiHandler = csrfProtect(http.HandlerFunc(s.serveAPI))
+		s.apiHandler = csrfProtect(withSetPlaintext(http.HandlerFunc(s.serveAPI)))
 		metric = "web_client_initialization"
 	}
 
@@ -695,16 +705,16 @@ func (s *Server) serveAPIAuth(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case sErr != nil && errors.Is(sErr, errNotUsingTailscale):
 		s.lc.IncrementCounter(r.Context(), "web_client_viewing_local", 1)
-		resp.Authorized = false // restricted to the readonly view
+		resp.Authorized = false // restricted to the read-only view
 	case sErr != nil && errors.Is(sErr, errNotOwner):
 		s.lc.IncrementCounter(r.Context(), "web_client_viewing_not_owner", 1)
-		resp.Authorized = false // restricted to the readonly view
+		resp.Authorized = false // restricted to the read-only view
 	case sErr != nil && errors.Is(sErr, errTaggedLocalSource):
 		s.lc.IncrementCounter(r.Context(), "web_client_viewing_local_tag", 1)
-		resp.Authorized = false // restricted to the readonly view
+		resp.Authorized = false // restricted to the read-only view
 	case sErr != nil && errors.Is(sErr, errTaggedRemoteSource):
 		s.lc.IncrementCounter(r.Context(), "web_client_viewing_remote_tag", 1)
-		resp.Authorized = false // restricted to the readonly view
+		resp.Authorized = false // restricted to the read-only view
 	case sErr != nil && !errors.Is(sErr, errNoSession):
 		// Any other error.
 		http.Error(w, sErr.Error(), http.StatusInternalServerError)
@@ -804,8 +814,8 @@ type nodeData struct {
 	DeviceName  string
 	TailnetName string // TLS cert name
 	DomainName  string
-	IPv4        string
-	IPv6        string
+	IPv4        netip.Addr
+	IPv6        netip.Addr
 	OS          string
 	IPNVersion  string
 
@@ -864,10 +874,14 @@ func (s *Server) serveGetNodeData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filterRules, _ := s.lc.DebugPacketFilterRules(r.Context())
+	ipv4, ipv6 := s.selfNodeAddresses(r, st)
+
 	data := &nodeData{
 		ID:               st.Self.ID,
 		Status:           st.BackendState,
 		DeviceName:       strings.Split(st.Self.DNSName, ".")[0],
+		IPv4:             ipv4,
+		IPv6:             ipv6,
 		OS:               st.Self.OS,
 		IPNVersion:       strings.Split(st.Version, "-")[0],
 		Profile:          st.User[st.Self.UserID],
@@ -886,10 +900,6 @@ func (s *Server) serveGetNodeData(w http.ResponseWriter, r *http.Request) {
 
 		ACLAllowsAnyIncomingTraffic: s.aclsAllowAccess(filterRules),
 	}
-
-	ipv4, ipv6 := s.selfNodeAddresses(r, st)
-	data.IPv4 = ipv4.String()
-	data.IPv6 = ipv6.String()
 
 	if hostinfo.GetEnvType() == hostinfo.HomeAssistantAddOn && data.URLPrefix == "" {
 		// X-Ingress-Path is the path prefix in use for Home Assistant
