@@ -29,9 +29,12 @@ import (
 )
 
 var (
-	check  = flag.Bool("check", false, "if true, check whether dependencies match the depaware.txt file")
-	update = flag.Bool("update", false, "if true, update the depaware.txt file")
-	osList = flag.String("goos", "linux,darwin,windows", "comma-separated list of GOOS values")
+	check    = flag.Bool("check", false, "if true, check whether dependencies match the depaware.txt file")
+	update   = flag.Bool("update", false, "if true, update the depaware.txt file")
+	fileName = flag.String("file", "depaware.txt", "name of the file to write")
+	osList   = flag.String("goos", "linux,darwin,windows", "comma-separated list of GOOS values")
+	tags     = flag.String("tags", "", "comma-separated list of build tags to use when loading packages")
+	internal = flag.Bool("internal", false, "if true, include internal packages in the output")
 )
 
 func Main() {
@@ -63,12 +66,17 @@ func process(pkg string) {
 	geese := strings.Split(*osList, ",")
 	var d deps
 	var dir string
+	var buildFlags []string
+	if *tags != "" {
+		buildFlags = append(buildFlags, "-tags", *tags)
+	}
 	for _, goos := range geese {
 		env := os.Environ()
 		env = append(env, "GOARCH=amd64", "GOOS="+goos, "CGO_ENABLED=1")
 		cfg := &packages.Config{
-			Mode: packages.NeedImports | packages.NeedDeps | packages.NeedFiles | packages.NeedName,
-			Env:  env,
+			Mode:       packages.NeedImports | packages.NeedDeps | packages.NeedFiles | packages.NeedName,
+			Env:        env,
+			BuildFlags: buildFlags,
 		}
 
 		pkgs, err := packages.Load(cfg, pkg)
@@ -107,7 +115,7 @@ func process(pkg string) {
 
 	// Parse existing depaware.txt, if present,
 	// to get the existing dependency source the file lists.
-	daFile := filepath.Join(dir, "depaware.txt")
+	daFile := filepath.Join(dir, *fileName)
 	daContents, daErr := ioutil.ReadFile(daFile)
 	var preferredWhy map[string]string
 	if daErr == nil {
@@ -224,7 +232,7 @@ func (d *deps) AddEdge(from, to string) {
 
 func (d *deps) AddDep(pkg, goos string) {
 	pkg = imports.VendorlessPath(pkg)
-	if isBoringPackage(pkg) {
+	if !*internal && isInternalPackage(pkg) {
 		return
 	}
 	if !stringsContains(d.Deps, pkg) {
@@ -245,7 +253,7 @@ func stringsContains(ss []string, s string) bool {
 	return false
 }
 
-func isBoringPackage(pkg string) bool {
+func isInternalPackage(pkg string) bool {
 	return strings.HasPrefix(pkg, "internal/") ||
 		strings.HasPrefix(pkg, "runtime/internal/") ||
 		pkg == "runtime" || pkg == "runtime/cgo" || pkg == "unsafe" ||
