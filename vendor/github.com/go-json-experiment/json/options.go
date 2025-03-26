@@ -61,6 +61,7 @@ import (
 //   - [Deterministic] affects marshaling only
 //   - [FormatNilSliceAsNull] affects marshaling only
 //   - [FormatNilMapAsNull] affects marshaling only
+//   - [OmitZeroStructFields] affects marshaling only
 //   - [MatchCaseInsensitiveNames] affects marshaling and unmarshaling
 //   - [DiscardUnknownMembers] affects marshaling only
 //   - [RejectUnknownMembers] affects unmarshaling only
@@ -74,9 +75,7 @@ type Options = jsonopts.Options
 // Properties set in later options override the value of previously set properties.
 func JoinOptions(srcs ...Options) Options {
 	var dst jsonopts.Struct
-	for _, src := range srcs {
-		dst.Join(src)
-	}
+	dst.Join(srcs...)
 	return &dst
 }
 
@@ -88,8 +87,8 @@ func JoinOptions(srcs ...Options) Options {
 //	v, ok := json.GetOption(opts, json.Deterministic)
 //
 // Options are most commonly introspected to alter the JSON representation of
-// [MarshalerV2.MarshalJSONV2] and [UnmarshalerV2.UnmarshalJSONV2] methods, and
-// [MarshalFuncV2] and [UnmarshalFuncV2] functions.
+// [MarshalerTo.MarshalJSONTo] and [UnmarshalerFrom.UnmarshalJSONFrom] methods, and
+// [MarshalToFunc] and [UnmarshalFromFunc] functions.
 // In such cases, the presence bit should generally be ignored.
 func GetOption[T any](opts Options, setter func(T) Options) (T, bool) {
 	return jsonopts.GetOption(opts, setter)
@@ -105,9 +104,8 @@ func DefaultOptionsV2() Options {
 
 // StringifyNumbers specifies that numeric Go types should be marshaled
 // as a JSON string containing the equivalent JSON number value.
-// When unmarshaling, numeric Go types can be parsed from either
-// a JSON number or a JSON string containing the JSON number
-// without any surrounding whitespace.
+// When unmarshaling, numeric Go types are parsed from a JSON string
+// containing the JSON number without any surrounding whitespace.
 //
 // According to RFC 8259, section 6, a JSON implementation may choose to
 // limit the representation of a JSON number to an IEEE 754 binary64 value.
@@ -185,7 +183,7 @@ func OmitZeroStructFields(v bool) Options {
 
 // MatchCaseInsensitiveNames specifies that JSON object members are matched
 // against Go struct fields using a case-insensitive match of the name.
-// Go struct fields explicitly marked with `strictcase` or `nocase`
+// Go struct fields explicitly marked with `case:strict` or `case:ignore`
 // always use case-sensitive (or case-insensitive) name matching,
 // regardless of the value of this option.
 //
