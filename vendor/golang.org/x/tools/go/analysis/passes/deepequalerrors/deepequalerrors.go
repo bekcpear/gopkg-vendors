@@ -101,7 +101,7 @@ func containsError(typ types.Type) bool {
 					return true
 				}
 			}
-		case *types.Named:
+		case *types.Named, *types.Alias:
 			return check(t.Underlying())
 
 		// We list the remaining valid type kinds for completeness.

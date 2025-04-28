@@ -977,7 +977,7 @@ func (g *ObjcGen) genInterfaceMethodProxy(obj *types.TypeName, m *types.Func) {
 
 	if isErrorType(obj.Type()) && m.Name() == "Error" {
 		// As a special case, ObjC NSErrors are passed to Go pretending to implement the Go error interface.
-		// They don't actually have an Error method, so calls to to it needs to be rerouted.
+		// They don't actually have an Error method, so calls to it needs to be rerouted.
 		g.Printf("%s = [o localizedDescription];\n", s.retParams[0].name)
 	} else {
 		if s.ret == "void" {
@@ -1060,7 +1060,7 @@ func (g *ObjcGen) genStructH(obj *types.TypeName, t *types.Struct) {
 	if oinf != nil {
 		for _, sup := range oinf.supers {
 			if !sup.Protocol {
-				g.Printf(sup.Name)
+				g.Printf("%s", sup.Name)
 			} else {
 				prots = append(prots, sup.Name)
 			}

@@ -11,20 +11,17 @@ import (
 // DeferRule lints unused params in functions.
 type DeferRule struct {
 	allow map[string]bool
-	sync.Mutex
+
+	configureOnce sync.Once
 }
 
 func (r *DeferRule) configure(arguments lint.Arguments) {
-	r.Lock()
-	if r.allow == nil {
-		r.allow = r.allowFromArgs(arguments)
-	}
-	r.Unlock()
+	r.allow = r.allowFromArgs(arguments)
 }
 
 // Apply applies the rule to given file.
 func (r *DeferRule) Apply(file *lint.File, arguments lint.Arguments) []lint.Failure {
-	r.configure(arguments)
+	r.configureOnce.Do(func() { r.configure(arguments) })
 
 	var failures []lint.Failure
 	onFailure := func(failure lint.Failure) {
@@ -56,7 +53,7 @@ func (*DeferRule) allowFromArgs(args lint.Arguments) map[string]bool {
 		return allow
 	}
 
-	aa, ok := args[0].([]interface{})
+	aa, ok := args[0].([]any)
 	if !ok {
 		panic(fmt.Sprintf("Invalid argument '%v' for 'defer' rule. Expecting []string, got %T", args[0], args[0]))
 	}
@@ -111,7 +108,7 @@ func (w lintDeferRule) Visit(node ast.Node) ast.Visitor {
 			// but it is very likely to be a misunderstanding of defer's behavior around arguments.
 			w.newFailure("recover must be called inside a deferred function, this is executing recover immediately", n, 1, "logic", "immediate-recover")
 		}
-
+		return nil // no need to analyze the arguments of the function call
 	case *ast.DeferStmt:
 		if isIdent(n.Call.Fun, "recover") {
 			// defer recover()
@@ -144,8 +141,8 @@ func (w lintDeferRule) Visit(node ast.Node) ast.Visitor {
 					w.newFailure("be careful when deferring calls to methods without pointer receiver", fn, 0.8, "bad practice", "method-call")
 				}
 			}
-
 		}
+
 		return nil
 	}
 
