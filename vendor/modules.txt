@@ -85,7 +85,7 @@ github.com/davecgh/go-spew/spew
 # github.com/distribution/reference v0.6.0
 ## explicit; go 1.20
 github.com/distribution/reference
-# github.com/docker/cli v28.0.2+incompatible
+# github.com/docker/cli v28.0.4+incompatible
 ## explicit
 github.com/docker/cli/cli/compose/interpolation
 github.com/docker/cli/cli/compose/loader
@@ -102,7 +102,7 @@ github.com/docker/cli/cli/connhelper/ssh
 github.com/docker/cli/opts
 github.com/docker/cli/opts/swarmopts
 github.com/docker/cli/pkg/kvfile
-# github.com/docker/docker v28.0.2+incompatible
+# github.com/docker/docker v28.0.4+incompatible
 ## explicit
 github.com/docker/docker/api
 github.com/docker/docker/api/types
@@ -432,7 +432,7 @@ go.opentelemetry.io/otel/metric/noop
 go.opentelemetry.io/otel/trace
 go.opentelemetry.io/otel/trace/embedded
 go.opentelemetry.io/otel/trace/noop
-# golang.org/x/crypto v0.35.0
+# golang.org/x/crypto v0.36.0
 ## explicit; go 1.23.0
 golang.org/x/crypto/argon2
 golang.org/x/crypto/blake2b
@@ -452,13 +452,13 @@ golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
 golang.org/x/crypto/ssh/knownhosts
 # golang.org/x/exp v0.0.0-20240909161429-701f63a606c0
 ## explicit; go 1.22.0
-# golang.org/x/net v0.36.0
+# golang.org/x/net v0.38.0
 ## explicit; go 1.23.0
 golang.org/x/net/context
 golang.org/x/net/internal/socks
 golang.org/x/net/proxy
-# golang.org/x/sync v0.11.0
-## explicit; go 1.18
+# golang.org/x/sync v0.12.0
+## explicit; go 1.23.0
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
 # golang.org/x/sys v0.31.0
@@ -471,8 +471,8 @@ golang.org/x/sys/windows
 # golang.org/x/term v0.30.0
 ## explicit; go 1.23.0
 golang.org/x/term
-# golang.org/x/text v0.22.0
-## explicit; go 1.18
+# golang.org/x/text v0.23.0
+## explicit; go 1.23.0
 golang.org/x/text/cases
 golang.org/x/text/internal
 golang.org/x/text/internal/language
@@ -486,8 +486,8 @@ golang.org/x/text/width
 ## explicit; go 1.18
 # google.golang.org/grpc v1.66.3
 ## explicit; go 1.21
-# google.golang.org/protobuf v1.36.5
-## explicit; go 1.21
+# google.golang.org/protobuf v1.36.6
+## explicit; go 1.22
 google.golang.org/protobuf/encoding/protojson
 google.golang.org/protobuf/encoding/prototext
 google.golang.org/protobuf/encoding/protowire
