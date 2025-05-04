@@ -10,7 +10,7 @@ import (
 // exceeds this length, it is truncated at a point ≤ n so that the result does
 // not end in a partial UTF-8 encoding. Trunc does not verify that s is valid
 // UTF-8, but if it is the result will remain valid after truncation.
-func Trunc(s string, n int) string {
+func Trunc[String ~string | ~[]byte](s String, n int) String {
 	if n >= len(s) {
 		return s
 	}
@@ -33,12 +33,21 @@ func Trunc(s string, n int) string {
 
 // Lines splits its argument on newlines. It is a convenience function for
 // [strings.Split], except that it returns empty if s == "" and treats a
-// trailing newline as the end of the file.
+// trailing newline as the end of the file rather than an empty line.
 func Lines(s string) []string {
 	if s == "" {
 		return nil
 	}
 	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+}
+
+// Split splits its argument on sep. It is a convenience function for
+// [strings.Split], except that it returns empty if s == "".
+func Split(s, sep string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, sep)
 }
 
 // CompareNatural compares its arguments lexicographically, but treats runs of

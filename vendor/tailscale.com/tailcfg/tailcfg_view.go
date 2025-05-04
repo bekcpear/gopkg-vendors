@@ -880,25 +880,27 @@ func (v *DERPRegionView) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-func (v DERPRegionView) RegionID() int      { return v.ж.RegionID }
-func (v DERPRegionView) RegionCode() string { return v.ж.RegionCode }
-func (v DERPRegionView) RegionName() string { return v.ж.RegionName }
-func (v DERPRegionView) Latitude() float64  { return v.ж.Latitude }
-func (v DERPRegionView) Longitude() float64 { return v.ж.Longitude }
-func (v DERPRegionView) Avoid() bool        { return v.ж.Avoid }
+func (v DERPRegionView) RegionID() int         { return v.ж.RegionID }
+func (v DERPRegionView) RegionCode() string    { return v.ж.RegionCode }
+func (v DERPRegionView) RegionName() string    { return v.ж.RegionName }
+func (v DERPRegionView) Latitude() float64     { return v.ж.Latitude }
+func (v DERPRegionView) Longitude() float64    { return v.ж.Longitude }
+func (v DERPRegionView) Avoid() bool           { return v.ж.Avoid }
+func (v DERPRegionView) NoMeasureNoHome() bool { return v.ж.NoMeasureNoHome }
 func (v DERPRegionView) Nodes() views.SliceView[*DERPNode, DERPNodeView] {
 	return views.SliceOfViews[*DERPNode, DERPNodeView](v.ж.Nodes)
 }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _DERPRegionViewNeedsRegeneration = DERPRegion(struct {
-	RegionID   int
-	RegionCode string
-	RegionName string
-	Latitude   float64
-	Longitude  float64
-	Avoid      bool
-	Nodes      []*DERPNode
+	RegionID        int
+	RegionCode      string
+	RegionName      string
+	Latitude        float64
+	Longitude       float64
+	Avoid           bool
+	NoMeasureNoHome bool
+	Nodes           []*DERPNode
 }{})
 
 // View returns a read-only view of DERPMap.
@@ -1403,7 +1405,6 @@ func (v UserProfileView) ID() UserID                    { return v.ж.ID }
 func (v UserProfileView) LoginName() string             { return v.ж.LoginName }
 func (v UserProfileView) DisplayName() string           { return v.ж.DisplayName }
 func (v UserProfileView) ProfilePicURL() string         { return v.ж.ProfilePicURL }
-func (v UserProfileView) Roles() emptyStructJSONSlice   { return v.ж.Roles }
 func (v UserProfileView) Equal(v2 UserProfileView) bool { return v.ж.Equal(v2.ж) }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
@@ -1412,5 +1413,4 @@ var _UserProfileViewNeedsRegeneration = UserProfile(struct {
 	LoginName     string
 	DisplayName   string
 	ProfilePicURL string
-	Roles         emptyStructJSONSlice
 }{})

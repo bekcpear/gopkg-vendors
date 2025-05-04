@@ -416,13 +416,14 @@ func (src *DERPRegion) Clone() *DERPRegion {
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _DERPRegionCloneNeedsRegeneration = DERPRegion(struct {
-	RegionID   int
-	RegionCode string
-	RegionName string
-	Latitude   float64
-	Longitude  float64
-	Avoid      bool
-	Nodes      []*DERPNode
+	RegionID        int
+	RegionCode      string
+	RegionName      string
+	Latitude        float64
+	Longitude       float64
+	Avoid           bool
+	NoMeasureNoHome bool
+	Nodes           []*DERPNode
 }{})
 
 // Clone makes a deep copy of DERPMap.
@@ -623,7 +624,6 @@ var _UserProfileCloneNeedsRegeneration = UserProfile(struct {
 	LoginName     string
 	DisplayName   string
 	ProfilePicURL string
-	Roles         emptyStructJSONSlice
 }{})
 
 // Clone duplicates src into dst and reports whether it succeeded.

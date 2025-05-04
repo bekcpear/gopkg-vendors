@@ -1,7 +1,9 @@
 // Package slice implements some useful functions for slices.
 package slice
 
-import "slices"
+import (
+	"iter"
+)
 
 // Partition rearranges the elements of vs in-place so that all the elements v
 // for which keep(v) is true precede all those for which it is false.  It
@@ -25,6 +27,9 @@ import "slices"
 // returned slice is:
 //
 //	[6, 2, 8, 4]
+//
+// The capacity of the slice returned is clipped to its length, so that
+// appending to it will not modify the elements of vs after those kept.
 func Partition[T any](vs []T, keep func(T) bool) []T {
 	if len(vs) == 0 {
 		return vs
@@ -48,7 +53,7 @@ func Partition[T any](vs []T, keep func(T) bool) []T {
 		// If the right cursor reached the end, we're done: Everything left of i
 		// is kept, everything ≥ i is unkept.
 		if j == len(vs) {
-			return vs[:i]
+			return vs[:i:i]
 		}
 
 		// Reaching here, the elements under both cursors are out of
@@ -66,32 +71,13 @@ func Partition[T any](vs []T, keep func(T) bool) []T {
 		i++
 		j++
 	}
-	return vs[:i]
-}
-
-// Dedup rearranges the elements of vs in-place to deduplicate consecutive runs
-// of identical elements.  It returns a prefix of vs that contains the first
-// element of each run found.
-//
-// Deprecated: Use the equivalent [slices.Compact] instead.
-func Dedup[T comparable](vs []T) []T {
-	return slices.Compact(vs)
-}
-
-// Reverse reverses the contents of vs in-place.
-//
-// Deprecated: Use the equivalent [slices.Reverse] instead.
-func Reverse[T any, Slice ~[]T](vs Slice) {
-	slices.Reverse(vs)
+	return vs[:i:i]
 }
 
 // Zero sets all the elements of vs to their zero value.
-func Zero[T any, Slice ~[]T](vs Slice) {
-	var zero T
-	for i := range vs {
-		vs[i] = zero
-	}
-}
+//
+// Deprecated: Use the built-in clear function instead.
+func Zero[T any, Slice ~[]T](vs Slice) { clear(vs) }
 
 // MapKeys extracts a slice of the keys from a map.  The resulting slice is in
 // arbitrary order.
@@ -104,18 +90,6 @@ func MapKeys[T comparable, U any](m map[T]U) []T {
 		keys = append(keys, key)
 	}
 	return keys
-}
-
-// Split returns two subslices of ss, the first containing the elements prior
-// to index i, the second containing the elements from index i to the end.
-// If i < 0, offsets are counted backward from the end.  If i is out of range,
-// Split will panic.
-func Split[T any, Slice ~[]T](ss Slice, i int) (lhs, rhs Slice) {
-	b, ok := sliceCheck(i, len(ss))
-	if !ok {
-		panic("index out of range")
-	}
-	return ss[:b], ss[b:]
 }
 
 func sliceCheck(i, n int) (int, bool) {
@@ -152,16 +126,18 @@ func PtrAt[T any, Slice ~[]T](ss Slice, i int) *T {
 	return nil
 }
 
-// MatchingKeys returns a slice of the keys k of m for which f(m[k]) is true.
-// The resulting slice is in arbitrary order.
-func MatchingKeys[T comparable, U any](m map[T]U, f func(U) bool) []T {
-	var out []T
-	for k, v := range m {
-		if f(v) {
-			out = append(out, k)
+// MatchingKeys returns an iterator over the keys k of m for which f(m[k]) is
+// true.  The results are delivered in arbitrary order.
+func MatchingKeys[T comparable, U any](m map[T]U, f func(U) bool) iter.Seq[T] {
+	return func(yield func(T) bool) {
+		for k, v := range m {
+			if f(v) {
+				if !yield(k) {
+					return
+				}
+			}
 		}
 	}
-	return out
 }
 
 // Rotate permutes the elements of ss in-place by k positions.
@@ -217,55 +193,58 @@ func gcd(a, b int) int {
 	return a
 }
 
-// Chunks returns a slice of contiguous subslices ("chunks") of vs, each having
-// length at most n and together covering the input.  All slices except the
-// last will have length exactly n; the last may have fewer. The slices
-// returned share storage with the input.
+// Chunks iterates a sequence of contiguous subslices ("chunks") of vs, each
+// having length at most n and together covering the input.  All slices except
+// the last will have length exactly n; the last may have fewer. The slices
+// yielded share storage with the input.
 //
-// Chunks will panic if n < 0. If n == 0, Chunks returns a single chunk
-// containing the entire input.
-func Chunks[T any, Slice ~[]T](vs Slice, n int) []Slice {
+// Chunks will panic if n < 0. If n == 0, Chunks yields no chunks.
+func Chunks[T any, Slice ~[]T](vs Slice, n int) iter.Seq[Slice] {
 	if n < 0 {
 		panic("max must be positive")
-	} else if n == 0 || n >= len(vs) {
-		return []Slice{vs}
+	} else if n == 0 {
+		return func(func(Slice) bool) {}
 	}
-	out := make([]Slice, 0, (len(vs)+n-1)/n)
-	i := 0
-	for i < len(vs) {
-		end := min(i+n, len(vs))
-		out = append(out, vs[i:end])
-		i = end
+	return func(yield func(Slice) bool) {
+		i := 0
+		for i < len(vs) {
+			end := min(i+n, len(vs))
+			if !yield(vs[i:end:end]) {
+				return
+			}
+			i = end
+		}
 	}
-	return out
 }
 
-// Batches returns a slice of up to n contiguous subslices ("batches") of vs,
-// each having nearly as possible to equal length and together covering the
+// Batches iterates a sequence of up to n contiguous subslices ("batches") of
+// vs, each having nearly as possible to equal length and together covering the
 // input. The slices returned share storage with the input. If n > len(vs), the
 // number of batches is capped at len(vs); otherwise exactly n are constructed.
 //
-// Batches will panic if n < 0. If n == 0 Batches returns nil.
-func Batches[T any, Slice ~[]T](vs Slice, n int) []Slice {
+// Batches will panic if n < 0. If n == 0 Batches yields no batches.
+func Batches[T any, Slice ~[]T](vs Slice, n int) iter.Seq[Slice] {
 	if n < 0 {
 		panic("n out of range")
 	} else if n == 0 {
-		return nil
+		return func(func(Slice) bool) {}
 	} else if n > len(vs) {
 		n = len(vs)
 	}
-	out := make([]Slice, 0, n)
-	i, size, rem := 0, len(vs)/n, len(vs)%n
-	for i < len(vs) {
-		end := i + size
-		if rem > 0 {
-			end++
-			rem--
+	return func(yield func(Slice) bool) {
+		i, size, rem := 0, len(vs)/n, len(vs)%n
+		for i < len(vs) {
+			end := i + size
+			if rem > 0 {
+				end++
+				rem--
+			}
+			if !yield(vs[i:end:end]) {
+				return
+			}
+			i = end
 		}
-		out = append(out, vs[i:end])
-		i = end
 	}
-	return out
 }
 
 // Stripe returns a "stripe" of the ith elements of each slice in vs.  Any
@@ -297,4 +276,16 @@ func Tail[T any, Slice ~[]T](vs Slice, n int) Slice {
 		return vs
 	}
 	return vs[len(vs)-n:]
+}
+
+// Select returns an iterator over the elements v of vs for which f(v) is true,
+// in the same order they occur in the input.
+func Select[T any, Slice ~[]T](vs Slice, f func(T) bool) iter.Seq[T] {
+	return func(yield func(T) bool) {
+		for _, v := range vs {
+			if f(v) && !yield(v) {
+				return
+			}
+		}
+	}
 }
