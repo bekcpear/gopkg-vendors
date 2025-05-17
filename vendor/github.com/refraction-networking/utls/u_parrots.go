@@ -2779,6 +2779,9 @@ func (uconn *UConn) ApplyPreset(p *ClientHelloSpec) error {
 			if ext.ServerName == "" {
 				ext.ServerName = uconn.config.ServerName
 			}
+			if uconn.config.EncryptedClientHelloConfigList != nil {
+				ext.ServerName = string(ech.config.PublicName)
+			}
 		case *UtlsGREASEExtension:
 			switch grease_extensions_seen {
 			case 0:
@@ -2827,17 +2830,8 @@ func (uconn *UConn) ApplyPreset(p *ClientHelloSpec) error {
 					} else {
 						ext.KeyShares[i].Data = append(mlkemKey.EncapsulationKey().Bytes(), ecdheKey.PublicKey().Bytes()...)
 					}
-					if !preferredCurveIsSet {
-						// only do this once for the first non-grease curve
-						uconn.HandshakeState.State13.KeyShareKeys.mlkem = mlkemKey
-						preferredCurveIsSet = true
-					}
-
-					if len(ext.KeyShares) > i+1 && ext.KeyShares[i+1].Group == X25519 {
-						// Reuse the same X25519 ephemeral key for both keyshares, as allowed by draft-ietf-tls-hybrid-design-09, Section 3.2.
-						uconn.HandshakeState.State13.KeyShareKeys.Ecdhe = ecdheKey
-						ext.KeyShares[i+1].Data = ecdheKey.PublicKey().Bytes()
-					}
+					uconn.HandshakeState.State13.KeyShareKeys.mlkem = mlkemKey
+					uconn.HandshakeState.State13.KeyShareKeys.mlkemEcdhe = ecdheKey
 				} else {
 					ecdheKey, err := generateECDHEKey(uconn.config.rand(), curveID)
 					if err != nil {
