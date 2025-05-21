@@ -75,6 +75,17 @@ func SetIcon(iconBytes []byte) {
 	}
 }
 
+// SetIconFromFilePath sets the systray icon from a file path.
+// iconFilePath should be the path to a .ico for windows and .ico/.jpg/.png for other platforms.
+func SetIconFromFilePath(iconFilePath string) error {
+	bytes, err := os.ReadFile(iconFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to read icon file: %v", err)
+	}
+	SetIcon(bytes)
+	return nil
+}
+
 // SetTitle sets the systray title, only available on Mac and Linux.
 func SetTitle(t string) {
 	instance.lock.Lock()
@@ -132,6 +143,11 @@ func SetTooltip(tooltipTitle string) {
 // .ico/.jpg/.png for other platforms.
 func (item *MenuItem) SetTemplateIcon(templateIconBytes []byte, regularIconBytes []byte) {
 	item.SetIcon(regularIconBytes)
+}
+
+// SetRemovalAllowed sets whether a user can remove the systray icon or not.
+// This is only supported on macOS.
+func SetRemovalAllowed(allowed bool) {
 }
 
 func setInternalLoop(_ bool) {
