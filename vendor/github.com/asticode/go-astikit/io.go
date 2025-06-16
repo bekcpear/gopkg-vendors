@@ -3,7 +3,10 @@ package astikit
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"sync"
+	"time"
 )
 
 // Copy is a copy with a context
@@ -118,4 +121,134 @@ func (w *WriterAdapter) write(i []byte) {
 	if w.o.Callback != nil {
 		w.o.Callback(i)
 	}
+}
+
+// Piper doesn't block on writes. It will block on reads unless you provide a ReadTimeout in which case
+// it will return an optional error, after the provided timeout, if no read is available. When closing the
+// piper, it will interrupt any ongoing read/future writes and return io.EOF.
+// Piper doesn't handle multiple readers at the same time.
+type Piper struct {
+	buf    [][]byte
+	c      *sync.Cond
+	closed bool
+	o      PiperOptions
+	m      sync.Mutex
+}
+
+type PiperOptions struct {
+	ReadTimeout      time.Duration
+	ReadTimeoutError error
+}
+
+func NewPiper(o PiperOptions) *Piper {
+	return &Piper{
+		c: sync.NewCond(&sync.Mutex{}),
+		o: o,
+	}
+}
+
+func (p *Piper) Close() error {
+	// Update closed
+	p.m.Lock()
+	if p.closed {
+		p.m.Unlock()
+		return nil
+	}
+	p.closed = true
+	p.m.Unlock()
+
+	// Signal
+	p.c.L.Lock()
+	p.c.Signal()
+	p.c.L.Unlock()
+	return nil
+}
+
+func (p *Piper) Read(i []byte) (n int, err error) {
+	// Handle read timeout
+	var ctx context.Context
+	if p.o.ReadTimeout > 0 {
+		// Create context
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), p.o.ReadTimeout)
+		defer cancel()
+
+		// Watch the context in a goroutine
+		go func() {
+			// Wait for context to be done
+			<-ctx.Done()
+
+			// Context has timed out
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				// Signal
+				p.c.L.Lock()
+				p.c.Signal()
+				p.c.L.Unlock()
+			}
+		}()
+	}
+
+	// Loop
+	for {
+		// Check context
+		if ctx != nil && ctx.Err() != nil {
+			return 0, p.o.ReadTimeoutError
+		}
+
+		// Lock
+		p.c.L.Lock()
+		p.m.Lock()
+
+		// Closed
+		if p.closed {
+			p.m.Unlock()
+			p.c.L.Unlock()
+			return 0, io.EOF
+		}
+
+		// Get buffer length
+		l := len(p.buf)
+		p.m.Unlock()
+
+		// Nothing in the buffer, we need to wait
+		if l == 0 {
+			p.c.Wait()
+			p.c.L.Unlock()
+			continue
+		}
+		p.c.L.Unlock()
+
+		// Copy
+		p.m.Lock()
+		n = len(p.buf[0])
+		copy(i, p.buf[0])
+		p.buf = p.buf[1:]
+		p.m.Unlock()
+		return
+	}
+}
+
+func (p *Piper) Write(i []byte) (n int, err error) {
+	// Closed
+	p.m.Lock()
+	if p.closed {
+		p.m.Unlock()
+		return 0, io.EOF
+	}
+	p.m.Unlock()
+
+	// Copy
+	b := make([]byte, len(i))
+	copy(b, i)
+
+	// Append
+	p.m.Lock()
+	p.buf = append(p.buf, b)
+	p.m.Unlock()
+
+	// Signal
+	p.c.L.Lock()
+	p.c.Signal()
+	p.c.L.Unlock()
+	return len(b), nil
 }

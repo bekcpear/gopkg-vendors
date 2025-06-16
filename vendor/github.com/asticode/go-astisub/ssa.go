@@ -1,7 +1,6 @@
 package astisub
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"log"
@@ -134,7 +133,7 @@ func ReadFromSSA(i io.Reader) (o *Subtitles, err error) {
 func ReadFromSSAWithOptions(i io.Reader, opts SSAOptions) (o *Subtitles, err error) {
 	// Init
 	o = NewSubtitles()
-	var scanner = bufio.NewScanner(i)
+	var scanner = newScanner(i)
 	var si = &ssaScriptInfo{}
 	var ss = []*ssaStyle{}
 	var es = []*ssaEvent{}
@@ -1057,8 +1056,11 @@ func (e *ssaEvent) item(styles map[string]*Style) (i *Item, err error) {
 		}
 	}
 
+	// \N and \n are both valid new line characters in SSA
+	text := strings.ReplaceAll(e.text, "\\N", "\\n")
+
 	// Loop through lines
-	for _, s := range strings.Split(e.text, "\\n") {
+	for _, s := range strings.Split(text, "\\n") {
 		// Init
 		s = strings.TrimSpace(s)
 		var l = Line{VoiceName: e.name}

@@ -1,8 +1,11 @@
 package astisub
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -12,6 +15,7 @@ import (
 	"time"
 
 	"github.com/asticode/go-astikit"
+	"golang.org/x/net/html"
 )
 
 // Bytes
@@ -45,6 +49,12 @@ var (
 var (
 	ErrInvalidExtension   = errors.New("astisub: invalid extension")
 	ErrNoSubtitlesToWrite = errors.New("astisub: no subtitles to write")
+)
+
+// HTML Escape
+var (
+	htmlEscaper   = strings.NewReplacer("&", "&amp;", "<", "&lt;", "\u00A0", "&nbsp;")
+	htmlUnescaper = strings.NewReplacer("&amp;", "&", "&lt;", "<", "&nbsp;", "\u00A0")
 )
 
 // Now allows testing functions using it
@@ -173,6 +183,11 @@ var (
 
 // StyleAttributes represents style attributes
 type StyleAttributes struct {
+	SRTBold              bool
+	SRTColor             *string
+	SRTItalics           bool
+	SRTPosition          byte // 1-9 numpad layout
+	SRTUnderline         bool
 	SSAAlignment         *int
 	SSAAlphaLevel        *float64
 	SSAAngle             *float64 // degrees
@@ -236,6 +251,8 @@ type StyleAttributes struct {
 	TTMLWritingMode      *string
 	TTMLZIndex           *int
 	WebVTTAlign          string
+	WebVTTBold           bool
+	WebVTTItalics        bool
 	WebVTTLine           string
 	WebVTTLines          int
 	WebVTTPosition       string
@@ -244,6 +261,7 @@ type StyleAttributes struct {
 	WebVTTSize           string
 	WebVTTStyles         []string
 	WebVTTTags           []WebVTTTag
+	WebVTTUnderline      bool
 	WebVTTVertical       string
 	WebVTTViewportAnchor string
 	WebVTTWidth          string
@@ -277,6 +295,56 @@ func (t WebVTTTag) endTag() string {
 		return ""
 	}
 	return "</" + t.Name + ">"
+}
+
+func (sa *StyleAttributes) propagateSRTAttributes() {
+	// copy relevant attrs to WebVTT ones
+	if sa.SRTColor != nil {
+		// TODO: handle non-default colors that need custom styles
+		sa.TTMLColor = sa.SRTColor
+	}
+
+	switch sa.SRTPosition {
+	case 7: // top-left
+		sa.WebVTTAlign = "left"
+		sa.WebVTTPosition = "10%"
+	case 8: // top-center
+		sa.WebVTTPosition = "10%"
+	case 9: // top-right
+		sa.WebVTTAlign = "right"
+		sa.WebVTTPosition = "10%"
+	case 4: // middle-left
+		sa.WebVTTAlign = "left"
+		sa.WebVTTPosition = "50%"
+	case 5: // middle-center
+		sa.WebVTTPosition = "50%"
+	case 6: // middle-right
+		sa.WebVTTAlign = "right"
+		sa.WebVTTPosition = "50%"
+	case 1: // bottom-left
+		sa.WebVTTAlign = "left"
+		sa.WebVTTPosition = "90%"
+	case 2: // bottom-center
+		sa.WebVTTPosition = "90%"
+	case 3: // bottom-right
+		sa.WebVTTAlign = "right"
+		sa.WebVTTPosition = "90%"
+	}
+
+	sa.WebVTTBold = sa.SRTBold
+	sa.WebVTTItalics = sa.SRTItalics
+	sa.WebVTTUnderline = sa.SRTUnderline
+
+	sa.WebVTTTags = make([]WebVTTTag, 0)
+	if sa.WebVTTBold {
+		sa.WebVTTTags = append(sa.WebVTTTags, WebVTTTag{Name: "b"})
+	}
+	if sa.WebVTTItalics {
+		sa.WebVTTTags = append(sa.WebVTTTags, WebVTTTag{Name: "i"})
+	}
+	if sa.WebVTTUnderline {
+		sa.WebVTTTags = append(sa.WebVTTTags, WebVTTTag{Name: "u"})
+	}
 }
 
 func (sa *StyleAttributes) propagateSSAAttributes() {}
@@ -352,7 +420,15 @@ func (sa *StyleAttributes) propagateTTMLAttributes() {
 	}
 }
 
-func (sa *StyleAttributes) propagateWebVTTAttributes() {}
+func (sa *StyleAttributes) propagateWebVTTAttributes() {
+	// copy relevant attrs to SRT ones
+	if sa.TTMLColor != nil {
+		sa.SRTColor = sa.TTMLColor
+	}
+	sa.SRTBold = sa.WebVTTBold
+	sa.SRTItalics = sa.WebVTTItalics
+	sa.SRTUnderline = sa.WebVTTUnderline
+}
 
 // Metadata represents metadata
 // TODO Merge attributes
@@ -392,6 +468,7 @@ type Metadata struct {
 	STLTranslatorName                                   string
 	Title                                               string
 	TTMLCopyright                                       string
+	WebVTTTimestampMap                                  *WebVTTTimestampMap
 }
 
 // Region represents a subtitle's region
@@ -420,12 +497,14 @@ func (l Line) String() string {
 	for _, i := range l.Items {
 		texts = append(texts, i.Text)
 	}
-	return strings.Join(texts, " ")
+	// Don't add spaces here since items must contain their own space
+	return strings.Join(texts, "")
 }
 
 // LineItem represents a formatted line item
 type LineItem struct {
 	InlineStyle *StyleAttributes
+	StartAt     time.Duration
 	Style       *Style
 	Text        string
 }
@@ -633,7 +712,7 @@ func (s *Subtitles) Order() {
 	}
 
 	// Order
-	sort.Slice(s.Items, func(i, j int) bool {
+	sort.SliceStable(s.Items, func(i, j int) bool {
 		return s.Items[i].StartAt < s.Items[j].StartAt
 	})
 }
@@ -822,8 +901,8 @@ func formatDuration(i time.Duration, millisecondSep string, numberOfMillisecondD
 	s += strconv.Itoa(seconds) + millisecondSep
 
 	// Parse milliseconds
-	var milliseconds = float64(n/time.Millisecond) / float64(1000)
-	s += fmt.Sprintf("%."+strconv.Itoa(numberOfMillisecondDigits)+"f", milliseconds)[2:]
+	var milliseconds = math.Floor(float64(n) / float64(time.Millisecond) / float64(math.Pow(10, 3-float64(numberOfMillisecondDigits))))
+	s += astikit.StrPad(strconv.FormatFloat(milliseconds, 'f', 0, 64), '0', numberOfMillisecondDigits, astikit.PadLeft)
 	return
 }
 
@@ -832,4 +911,50 @@ func appendStringToBytesWithNewLine(i []byte, s string) (o []byte) {
 	o = append(i, []byte(s)...)
 	o = append(o, bytesLineSeparator...)
 	return
+}
+
+func htmlTokenAttribute(t *html.Token, key string) *string {
+
+	for _, attr := range t.Attr {
+		if attr.Key == key {
+			return &attr.Val
+		}
+	}
+
+	return nil
+}
+
+func escapeHTML(i string) string {
+	return htmlEscaper.Replace(i)
+}
+
+func unescapeHTML(i string) string {
+	return htmlUnescaper.Replace(i)
+}
+
+func newScanner(i io.Reader) *bufio.Scanner {
+	var scanner = bufio.NewScanner(i)
+	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		if atEOF && len(data) == 0 {
+			return 0, nil, nil
+		}
+		if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
+			if data[i] == '\n' {
+				// We have a line terminated by single newline.
+				return i + 1, data[0:i], nil
+			}
+			advance = i + 1
+			if len(data) > i+1 && data[i+1] == '\n' {
+				advance += 1
+			}
+			return advance, data[0:i], nil
+		}
+		// If we're at EOF, we have a final, non-terminated line. Return it.
+		if atEOF {
+			return len(data), data, nil
+		}
+		// Request more data.
+		return 0, nil, nil
+	})
+	return scanner
 }

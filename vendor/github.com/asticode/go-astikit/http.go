@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -80,7 +79,7 @@ type HTTPSender struct {
 }
 
 // HTTPSenderRetryFunc is a function that decides whether to retry an HTTP request
-type HTTPSenderRetryFunc func(resp *http.Response) error
+type HTTPSenderRetryFunc func(resp *http.Response) bool
 
 // HTTPSenderOptions represents HTTPSender options
 type HTTPSenderOptions struct {
@@ -111,11 +110,8 @@ func NewHTTPSender(o HTTPSenderOptions) (s *HTTPSender) {
 	return
 }
 
-func (s *HTTPSender) defaultHTTPRetryFunc(resp *http.Response) error {
-	if resp.StatusCode >= http.StatusInternalServerError {
-		return fmt.Errorf("astikit: invalid status code %d", resp.StatusCode)
-	}
-	return nil
+func (s *HTTPSender) defaultHTTPRetryFunc(resp *http.Response) bool {
+	return resp.StatusCode >= http.StatusInternalServerError
 }
 
 // Send sends a new *http.Request
@@ -124,13 +120,7 @@ func (s *HTTPSender) Send(req *http.Request) (*http.Response, error) {
 }
 
 // SendWithTimeout sends a new *http.Request with a timeout
-func (s *HTTPSender) SendWithTimeout(req *http.Request, timeout time.Duration) (resp *http.Response, err error) {
-	// Set name
-	name := req.Method + " request"
-	if req.URL != nil {
-		name += " to " + req.URL.String()
-	}
-
+func (s *HTTPSender) SendWithTimeout(req *http.Request, timeout time.Duration) (*http.Response, error) {
 	// Timeout
 	if timeout > 0 {
 		// Create context
@@ -139,13 +129,28 @@ func (s *HTTPSender) SendWithTimeout(req *http.Request, timeout time.Duration) (
 
 		// Update request
 		req = req.WithContext(ctx)
+	}
 
-		// Update name
+	// Send
+	return s.send(req, timeout)
+}
+
+func (s *HTTPSender) send(req *http.Request, timeout time.Duration) (*http.Response, error) {
+	// Set name
+	name := req.Method + " request"
+	if req.URL != nil {
+		name += " to " + req.URL.String()
+	}
+
+	// Timeout
+	if timeout > 0 {
 		name += " with timeout " + timeout.String()
 	}
 
 	// Loop
 	// We start at retryMax + 1 so that it runs at least once even if retryMax == 0
+	var resp *http.Response
+	var errDo error
 	tries := 0
 	for retriesLeft := s.retryMax + 1; retriesLeft > 0; retriesLeft-- {
 		// Get request name
@@ -154,51 +159,72 @@ func (s *HTTPSender) SendWithTimeout(req *http.Request, timeout time.Duration) (
 
 		// Send request
 		s.l.Debugf("astikit: sending %s", nr)
-		if resp, err = s.client.Do(req); err != nil {
-			// Retry if error is temporary, stop here otherwise
-			if netError, ok := err.(net.Error); !ok || !netError.Timeout() {
-				err = fmt.Errorf("astikit: sending %s failed: %w", nr, err)
-				return
+		if resp, errDo = s.client.Do(req); errDo != nil {
+			// Stop if error is not temporary
+			if netError, ok := errDo.(net.Error); !ok || !netError.Timeout() {
+				return nil, errDo
 			}
-		} else if err = req.Context().Err(); err != nil {
-			err = fmt.Errorf("astikit: request context failed: %w", err)
-			return
-		} else {
-			err = s.retryFunc(resp)
+		}
+
+		// Request has timed out
+		if err := req.Context().Err(); err != nil {
+			// Make sure to close response body
+			if errDo == nil {
+				resp.Body.Close()
+			}
+			return nil, err
 		}
 
 		// Retry
-		if err != nil {
+		if errDo != nil || s.retryFunc(resp) {
 			if retriesLeft > 1 {
-				s.l.Errorf("astikit: sending %s failed, sleeping %s and retrying... (%d retries left): %w", nr, s.retrySleep, retriesLeft-1, err)
+				if errDo == nil {
+					resp.Body.Close()
+				}
+				s.l.Errorf("astikit: sending %s failed, sleeping %s and retrying... (%d retries left): %w", nr, s.retrySleep, retriesLeft-1, errDo)
 				time.Sleep(s.retrySleep)
 			}
 			continue
 		}
-
-		// Return if conditions for retrying were not met
-		return
+		return resp, nil
 	}
 
 	// Max retries limit reached
-	err = fmt.Errorf("astikit: sending %s failed after %d tries: %w", name, tries, err)
-	return
+	if errDo != nil {
+		return nil, errDo
+	}
+	return resp, nil
 }
 
 type HTTPSenderHeaderFunc func(h http.Header)
+
+type HTTPSenderInvalidStatusCodeError struct {
+	Err        error
+	StatusCode int
+}
+
+func (err HTTPSenderInvalidStatusCodeError) Error() string {
+	return fmt.Errorf("astikit: validating status code %d failed: %w", err.StatusCode, err.Err).Error()
+}
+
+func (err HTTPSenderInvalidStatusCodeError) Is(target error) bool {
+	return errors.Is(err.Err, target)
+}
 
 type HTTPSenderStatusCodeFunc func(code int) error
 
 // HTTPSendJSONOptions represents SendJSON options
 type HTTPSendJSONOptions struct {
-	BodyError      interface{}
-	BodyIn         interface{}
-	BodyOut        interface{}
+	BodyError      any
+	BodyIn         any
+	BodyOut        any
+	Context        context.Context
 	HeadersIn      map[string]string
 	HeadersOut     HTTPSenderHeaderFunc
 	Host           string
 	Method         string
 	StatusCodeFunc HTTPSenderStatusCodeFunc
+	Timeout        time.Duration
 	URL            string
 }
 
@@ -215,9 +241,15 @@ func (s *HTTPSender) SendJSON(o HTTPSendJSONOptions) (err error) {
 		bi = bb
 	}
 
+	// Get context
+	ctx := o.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	// Create request
 	var req *http.Request
-	if req, err = http.NewRequest(o.Method, o.URL, bi); err != nil {
+	if req, err = http.NewRequestWithContext(ctx, o.Method, o.URL, bi); err != nil {
 		err = fmt.Errorf("astikit: creating request failed: %w", err)
 		return
 	}
@@ -232,9 +264,26 @@ func (s *HTTPSender) SendJSON(o HTTPSendJSONOptions) (err error) {
 		req.Header.Set(k, v)
 	}
 
+	// Get timeout
+	timeout := s.timeout
+	if o.Timeout > 0 {
+		timeout = o.Timeout
+	}
+
+	// Handle timeout outside the .send() method otherwise context may be cancelled before
+	// reading all response body
+	if timeout > 0 {
+		// Create context
+		ctx, cancel := context.WithTimeout(req.Context(), timeout)
+		defer cancel()
+
+		// Update request
+		req = req.WithContext(ctx)
+	}
+
 	// Send request
 	var resp *http.Response
-	if resp, err = s.Send(req); err != nil {
+	if resp, err = s.send(req, timeout); err != nil {
 		err = fmt.Errorf("astikit: sending request failed: %w", err)
 		return
 	}
@@ -260,7 +309,10 @@ func (s *HTTPSender) SendJSON(o HTTPSendJSONOptions) (err error) {
 		}
 
 		// Default error
-		err = fmt.Errorf("astikit: validating status code %d failed: %w", resp.StatusCode, err)
+		err = HTTPSenderInvalidStatusCodeError{
+			Err:        err,
+			StatusCode: resp.StatusCode,
+		}
 		return
 	}
 
@@ -268,7 +320,7 @@ func (s *HTTPSender) SendJSON(o HTTPSendJSONOptions) (err error) {
 	if o.BodyOut != nil {
 		// Read all
 		var b []byte
-		if b, err = ioutil.ReadAll(resp.Body); err != nil {
+		if b, err = io.ReadAll(resp.Body); err != nil {
 			err = fmt.Errorf("astikit: reading all failed: %w", err)
 			return
 		}
