@@ -1,4 +1,7 @@
-# github.com/andybalholm/brotli v1.1.1
+# github.com/STARRY-S/zip v0.2.1
+## explicit; go 1.22.2
+github.com/STARRY-S/zip
+# github.com/andybalholm/brotli v1.1.2-0.20250424173009-453214e765f3
 ## explicit; go 1.13
 github.com/andybalholm/brotli
 github.com/andybalholm/brotli/matchfinder
@@ -19,13 +22,35 @@ github.com/asticode/go-astisub
 # github.com/asticode/go-astits v1.13.0
 ## explicit; go 1.13
 github.com/asticode/go-astits
+# github.com/bodgit/plumbing v1.3.0
+## explicit; go 1.13
+github.com/bodgit/plumbing
+# github.com/bodgit/sevenzip v1.6.0
+## explicit; go 1.19
+github.com/bodgit/sevenzip
+github.com/bodgit/sevenzip/internal/aes7z
+github.com/bodgit/sevenzip/internal/bcj2
+github.com/bodgit/sevenzip/internal/bra
+github.com/bodgit/sevenzip/internal/brotli
+github.com/bodgit/sevenzip/internal/bzip2
+github.com/bodgit/sevenzip/internal/deflate
+github.com/bodgit/sevenzip/internal/delta
+github.com/bodgit/sevenzip/internal/lz4
+github.com/bodgit/sevenzip/internal/lzma
+github.com/bodgit/sevenzip/internal/lzma2
+github.com/bodgit/sevenzip/internal/pool
+github.com/bodgit/sevenzip/internal/util
+github.com/bodgit/sevenzip/internal/zstd
+# github.com/bodgit/windows v1.0.1
+## explicit; go 1.13
+github.com/bodgit/windows
 # github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 ## explicit
 github.com/davecgh/go-spew/spew
 # github.com/disintegration/imaging v1.6.2
 ## explicit
 github.com/disintegration/imaging
-# github.com/dsnet/compress v0.0.2-0.20210315054119-f66993602bf5
+# github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707
 ## explicit; go 1.9
 github.com/dsnet/compress
 github.com/dsnet/compress/bzip2
@@ -75,16 +100,29 @@ github.com/golang/geo/s1
 github.com/golang/geo/s2
 # github.com/golang/snappy v1.0.0
 ## explicit
-github.com/golang/snappy
 # github.com/gorilla/mux v1.8.1
 ## explicit; go 1.20
 github.com/gorilla/mux
 # github.com/gorilla/websocket v1.5.3
 ## explicit; go 1.12
 github.com/gorilla/websocket
+# github.com/hashicorp/errwrap v1.1.0
+## explicit
+github.com/hashicorp/errwrap
+# github.com/hashicorp/go-multierror v1.1.1
+## explicit; go 1.13
+github.com/hashicorp/go-multierror
+# github.com/hashicorp/golang-lru/v2 v2.0.7
+## explicit; go 1.18
+github.com/hashicorp/golang-lru/v2
+github.com/hashicorp/golang-lru/v2/internal
+github.com/hashicorp/golang-lru/v2/simplelru
 # github.com/inconshreveable/mousetrap v1.1.0
 ## explicit; go 1.18
 github.com/inconshreveable/mousetrap
+# github.com/jellydator/ttlcache/v3 v3.4.0
+## explicit; go 1.23.0
+github.com/jellydator/ttlcache/v3
 # github.com/klauspost/compress v1.18.0
 ## explicit; go 1.22
 github.com/klauspost/compress
@@ -95,8 +133,11 @@ github.com/klauspost/compress/huff0
 github.com/klauspost/compress/internal/cpuinfo
 github.com/klauspost/compress/internal/godebug
 github.com/klauspost/compress/internal/le
+github.com/klauspost/compress/internal/race
 github.com/klauspost/compress/internal/snapref
+github.com/klauspost/compress/s2
 github.com/klauspost/compress/zip
+github.com/klauspost/compress/zlib
 github.com/klauspost/compress/zstd
 github.com/klauspost/compress/zstd/internal/xxhash
 # github.com/klauspost/pgzip v1.2.6
@@ -108,15 +149,22 @@ github.com/maruel/natural
 # github.com/marusama/semaphore/v2 v2.5.0
 ## explicit; go 1.11
 github.com/marusama/semaphore/v2
-# github.com/mholt/archiver/v3 v3.5.1
-## explicit; go 1.13
-github.com/mholt/archiver/v3
+# github.com/mholt/archives v0.1.3
+## explicit; go 1.22.2
+github.com/mholt/archives
+# github.com/mikelolasagasti/xz v1.0.1
+## explicit; go 1.15
+github.com/mikelolasagasti/xz
+# github.com/minio/minlz v1.0.0
+## explicit; go 1.21
+github.com/minio/minlz
+github.com/minio/minlz/internal/race
 # github.com/mitchellh/go-homedir v1.1.0
 ## explicit
 github.com/mitchellh/go-homedir
-# github.com/nwaples/rardecode v1.1.3
-## explicit
-github.com/nwaples/rardecode
+# github.com/nwaples/rardecode/v2 v2.1.0
+## explicit; go 1.21
+github.com/nwaples/rardecode/v2
 # github.com/pelletier/go-toml/v2 v2.2.4
 ## explicit; go 1.21.0
 github.com/pelletier/go-toml/v2
@@ -145,6 +193,9 @@ github.com/sagikazarmark/locafero
 github.com/shirou/gopsutil/v3/common
 github.com/shirou/gopsutil/v3/disk
 github.com/shirou/gopsutil/v3/internal/common
+# github.com/sorairolake/lzip-go v0.3.5
+## explicit; go 1.22
+github.com/sorairolake/lzip-go
 # github.com/sourcegraph/conc v0.3.0
 ## explicit; go 1.19
 github.com/sourcegraph/conc
@@ -191,9 +242,6 @@ github.com/ulikunitz/xz
 github.com/ulikunitz/xz/internal/hash
 github.com/ulikunitz/xz/internal/xlog
 github.com/ulikunitz/xz/lzma
-# github.com/xi2/xz v0.0.0-20171230120015-48954b6210f8
-## explicit
-github.com/xi2/xz
 # github.com/yusufpapurcu/wmi v1.2.4
 ## explicit; go 1.16
 github.com/yusufpapurcu/wmi
@@ -206,6 +254,10 @@ go.etcd.io/bbolt/internal/freelist
 # go.uber.org/multierr v1.11.0
 ## explicit; go 1.19
 go.uber.org/multierr
+# go4.org v0.0.0-20230225012048-214862532bf5
+## explicit; go 1.13
+go4.org/readerutil
+go4.org/syncutil
 # golang.org/x/crypto v0.39.0
 ## explicit; go 1.23.0
 golang.org/x/crypto/bcrypt
@@ -221,6 +273,9 @@ golang.org/x/image/tiff/lzw
 golang.org/x/net/context
 golang.org/x/net/html
 golang.org/x/net/html/atom
+# golang.org/x/sync v0.15.0
+## explicit; go 1.23.0
+golang.org/x/sync/singleflight
 # golang.org/x/sys v0.33.0
 ## explicit; go 1.23.0
 golang.org/x/sys/unix
