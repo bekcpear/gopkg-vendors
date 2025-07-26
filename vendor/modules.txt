@@ -42,48 +42,6 @@ github.com/bufbuild/protocompile/protoutil
 # github.com/cenkalti/backoff/v4 v4.1.1
 ## explicit; go 1.13
 github.com/cenkalti/backoff/v4
-# github.com/cloudflare/circl v1.6.1
-## explicit; go 1.22.0
-github.com/cloudflare/circl/dh/x25519
-github.com/cloudflare/circl/dh/x448
-github.com/cloudflare/circl/ecc/goldilocks
-github.com/cloudflare/circl/hpke
-github.com/cloudflare/circl/internal/conv
-github.com/cloudflare/circl/internal/sha3
-github.com/cloudflare/circl/kem
-github.com/cloudflare/circl/kem/kyber/kyber768
-github.com/cloudflare/circl/kem/mlkem/mlkem768
-github.com/cloudflare/circl/kem/xwing
-github.com/cloudflare/circl/math
-github.com/cloudflare/circl/math/fp25519
-github.com/cloudflare/circl/math/fp448
-github.com/cloudflare/circl/math/mlsbset
-github.com/cloudflare/circl/pke/kyber/internal/common
-github.com/cloudflare/circl/pke/kyber/internal/common/params
-github.com/cloudflare/circl/pke/kyber/kyber768
-github.com/cloudflare/circl/pke/kyber/kyber768/internal
-github.com/cloudflare/circl/pki
-github.com/cloudflare/circl/sign
-github.com/cloudflare/circl/sign/dilithium/mode2
-github.com/cloudflare/circl/sign/dilithium/mode2/internal
-github.com/cloudflare/circl/sign/dilithium/mode3
-github.com/cloudflare/circl/sign/dilithium/mode3/internal
-github.com/cloudflare/circl/sign/dilithium/mode5
-github.com/cloudflare/circl/sign/dilithium/mode5/internal
-github.com/cloudflare/circl/sign/ed25519
-github.com/cloudflare/circl/sign/ed448
-github.com/cloudflare/circl/sign/eddilithium2
-github.com/cloudflare/circl/sign/eddilithium3
-github.com/cloudflare/circl/sign/internal/dilithium
-github.com/cloudflare/circl/sign/internal/dilithium/params
-github.com/cloudflare/circl/sign/mldsa/mldsa44
-github.com/cloudflare/circl/sign/mldsa/mldsa44/internal
-github.com/cloudflare/circl/sign/mldsa/mldsa65
-github.com/cloudflare/circl/sign/mldsa/mldsa65/internal
-github.com/cloudflare/circl/sign/mldsa/mldsa87
-github.com/cloudflare/circl/sign/mldsa/mldsa87/internal
-github.com/cloudflare/circl/sign/schemes
-github.com/cloudflare/circl/simd/keccakf1600
 # github.com/davecgh/go-spew v1.1.1
 ## explicit
 github.com/davecgh/go-spew/spew
@@ -190,7 +148,7 @@ github.com/leodido/go-urn/scim/schema
 # github.com/lunixbochs/struc v0.0.0-20200707160740-784aaebc1d40
 ## explicit; go 1.12
 github.com/lunixbochs/struc
-# github.com/miekg/dns v1.1.66
+# github.com/miekg/dns v1.1.67
 ## explicit; go 1.23.0
 github.com/miekg/dns
 # github.com/mustafaturan/bus v1.0.2
@@ -273,7 +231,7 @@ github.com/pmezard/go-difflib/difflib
 # github.com/quic-go/qpack v0.5.1
 ## explicit; go 1.22
 github.com/quic-go/qpack
-# github.com/quic-go/quic-go v0.53.0
+# github.com/quic-go/quic-go v0.54.0
 ## explicit; go 1.23
 github.com/quic-go/quic-go
 github.com/quic-go/quic-go/internal/ackhandler
@@ -288,7 +246,7 @@ github.com/quic-go/quic-go/internal/utils/ringbuffer
 github.com/quic-go/quic-go/internal/wire
 github.com/quic-go/quic-go/logging
 github.com/quic-go/quic-go/quicvarint
-# github.com/refraction-networking/utls v1.7.3
+# github.com/refraction-networking/utls v1.8.0
 ## explicit; go 1.24
 github.com/refraction-networking/utls
 github.com/refraction-networking/utls/dicttls
@@ -415,7 +373,7 @@ go.uber.org/mock/mockgen/model
 # go4.org/netipx v0.0.0-20230303233057-f1b76eb4bb35
 ## explicit; go 1.18
 go4.org/netipx
-# golang.org/x/crypto v0.39.0
+# golang.org/x/crypto v0.40.0
 ## explicit; go 1.23.0
 golang.org/x/crypto/chacha20
 golang.org/x/crypto/chacha20poly1305
@@ -437,7 +395,7 @@ golang.org/x/mod/internal/lazyregexp
 golang.org/x/mod/modfile
 golang.org/x/mod/module
 golang.org/x/mod/semver
-# golang.org/x/net v0.41.0
+# golang.org/x/net v0.42.0
 ## explicit; go 1.23.0
 golang.org/x/net/bpf
 golang.org/x/net/context
@@ -458,15 +416,15 @@ golang.org/x/net/ipv4
 golang.org/x/net/ipv6
 golang.org/x/net/proxy
 golang.org/x/net/trace
-# golang.org/x/sync v0.15.0
+# golang.org/x/sync v0.16.0
 ## explicit; go 1.23.0
 golang.org/x/sync/errgroup
-# golang.org/x/sys v0.33.0
+# golang.org/x/sys v0.34.0
 ## explicit; go 1.23.0
 golang.org/x/sys/cpu
 golang.org/x/sys/unix
 golang.org/x/sys/windows
-# golang.org/x/text v0.26.0
+# golang.org/x/text v0.27.0
 ## explicit; go 1.23.0
 golang.org/x/text/internal/language
 golang.org/x/text/internal/language/compact
@@ -479,10 +437,11 @@ golang.org/x/text/unicode/norm
 # golang.org/x/time v0.5.0
 ## explicit; go 1.18
 golang.org/x/time/rate
-# golang.org/x/tools v0.33.0
+# golang.org/x/tools v0.34.0
 ## explicit; go 1.23.0
 golang.org/x/tools/cover
 golang.org/x/tools/go/ast/astutil
+golang.org/x/tools/go/ast/edge
 golang.org/x/tools/go/ast/inspector
 golang.org/x/tools/go/gcexportdata
 golang.org/x/tools/go/packages
@@ -490,7 +449,6 @@ golang.org/x/tools/go/types/objectpath
 golang.org/x/tools/go/types/typeutil
 golang.org/x/tools/imports
 golang.org/x/tools/internal/aliases
-golang.org/x/tools/internal/astutil/edge
 golang.org/x/tools/internal/event
 golang.org/x/tools/internal/event/core
 golang.org/x/tools/internal/event/keys
@@ -506,10 +464,10 @@ golang.org/x/tools/internal/stdlib
 golang.org/x/tools/internal/typeparams
 golang.org/x/tools/internal/typesinternal
 golang.org/x/tools/internal/versions
-# google.golang.org/genproto/googleapis/rpc v0.0.0-20250324211829-b45e905df463
+# google.golang.org/genproto/googleapis/rpc v0.0.0-20250528174236-200df99c418a
 ## explicit; go 1.23.0
 google.golang.org/genproto/googleapis/rpc/status
-# google.golang.org/grpc v1.73.0
+# google.golang.org/grpc v1.74.2
 ## explicit; go 1.23.0
 google.golang.org/grpc
 google.golang.org/grpc/attributes
