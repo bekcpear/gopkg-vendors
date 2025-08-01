@@ -90,7 +90,7 @@ github.com/davecgh/go-spew/spew
 # github.com/distribution/reference v0.6.0
 ## explicit; go 1.20
 github.com/distribution/reference
-# github.com/docker/cli v28.2.2+incompatible
+# github.com/docker/cli v28.3.0+incompatible
 ## explicit
 github.com/docker/cli/cli/compose/interpolation
 github.com/docker/cli/cli/compose/loader
@@ -100,6 +100,7 @@ github.com/docker/cli/cli/compose/types
 github.com/docker/cli/cli/config
 github.com/docker/cli/cli/config/configfile
 github.com/docker/cli/cli/config/credentials
+github.com/docker/cli/cli/config/memorystore
 github.com/docker/cli/cli/config/types
 github.com/docker/cli/cli/connhelper
 github.com/docker/cli/cli/connhelper/commandconn
@@ -108,7 +109,7 @@ github.com/docker/cli/internal/lazyregexp
 github.com/docker/cli/opts
 github.com/docker/cli/opts/swarmopts
 github.com/docker/cli/pkg/kvfile
-# github.com/docker/docker v28.2.2+incompatible
+# github.com/docker/docker v28.3.0+incompatible
 ## explicit
 github.com/docker/docker/api
 github.com/docker/docker/api/types
@@ -176,7 +177,7 @@ github.com/go-git/go-billy/v5/helper/polyfill
 github.com/go-git/go-billy/v5/memfs
 github.com/go-git/go-billy/v5/osfs
 github.com/go-git/go-billy/v5/util
-# github.com/go-git/go-git/v5 v5.16.0
+# github.com/go-git/go-git/v5 v5.16.2
 ## explicit; go 1.23.0
 github.com/go-git/go-git/v5
 github.com/go-git/go-git/v5/config
@@ -402,7 +403,7 @@ github.com/xeipuuv/gojsonreference
 # github.com/xeipuuv/gojsonschema v1.2.0
 ## explicit
 github.com/xeipuuv/gojsonschema
-# go.etcd.io/bbolt v1.4.0
+# go.etcd.io/bbolt v1.4.2
 ## explicit; go 1.23
 go.etcd.io/bbolt
 go.etcd.io/bbolt/errors
@@ -474,14 +475,14 @@ golang.org/x/net/proxy
 ## explicit; go 1.23.0
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
-# golang.org/x/sys v0.32.0
+# golang.org/x/sys v0.33.0
 ## explicit; go 1.23.0
 golang.org/x/sys/cpu
 golang.org/x/sys/execabs
 golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
-# golang.org/x/term v0.31.0
+# golang.org/x/term v0.32.0
 ## explicit; go 1.23.0
 golang.org/x/term
 # golang.org/x/text v0.24.0
