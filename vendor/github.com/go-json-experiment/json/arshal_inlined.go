@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build !goexperiment.jsonv2 || !go1.25
+
 package json
 
 import (
@@ -111,7 +113,7 @@ func marshalInlinedFallbackAll(enc *jsontext.Encoder, va addressableValue, mo *j
 		mk := newAddressableValue(m.Type().Key())
 		mv := newAddressableValue(m.Type().Elem())
 		marshalKey := func(mk addressableValue) error {
-			b, err := jsonwire.AppendQuote(enc.UnusedBuffer(), mk.String(), &mo.Flags)
+			b, err := jsonwire.AppendQuote(enc.AvailableBuffer(), mk.String(), &mo.Flags)
 			if err != nil {
 				return newMarshalErrorBefore(enc, m.Type().Key(), err)
 			}

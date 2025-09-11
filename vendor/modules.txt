@@ -18,7 +18,7 @@ filippo.io/edwards25519/field
 # filippo.io/mkcert v1.4.4
 ## explicit; go 1.18
 filippo.io/mkcert
-# fyne.io/systray v1.11.1-0.20250317195939-bcf6eed85e7a
+# fyne.io/systray v1.11.1-0.20250812065214-4856ac3adc3c
 ## explicit; go 1.19
 fyne.io/systray
 fyne.io/systray/internal/generated/menu
@@ -390,6 +390,9 @@ github.com/coder/websocket/internal/xsync
 ## explicit; go 1.22.0
 github.com/containerd/stargz-snapshotter/estargz
 github.com/containerd/stargz-snapshotter/estargz/errorutil
+# github.com/containerd/typeurl/v2 v2.2.3
+## explicit; go 1.21
+github.com/containerd/typeurl/v2
 # github.com/coreos/go-iptables v0.7.1-0.20240112124308-65c67c9f46e6
 ## explicit; go 1.16
 github.com/coreos/go-iptables/iptables
@@ -430,6 +433,9 @@ github.com/dblohm7/wingoes/com
 github.com/dblohm7/wingoes/com/automation
 github.com/dblohm7/wingoes/internal
 github.com/dblohm7/wingoes/pe
+# github.com/deckarep/golang-set/v2 v2.8.0
+## explicit; go 1.18
+github.com/deckarep/golang-set/v2
 # github.com/denis-tingaikin/go-header v0.5.0
 ## explicit; go 1.21
 github.com/denis-tingaikin/go-header
@@ -442,7 +448,7 @@ github.com/distribution/reference
 # github.com/djherbis/times v1.6.0
 ## explicit; go 1.16
 github.com/djherbis/times
-# github.com/docker/cli v27.4.1+incompatible
+# github.com/docker/cli v27.5.1+incompatible
 ## explicit
 github.com/docker/cli/cli/config
 github.com/docker/cli/cli/config/configfile
@@ -451,7 +457,7 @@ github.com/docker/cli/cli/config/types
 # github.com/docker/distribution v2.8.3+incompatible
 ## explicit
 github.com/docker/distribution/registry/client/auth/challenge
-# github.com/docker/docker v27.4.1+incompatible
+# github.com/docker/docker v27.5.1+incompatible
 ## explicit
 github.com/docker/docker/api
 github.com/docker/docker/api/types
@@ -591,7 +597,7 @@ github.com/go-git/gcfg
 github.com/go-git/gcfg/scanner
 github.com/go-git/gcfg/token
 github.com/go-git/gcfg/types
-# github.com/go-git/go-billy/v5 v5.6.1
+# github.com/go-git/go-billy/v5 v5.6.2
 ## explicit; go 1.21
 github.com/go-git/go-billy/v5
 github.com/go-git/go-billy/v5/helper/chroot
@@ -647,7 +653,7 @@ github.com/go-git/go-git/v5/utils/merkletrie/internal/frame
 github.com/go-git/go-git/v5/utils/merkletrie/noder
 github.com/go-git/go-git/v5/utils/sync
 github.com/go-git/go-git/v5/utils/trace
-# github.com/go-json-experiment/json v0.0.0-20250223041408-d3c622f1b874
+# github.com/go-json-experiment/json v0.0.0-20250813024750-ebf49471dced
 ## explicit; go 1.24
 github.com/go-json-experiment/json
 github.com/go-json-experiment/json/internal
@@ -738,8 +744,8 @@ github.com/goccy/go-yaml/token
 github.com/godbus/dbus/v5
 github.com/godbus/dbus/v5/introspect
 github.com/godbus/dbus/v5/prop
-# github.com/gofrs/flock v0.8.1
-## explicit
+# github.com/gofrs/flock v0.12.1
+## explicit; go 1.21.0
 github.com/gofrs/flock
 # github.com/gogo/protobuf v1.3.2
 ## explicit; go 1.15
@@ -831,8 +837,8 @@ github.com/google/go-cmp/cmp/internal/diff
 github.com/google/go-cmp/cmp/internal/flags
 github.com/google/go-cmp/cmp/internal/function
 github.com/google/go-cmp/cmp/internal/value
-# github.com/google/go-containerregistry v0.20.2
-## explicit; go 1.18
+# github.com/google/go-containerregistry v0.20.3
+## explicit; go 1.23.0
 github.com/google/go-containerregistry/internal/and
 github.com/google/go-containerregistry/internal/compression
 github.com/google/go-containerregistry/internal/estargz
@@ -858,6 +864,12 @@ github.com/google/go-containerregistry/pkg/v1/remote/transport
 github.com/google/go-containerregistry/pkg/v1/stream
 github.com/google/go-containerregistry/pkg/v1/tarball
 github.com/google/go-containerregistry/pkg/v1/types
+# github.com/google/go-github/v66 v66.0.0
+## explicit; go 1.21
+github.com/google/go-github/v66/github
+# github.com/google/go-querystring v1.1.0
+## explicit; go 1.10
+github.com/google/go-querystring/query
 # github.com/google/go-tpm v0.9.4
 ## explicit; go 1.22
 github.com/google/go-tpm/legacy/tpm2
@@ -1077,6 +1089,9 @@ github.com/kulti/thelper/pkg/analyzer
 # github.com/kunwardeep/paralleltest v1.0.10
 ## explicit; go 1.17
 github.com/kunwardeep/paralleltest/pkg/paralleltest
+# github.com/kylelemons/godebug v1.1.0
+## explicit; go 1.11
+github.com/kylelemons/godebug/diff
 # github.com/kyoh86/exportloopref v0.1.11
 ## explicit; go 1.18
 github.com/kyoh86/exportloopref
@@ -1166,6 +1181,12 @@ github.com/mitchellh/mapstructure
 # github.com/mitchellh/reflectwalk v1.0.2
 ## explicit
 github.com/mitchellh/reflectwalk
+# github.com/moby/buildkit v0.20.2
+## explicit; go 1.22.0
+github.com/moby/buildkit/frontend/dockerfile/command
+github.com/moby/buildkit/frontend/dockerfile/parser
+github.com/moby/buildkit/frontend/dockerfile/shell
+github.com/moby/buildkit/util/stack
 # github.com/moby/docker-image-spec v1.3.1
 ## explicit; go 1.18
 github.com/moby/docker-image-spec/specs-go/v1
@@ -1256,6 +1277,9 @@ github.com/pkg/errors
 ## explicit; go 1.15
 github.com/pkg/sftp
 github.com/pkg/sftp/internal/encoding/ssh/filexfer
+# github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10
+## explicit; go 1.20
+github.com/planetscale/vtprotobuf/protohelpers
 # github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 ## explicit
 github.com/pmezard/go-difflib/difflib
@@ -1265,8 +1289,10 @@ github.com/polyfloyd/go-errorlint/errorlint
 # github.com/prometheus-community/pro-bing v0.4.0
 ## explicit; go 1.19
 github.com/prometheus-community/pro-bing
-# github.com/prometheus/client_golang v1.19.1
+# github.com/prometheus/client_golang v1.20.5
 ## explicit; go 1.20
+github.com/prometheus/client_golang/internal/github.com/golang/gddo/httputil
+github.com/prometheus/client_golang/internal/github.com/golang/gddo/httputil/header
 github.com/prometheus/client_golang/prometheus
 github.com/prometheus/client_golang/prometheus/collectors
 github.com/prometheus/client_golang/prometheus/internal
@@ -1290,6 +1316,9 @@ github.com/prometheus/procfs/internal/util
 # github.com/prometheus/prometheus v0.49.2-0.20240125131847-c3b8ef1694ff
 ## explicit; go 1.20
 github.com/prometheus/prometheus/prompb
+# github.com/puzpuzpuz/xsync v1.5.2
+## explicit; go 1.18
+github.com/puzpuzpuz/xsync
 # github.com/quasilyte/go-ruleguard v0.4.2
 ## explicit; go 1.19
 github.com/quasilyte/go-ruleguard/internal/goenv
@@ -1396,13 +1425,13 @@ github.com/spf13/afero/mem
 # github.com/spf13/cast v1.6.0
 ## explicit; go 1.19
 github.com/spf13/cast
-# github.com/spf13/cobra v1.8.1
+# github.com/spf13/cobra v1.9.1
 ## explicit; go 1.15
 github.com/spf13/cobra
 # github.com/spf13/jwalterweatherman v1.1.0
 ## explicit
 github.com/spf13/jwalterweatherman
-# github.com/spf13/pflag v1.0.5
+# github.com/spf13/pflag v1.0.6
 ## explicit; go 1.12
 github.com/spf13/pflag
 # github.com/spf13/viper v1.16.0
@@ -1419,6 +1448,22 @@ github.com/spf13/viper/internal/encoding/yaml
 # github.com/ssgreg/nlreturn/v2 v2.2.1
 ## explicit; go 1.13
 github.com/ssgreg/nlreturn/v2/pkg/nlreturn
+# github.com/stacklok/frizbee v0.1.7
+## explicit; go 1.23.2
+github.com/stacklok/frizbee
+github.com/stacklok/frizbee/cmd
+github.com/stacklok/frizbee/cmd/actions
+github.com/stacklok/frizbee/cmd/image
+github.com/stacklok/frizbee/cmd/version
+github.com/stacklok/frizbee/internal/cli
+github.com/stacklok/frizbee/internal/traverse
+github.com/stacklok/frizbee/pkg/interfaces
+github.com/stacklok/frizbee/pkg/replacer
+github.com/stacklok/frizbee/pkg/replacer/actions
+github.com/stacklok/frizbee/pkg/replacer/image
+github.com/stacklok/frizbee/pkg/utils/config
+github.com/stacklok/frizbee/pkg/utils/ghrest
+github.com/stacklok/frizbee/pkg/utils/store
 # github.com/stbenjam/no-sprintf-host-port v0.1.1
 ## explicit; go 1.16
 github.com/stbenjam/no-sprintf-host-port/pkg/analyzer
@@ -1549,7 +1594,7 @@ github.com/u-root/u-root/pkg/termios
 ## explicit; go 1.21
 github.com/u-root/uio/rand
 github.com/u-root/uio/uio
-# github.com/ulikunitz/xz v0.5.11
+# github.com/ulikunitz/xz v0.5.15
 ## explicit; go 1.12
 github.com/ulikunitz/xz
 github.com/ulikunitz/xz/internal/hash
@@ -1567,7 +1612,7 @@ github.com/uudashr/gocognit
 # github.com/vbatts/tar-split v0.11.6
 ## explicit; go 1.17
 github.com/vbatts/tar-split/archive/tar
-# github.com/vishvananda/netns v0.0.4
+# github.com/vishvananda/netns v0.0.5
 ## explicit; go 1.17
 github.com/vishvananda/netns
 # github.com/x448/float16 v0.8.4
@@ -1871,7 +1916,7 @@ golang.zx2c4.com/wireguard/windows/tunnel/winipcfg
 # gomodules.xyz/jsonpatch/v2 v2.4.0
 ## explicit; go 1.20
 gomodules.xyz/jsonpatch/v2
-# google.golang.org/protobuf v1.35.1
+# google.golang.org/protobuf v1.36.3
 ## explicit; go 1.21
 google.golang.org/protobuf/encoding/protodelim
 google.golang.org/protobuf/encoding/prototext
@@ -1893,6 +1938,7 @@ google.golang.org/protobuf/internal/genid
 google.golang.org/protobuf/internal/impl
 google.golang.org/protobuf/internal/order
 google.golang.org/protobuf/internal/pragma
+google.golang.org/protobuf/internal/protolazy
 google.golang.org/protobuf/internal/set
 google.golang.org/protobuf/internal/strs
 google.golang.org/protobuf/internal/version
