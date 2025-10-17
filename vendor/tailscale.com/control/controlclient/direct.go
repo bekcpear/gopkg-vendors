@@ -16,7 +16,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"net/url"
 	"os"
 	"reflect"
 	"runtime"
@@ -37,6 +36,7 @@ import (
 	"tailscale.com/net/dnsfallback"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/netutil"
+	"tailscale.com/net/netx"
 	"tailscale.com/net/tlsdial"
 	"tailscale.com/net/tsdial"
 	"tailscale.com/net/tshttpproxy"
@@ -94,15 +94,16 @@ type Direct struct {
 	sfGroup     singleflight.Group[struct{}, *NoiseClient] // protects noiseClient creation.
 	noiseClient *NoiseClient
 
-	persist      persist.PersistView
-	authKey      string
-	tryingNewKey key.NodePrivate
-	expiry       time.Time         // or zero value if none/unknown
-	hostinfo     *tailcfg.Hostinfo // always non-nil
-	netinfo      *tailcfg.NetInfo
-	endpoints    []tailcfg.Endpoint
-	tkaHead      string
-	lastPingURL  string // last PingRequest.URL received, for dup suppression
+	persist                 persist.PersistView
+	authKey                 string
+	tryingNewKey            key.NodePrivate
+	expiry                  time.Time         // or zero value if none/unknown
+	hostinfo                *tailcfg.Hostinfo // always non-nil
+	netinfo                 *tailcfg.NetInfo
+	endpoints               []tailcfg.Endpoint
+	tkaHead                 string
+	lastPingURL             string // last PingRequest.URL received, for dup suppression
+	connectionHandleForTest string // sent in MapRequest.ConnectionHandleForTest
 }
 
 // Observer is implemented by users of the control client (such as LocalBackend)
@@ -238,10 +239,6 @@ func NewDirect(opts Options) (*Direct, error) {
 		opts.ControlKnobs = &controlknobs.Knobs{}
 	}
 	opts.ServerURL = strings.TrimRight(opts.ServerURL, "/")
-	serverURL, err := url.Parse(opts.ServerURL)
-	if err != nil {
-		return nil, err
-	}
 	if opts.Clock == nil {
 		opts.Clock = tstime.StdClock{}
 	}
@@ -271,8 +268,8 @@ func NewDirect(opts Options) (*Direct, error) {
 		tr := http.DefaultTransport.(*http.Transport).Clone()
 		tr.Proxy = tshttpproxy.ProxyFromEnvironment
 		tshttpproxy.SetTransportGetProxyConnectHeader(tr)
-		tr.TLSClientConfig = tlsdial.Config(serverURL.Hostname(), opts.HealthTracker, tr.TLSClientConfig)
-		var dialFunc dialFunc
+		tr.TLSClientConfig = tlsdial.Config(opts.HealthTracker, tr.TLSClientConfig)
+		var dialFunc netx.DialFunc
 		dialFunc, interceptedDial = makeScreenTimeDetectingDialFunc(opts.Dialer.SystemDial)
 		tr.DialContext = dnscache.Dialer(dialFunc, dnsCache)
 		tr.DialTLSContext = dnscache.TLSDialer(dialFunc, dnsCache, tr.TLSClientConfig)
@@ -400,6 +397,14 @@ func (c *Direct) SetTKAHead(tkaHead string) bool {
 	c.tkaHead = tkaHead
 	c.logf("tkaHead: %v", tkaHead)
 	return true
+}
+
+// SetConnectionHandleForTest stores a new MapRequest.ConnectionHandleForTest
+// value for the next update.
+func (c *Direct) SetConnectionHandleForTest(handle string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.connectionHandleForTest = handle
 }
 
 func (c *Direct) GetPersist() persist.PersistView {
@@ -850,6 +855,7 @@ func (c *Direct) sendMapRequest(ctx context.Context, isStreaming bool, nu Netmap
 	serverNoiseKey := c.serverNoiseKey
 	hi := c.hostInfoLocked()
 	backendLogID := hi.BackendLogID
+	connectionHandleForTest := c.connectionHandleForTest
 	var epStrs []string
 	var eps []netip.AddrPort
 	var epTypes []tailcfg.EndpointType
@@ -890,17 +896,18 @@ func (c *Direct) sendMapRequest(ctx context.Context, isStreaming bool, nu Netmap
 
 	nodeKey := persist.PublicNodeKey()
 	request := &tailcfg.MapRequest{
-		Version:       tailcfg.CurrentCapabilityVersion,
-		KeepAlive:     true,
-		NodeKey:       nodeKey,
-		DiscoKey:      c.discoPubKey,
-		Endpoints:     eps,
-		EndpointTypes: epTypes,
-		Stream:        isStreaming,
-		Hostinfo:      hi,
-		DebugFlags:    c.debugFlags,
-		OmitPeers:     nu == nil,
-		TKAHead:       c.tkaHead,
+		Version:                 tailcfg.CurrentCapabilityVersion,
+		KeepAlive:               true,
+		NodeKey:                 nodeKey,
+		DiscoKey:                c.discoPubKey,
+		Endpoints:               eps,
+		EndpointTypes:           epTypes,
+		Stream:                  isStreaming,
+		Hostinfo:                hi,
+		DebugFlags:              c.debugFlags,
+		OmitPeers:               nu == nil,
+		TKAHead:                 c.tkaHead,
+		ConnectionHandleForTest: connectionHandleForTest,
 	}
 	var extraDebugFlags []string
 	if hi != nil && c.netMon != nil && !c.skipIPForwardingCheck &&
@@ -1086,7 +1093,7 @@ func (c *Direct) sendMapRequest(ctx context.Context, isStreaming bool, nu Netmap
 		} else {
 			vlogf("netmap: got new map")
 		}
-		if resp.ControlDialPlan != nil {
+		if resp.ControlDialPlan != nil && !ignoreDialPlan() {
 			if c.dialPlan != nil {
 				c.logf("netmap: got new dial plan from control")
 				c.dialPlan.Store(resp.ControlDialPlan)
@@ -1611,9 +1618,9 @@ func postPingResult(start time.Time, logf logger.Logf, c *http.Client, pr *tailc
 	return nil
 }
 
-// ReportHealthChange reports to the control plane a change to this node's
+// ReportWarnableChange reports to the control plane a change to this node's
 // health. w must be non-nil. us can be nil to indicate a healthy state for w.
-func (c *Direct) ReportHealthChange(w *health.Warnable, us *health.UnhealthyState) {
+func (c *Direct) ReportWarnableChange(w *health.Warnable, us *health.UnhealthyState) {
 	if w == health.NetworkStatusWarnable || w == health.IPNStateWarnable || w == health.LoginStateWarnable {
 		// We don't report these. These include things like the network is down
 		// (in which case we can't report anyway) or the user wanted things
@@ -1749,14 +1756,12 @@ func addLBHeader(req *http.Request, nodeKey key.NodePublic) {
 	}
 }
 
-type dialFunc = func(ctx context.Context, network, addr string) (net.Conn, error)
-
 // makeScreenTimeDetectingDialFunc returns dialFunc, optionally wrapped (on
 // Apple systems) with a func that sets the returned atomic.Bool for whether
 // Screen Time seemed to intercept the connection.
 //
 // The returned *atomic.Bool is nil on non-Apple systems.
-func makeScreenTimeDetectingDialFunc(dial dialFunc) (dialFunc, *atomic.Bool) {
+func makeScreenTimeDetectingDialFunc(dial netx.DialFunc) (netx.DialFunc, *atomic.Bool) {
 	switch runtime.GOOS {
 	case "darwin", "ios":
 		// Continue below.
@@ -1772,6 +1777,13 @@ func makeScreenTimeDetectingDialFunc(dial dialFunc) (dialFunc, *atomic.Bool) {
 		ab.Store(isTCPLoopback(c.LocalAddr()) && isTCPLoopback(c.RemoteAddr()))
 		return c, nil
 	}, ab
+}
+
+func ignoreDialPlan() bool {
+	// If we're running in v86 (a JavaScript-based emulation of a 32-bit x86)
+	// our networking is very limited. Let's ignore the dial plan since it's too
+	// complicated to race that many IPs anyway.
+	return hostinfo.IsInVM86()
 }
 
 func isTCPLoopback(a net.Addr) bool {

@@ -1,28 +1,29 @@
 zcache is an in-memory key:value store/cache with time-based evictions.
 
-It is suitable for applications running on a single machine. Its major advantage
-is that it's essentially a thread-safe map with expiration times. Any object can
-be stored, for a given duration or forever, and the cache can be safely used by
-multiple goroutines.
+It is suitable for applications running on a single machine. It's essentially a
+thread-safe map with expiration times. Any object can be stored, for a given
+duration or forever, and the cache can be safely used by multiple goroutines.
 
 Although zcache isn't meant to be used as a persistent datastore, the contents
 can be saved to and loaded from a file (using `c.Items()` to retrieve the items
 map to serialize, and `NewFrom()` to create a cache from a deserialized one) to
 recover from downtime quickly.
 
-The canonical import path is `zgo.at/zcache`, and reference docs are at
+The canonical import path is `zgo.at/zcache/v2`, or `zgo.at/zcache` for the v1.
+Reference docs are at https://godocs.io/zgo.at/zcache/v2 and
 https://godocs.io/zgo.at/zcache
 
 This is a fork of https://github.com/patrickmn/go-cache – which no longer seems
 actively maintained. There are two versions of zcache:
 
-- v1 is intended to be 100% compatible with co-cache and a drop-in replacement
-  with various enhancements.
-- v2 makes various incompatible changes to the API: various functions calls are
-  improved. This uses generics and requires Go 1.18.
+- v1 is 100% compatible with go-cache and a drop-in replacement with various
+  enhancements. As of 2025 this is only maintained for bugfixes, and not new
+  features.
+- v2 makes various incompatible changes to the API; some functions calls are
+  improved and it uses generics, which requires Go 1.18.
 
-This README documents v2; see README.v1.md for the v1 README. Both versions are
-maintained. See the "changes" section below for a list of changes.
+**This README documents v2; see [README.v1.md](/README.v1.md) for the v1
+README.** See the "changes" section below for a list of changes.
 
 Usage
 -----
@@ -164,8 +165,27 @@ All these changes are in both v1 and v2:
 - Add `Proxy` type, to access cache items under a different key.
 - Various small internal and documentation improvements.
 
-See [issue-list.markdown](/issue-list.markdown) for a complete run-down of the
-PRs/issues for go-cache and what was and wasn't included.
+ChangeLog
+---------
+
+## 2.4.1 (2025-08-21)
+- Don't extend expiry for existing keys in `ModifySet()`
+
+## v2.4.0 (2025-08-20)
+- Add `(Get|Touch)OrAdd(WithExpire)?`
+- Fix `ModifySet()` so the cache's default expiry is used when setting new keys
+
+## v2.3.0 (2025-08-11)
+- Add `ModifySet()`
+
+## v2.2.0 (2025-06-19)
+- Add `ItemsAny()`
+
+## v2.1.0 (2022-05-27)
+- Add `Rename()`
+
+## v2.0.0 (2022-03-28)
+- Initial v2 release.
 
 FAQ
 ---

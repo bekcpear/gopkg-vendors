@@ -80,7 +80,19 @@ func (opts *ListOpts) GetMap() map[string]struct{} {
 }
 
 // GetAll returns the values of slice.
+//
+// Deprecated: use [ListOpts.GetSlice] instead. This method will be removed in a future release.
 func (opts *ListOpts) GetAll() []string {
+	return *opts.values
+}
+
+// GetSlice returns the values of slice.
+//
+// It implements [cobra.SliceValue] to allow shell completion to be provided
+// multiple times.
+//
+// [cobra.SliceValue]: https://pkg.go.dev/github.com/spf13/cobra@v1.9.1#SliceValue
+func (opts *ListOpts) GetSlice() []string {
 	return *opts.values
 }
 
@@ -122,6 +134,8 @@ func (opts *ListOpts) WithValidator(validator ValidatorFctType) *ListOpts {
 
 // NamedOption is an interface that list and map options
 // with names implement.
+//
+// Deprecated: NamedOption is no longer used and will be removed in the next release.
 type NamedOption interface {
 	Name() string
 }
@@ -129,6 +143,8 @@ type NamedOption interface {
 // NamedListOpts is a ListOpts with a configuration name.
 // This struct is useful to keep reference to the assigned
 // field name in the internal configuration struct.
+//
+// Deprecated: NamedListOpts is no longer used and will be removed in the next release.
 type NamedListOpts struct {
 	name string
 	ListOpts
@@ -137,6 +153,8 @@ type NamedListOpts struct {
 var _ NamedOption = &NamedListOpts{}
 
 // NewNamedListOptsRef creates a reference to a new NamedListOpts struct.
+//
+// Deprecated: NewNamedListOptsRef is no longer used and will be removed in the next release.
 func NewNamedListOptsRef(name string, values *[]string, validator ValidatorFctType) *NamedListOpts {
 	return &NamedListOpts{
 		name:     name,
@@ -145,6 +163,8 @@ func NewNamedListOptsRef(name string, values *[]string, validator ValidatorFctTy
 }
 
 // Name returns the name of the NamedListOpts in the configuration.
+//
+// Deprecated: NamedListOpts is no longer used and will be removed in the next release.
 func (o *NamedListOpts) Name() string {
 	return o.name
 }
@@ -198,6 +218,8 @@ func NewMapOpts(values map[string]string, validator ValidatorFctType) *MapOpts {
 // NamedMapOpts is a MapOpts struct with a configuration name.
 // This struct is useful to keep reference to the assigned
 // field name in the internal configuration struct.
+//
+// Deprecated: NamedMapOpts is no longer used and will be removed in the next release.
 type NamedMapOpts struct {
 	name string
 	MapOpts
@@ -206,6 +228,8 @@ type NamedMapOpts struct {
 var _ NamedOption = &NamedMapOpts{}
 
 // NewNamedMapOpts creates a reference to a new NamedMapOpts struct.
+//
+// Deprecated: NamedMapOpts is no longer used and will be removed in the next release.
 func NewNamedMapOpts(name string, values map[string]string, validator ValidatorFctType) *NamedMapOpts {
 	return &NamedMapOpts{
 		name:    name,
@@ -214,6 +238,8 @@ func NewNamedMapOpts(name string, values map[string]string, validator ValidatorF
 }
 
 // Name returns the name of the NamedMapOpts in the configuration.
+//
+// Deprecated: NamedMapOpts is no longer used and will be removed in the next release.
 func (o *NamedMapOpts) Name() string {
 	return o.name
 }

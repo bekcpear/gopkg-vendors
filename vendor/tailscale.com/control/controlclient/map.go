@@ -6,7 +6,10 @@ package controlclient
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"maps"
 	"net"
 	"reflect"
@@ -19,6 +22,7 @@ import (
 
 	"tailscale.com/control/controlknobs"
 	"tailscale.com/envknob"
+	"tailscale.com/hostinfo"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tstime"
 	"tailscale.com/types/key"
@@ -86,6 +90,7 @@ type mapSession struct {
 	lastDomain             string
 	lastDomainAuditLogID   string
 	lastHealth             []string
+	lastDisplayMessages    map[tailcfg.DisplayMessageID]tailcfg.DisplayMessage
 	lastPopBrowserURL      string
 	lastTKAInfo            *tailcfg.TKAInfo
 	lastNetmapSummary      string // from NetworkMap.VeryConcise
@@ -308,6 +313,31 @@ func (ms *mapSession) updateStateFromResponse(resp *tailcfg.MapResponse) {
 			}
 		}
 
+		// In the copy/v86 wasm environment with limited networking, if the
+		// control plane didn't pick our DERP home for us, do it ourselves and
+		// mark all but the lowest region as NoMeasureNoHome. For prod, this
+		// will be Region 1, NYC, a compromise between the US and Europe. But
+		// really the control plane should pick this. This is only a fallback.
+		if hostinfo.IsInVM86() {
+			numCanMeasure := 0
+			lowest := 0
+			for rid, r := range dm.Regions {
+				if !r.NoMeasureNoHome {
+					numCanMeasure++
+					if lowest == 0 || rid < lowest {
+						lowest = rid
+					}
+				}
+			}
+			if numCanMeasure > 1 {
+				for rid, r := range dm.Regions {
+					if rid != lowest {
+						r.NoMeasureNoHome = true
+					}
+				}
+			}
+		}
+
 		// Zero-valued fields in a DERPMap mean that we're not changing
 		// anything and are using the previous value(s).
 		if ldm := ms.lastDERPMap; ldm != nil {
@@ -382,6 +412,21 @@ func (ms *mapSession) updateStateFromResponse(resp *tailcfg.MapResponse) {
 	}
 	if resp.Health != nil {
 		ms.lastHealth = resp.Health
+	}
+	if resp.DisplayMessages != nil {
+		if v, ok := resp.DisplayMessages["*"]; ok && v == nil {
+			ms.lastDisplayMessages = nil
+		}
+		for k, v := range resp.DisplayMessages {
+			if k == "*" {
+				continue
+			}
+			if v != nil {
+				mak.Set(&ms.lastDisplayMessages, k, *v)
+			} else {
+				delete(ms.lastDisplayMessages, k)
+			}
+		}
 	}
 	if resp.TKAInfo != nil {
 		ms.lastTKAInfo = resp.TKAInfo
@@ -802,6 +847,21 @@ func (ms *mapSession) sortedPeers() []tailcfg.NodeView {
 func (ms *mapSession) netmap() *netmap.NetworkMap {
 	peerViews := ms.sortedPeers()
 
+	var msgs map[tailcfg.DisplayMessageID]tailcfg.DisplayMessage
+	if len(ms.lastDisplayMessages) != 0 {
+		msgs = ms.lastDisplayMessages
+	} else if len(ms.lastHealth) > 0 {
+		// Convert all ms.lastHealth to the new [netmap.NetworkMap.DisplayMessages]
+		for _, h := range ms.lastHealth {
+			id := "health-" + strhash(h) // Unique ID in case there is more than one health message
+			mak.Set(&msgs, tailcfg.DisplayMessageID(id), tailcfg.DisplayMessage{
+				Title:    "Coordination server reports an issue",
+				Severity: tailcfg.SeverityMedium,
+				Text:     "The coordination server is reporting a health issue: " + h,
+			})
+		}
+	}
+
 	nm := &netmap.NetworkMap{
 		NodeKey:           ms.publicNodeKey,
 		PrivateKey:        ms.privateNodeKey,
@@ -816,7 +876,7 @@ func (ms *mapSession) netmap() *netmap.NetworkMap {
 		SSHPolicy:         ms.lastSSHPolicy,
 		CollectServices:   ms.collectServices,
 		DERPMap:           ms.lastDERPMap,
-		ControlHealth:     ms.lastHealth,
+		DisplayMessages:   msgs,
 		TKAEnabled:        ms.lastTKAInfo != nil && !ms.lastTKAInfo.Disabled,
 	}
 
@@ -842,5 +902,12 @@ func (ms *mapSession) netmap() *netmap.NetworkMap {
 	if DevKnob.ForceProxyDNS() {
 		nm.DNS.Proxied = true
 	}
+
 	return nm
+}
+
+func strhash(h string) string {
+	s := sha256.New()
+	io.WriteString(s, h)
+	return hex.EncodeToString(s.Sum(nil))
 }

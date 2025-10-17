@@ -1,6 +1,8 @@
 // Copyright (c) Tailscale Inc & AUTHORS
 // SPDX-License-Identifier: BSD-3-Clause
 
+//go:build linux && !android
+
 package dns
 
 import (
@@ -20,6 +22,7 @@ import (
 	"tailscale.com/types/logger"
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/cmpver"
+	"tailscale.com/version/distro"
 )
 
 type kv struct {
@@ -36,6 +39,10 @@ var publishOnce sync.Once
 //
 // The health tracker may be nil; the knobs may be nil and are ignored on this platform.
 func NewOSConfigurator(logf logger.Logf, health *health.Tracker, _ *controlknobs.Knobs, interfaceName string) (ret OSConfigurator, err error) {
+	if distro.Get() == distro.JetKVM {
+		return NewNoopManager()
+	}
+
 	env := newOSConfigEnv{
 		fs:                directFS{},
 		dbusPing:          dbusPing,

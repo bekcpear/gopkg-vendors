@@ -17,11 +17,12 @@ import (
 	"github.com/docker/cli/cli/compose/schema"
 	"github.com/docker/cli/cli/compose/template"
 	"github.com/docker/cli/cli/compose/types"
+	"github.com/docker/cli/internal/volumespec"
 	"github.com/docker/cli/opts"
 	"github.com/docker/cli/opts/swarmopts"
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/go-connections/nat"
-	units "github.com/docker/go-units"
+	"github.com/docker/go-units"
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/google/shlex"
 	"github.com/pkg/errors"
@@ -39,6 +40,13 @@ type Options struct {
 	Interpolate *interp.Options
 	// Discard 'env_file' entries after resolving to 'environment' section
 	discardEnvFiles bool
+}
+
+// ParseVolume parses a volume spec without any knowledge of the target platform.
+//
+// This function is unused, but kept for backward-compatibility for external users.
+func ParseVolume(spec string) (types.ServiceVolumeConfig, error) {
+	return volumespec.Parse(spec)
 }
 
 // WithDiscardEnvFiles sets the Options to discard the `env_file` section after resolving to
@@ -460,7 +468,7 @@ func resolveEnvironment(serviceConfig *types.ServiceConfig, workingDir string, l
 
 		for _, file := range serviceConfig.EnvFile {
 			filePath := absPath(workingDir, file)
-			fileVars, err := opts.ParseEnvFile(filePath)
+			fileVars, err := parseEnvFile(filePath)
 			if err != nil {
 				return err
 			}
@@ -756,7 +764,7 @@ var transformBuildConfig TransformerFunc = func(data any) (any, error) {
 var transformServiceVolumeConfig TransformerFunc = func(data any) (any, error) {
 	switch value := data.(type) {
 	case string:
-		return ParseVolume(value)
+		return volumespec.Parse(value)
 	case map[string]any:
 		return data, nil
 	default:

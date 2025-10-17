@@ -1,9 +1,9 @@
 zcache is an in-memory key:value store/cache with time-based evictions.
 
-It is suitable for applications running on a single machine. Its major advantage
-is that it's essentially a thread-safe `map[string]interface{}` with expiration
-times. Any object can be stored, for a given duration or forever, and the cache
-can be safely used by multiple goroutines.
+It is suitable for applications running on a single machine. It's essentially a
+thread-safe `map[string]interface{}` with expiration times. Any object can be
+stored, for a given duration or forever, and the cache can be safely used by
+multiple goroutines.
 
 Although zcache isn't meant to be used as a persistent datastore, the entire
 cache can be saved to and loaded from a file (using `c.Items()` to retrieve the
@@ -20,8 +20,7 @@ This is a fork of https://github.com/patrickmn/go-cache – which no longer seem
 actively maintained. v1 is intended to be 100% compatible and a drop-in
 replacement.
 
-See [issue-list.markdown](/issue-list.markdown) for a complete run-down of the
-PRs/issues for go-cache and what was and wasn't included; in short:
+Changes in v1:
 
 - Add `Keys()` to list all keys.
 - Add `Touch()` to update the expiry on an item.

@@ -92,15 +92,15 @@ func (n NoneNode) RenderWithOptions(opts RenderOptions) string {
 type TextNode string
 
 func (t TextNode) RenderTo(builder *strings.Builder, opts RenderOptions) {
-	builder.WriteString(string(t))
+	builder.WriteString(EscapeNodeContents(string(t)))
 }
 
 func (t TextNode) Render() string {
-	return string(t)
+	return EscapeNodeContents(string(t))
 }
 
 func (t TextNode) RenderWithOptions(opts RenderOptions) string {
-	return string(t)
+	return EscapeNodeContents(string(t))
 }
 
 type RawNode string
@@ -117,11 +117,29 @@ func (t RawNode) RenderWithOptions(opts RenderOptions) string {
 	return string(t)
 }
 
+type CdataNode string
+
+func (t CdataNode) RenderTo(builder *strings.Builder, opts RenderOptions) {
+	builder.WriteString("<![CDATA[")
+	builder.WriteString(EscapeCdataContents(string(t)))
+	builder.WriteString("]]>")
+}
+
+func (t CdataNode) Render() string {
+	return t.RenderWithOptions(RenderOptions{})
+}
+
+func (t CdataNode) RenderWithOptions(opts RenderOptions) string {
+	var builder strings.Builder
+	t.RenderTo(&builder, opts)
+	return builder.String()
+}
+
 type CommentNode string
 
 func (c CommentNode) RenderTo(builder *strings.Builder, opts RenderOptions) {
 	builder.WriteString("<!-- ")
-	builder.WriteString(string(c))
+	builder.WriteString(EscapeCommentContents(string(c)))
 	builder.WriteString(" -->")
 }
 

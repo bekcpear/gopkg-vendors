@@ -54,12 +54,12 @@ type NetworkMap struct {
 	// between updates and should not be modified.
 	DERPMap *tailcfg.DERPMap
 
-	// ControlHealth are the list of health check problems for this
+	// DisplayMessages are the list of health check problems for this
 	// node from the perspective of the control plane.
 	// If empty, there are no known problems from the control plane's
 	// point of view, but the node might know about its own health
 	// check problems.
-	ControlHealth []string
+	DisplayMessages map[tailcfg.DisplayMessageID]tailcfg.DisplayMessage
 
 	// TKAEnabled indicates whether the tailnet key authority should be
 	// enabled, from the perspective of the control plane.
@@ -146,6 +146,14 @@ func (nm *NetworkMap) GetIPVIPServiceMap() IPServiceMappings {
 		}
 	}
 	return res
+}
+
+// SelfNodeOrZero returns the self node, or a zero value if nm is nil.
+func (nm *NetworkMap) SelfNodeOrZero() tailcfg.NodeView {
+	if nm == nil {
+		return tailcfg.NodeView{}
+	}
+	return nm.SelfNode
 }
 
 // AnyPeersAdvertiseRoutes reports whether any peer is advertising non-exit node routes.

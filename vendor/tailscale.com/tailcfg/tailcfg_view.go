@@ -19,7 +19,7 @@ import (
 	"tailscale.com/types/views"
 )
 
-//go:generate go run tailscale.com/cmd/cloner  -clonefunc=true -type=User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,RegisterResponseAuth,RegisterRequest,DERPHomeParams,DERPRegion,DERPMap,DERPNode,SSHRule,SSHAction,SSHPrincipal,ControlDialPlan,Location,UserProfile
+//go:generate go run tailscale.com/cmd/cloner  -clonefunc=true -type=User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,RegisterResponseAuth,RegisterRequest,DERPHomeParams,DERPRegion,DERPMap,DERPNode,SSHRule,SSHAction,SSHPrincipal,ControlDialPlan,Location,UserProfile,VIPService
 
 // View returns a read-only view of User.
 func (p *User) View() UserView {
@@ -300,8 +300,12 @@ func (v HostinfoView) Userspace() opt.Bool                    { return v.ж.User
 func (v HostinfoView) UserspaceRouter() opt.Bool              { return v.ж.UserspaceRouter }
 func (v HostinfoView) AppConnector() opt.Bool                 { return v.ж.AppConnector }
 func (v HostinfoView) ServicesHash() string                   { return v.ж.ServicesHash }
+func (v HostinfoView) ExitNodeID() StableNodeID               { return v.ж.ExitNodeID }
 func (v HostinfoView) Location() LocationView                 { return v.ж.Location.View() }
-func (v HostinfoView) Equal(v2 HostinfoView) bool             { return v.ж.Equal(v2.ж) }
+func (v HostinfoView) TPM() views.ValuePointer[TPMInfo]       { return views.ValuePointerOf(v.ж.TPM) }
+
+func (v HostinfoView) StateEncrypted() opt.Bool   { return v.ж.StateEncrypted }
+func (v HostinfoView) Equal(v2 HostinfoView) bool { return v.ж.Equal(v2.ж) }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _HostinfoViewNeedsRegeneration = Hostinfo(struct {
@@ -342,7 +346,10 @@ var _HostinfoViewNeedsRegeneration = Hostinfo(struct {
 	UserspaceRouter opt.Bool
 	AppConnector    opt.Bool
 	ServicesHash    string
+	ExitNodeID      StableNodeID
 	Location        *Location
+	TPM             *TPMInfo
+	StateEncrypted  opt.Bool
 }{})
 
 // View returns a read-only view of NetInfo.
@@ -1413,4 +1420,60 @@ var _UserProfileViewNeedsRegeneration = UserProfile(struct {
 	LoginName     string
 	DisplayName   string
 	ProfilePicURL string
+}{})
+
+// View returns a read-only view of VIPService.
+func (p *VIPService) View() VIPServiceView {
+	return VIPServiceView{ж: p}
+}
+
+// VIPServiceView provides a read-only view over VIPService.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VIPServiceView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VIPService
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VIPServiceView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VIPServiceView) AsStruct() *VIPService {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+func (v VIPServiceView) MarshalJSON() ([]byte, error) { return json.Marshal(v.ж) }
+
+func (v *VIPServiceView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VIPService
+	if err := json.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VIPServiceView) Name() ServiceName                  { return v.ж.Name }
+func (v VIPServiceView) Ports() views.Slice[ProtoPortRange] { return views.SliceOf(v.ж.Ports) }
+func (v VIPServiceView) Active() bool                       { return v.ж.Active }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VIPServiceViewNeedsRegeneration = VIPService(struct {
+	Name   ServiceName
+	Ports  []ProtoPortRange
+	Active bool
 }{})

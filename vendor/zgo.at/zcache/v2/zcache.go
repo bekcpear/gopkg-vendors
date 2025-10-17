@@ -128,6 +128,15 @@ func (c *cache[K, V]) Add(k K, v V) error { return c.AddWithExpire(k, v, Default
 // It will return an error if the cache key doesn't exist.
 func (c *cache[K, V]) Replace(k K, v V) error { return c.ReplaceWithExpire(k, v, DefaultExpiration) }
 
+// GetOrAdd gets an item from the cache, or adds it with the default expiration
+// if it doesn't exist and returns the value.
+func (c *cache[K, V]) GetOrAdd(k K, v V) V { return c.GetOrAddWithExpire(k, v, DefaultExpiration) }
+
+// TouchOrAdd replaces the expiry of a key with the default expiration and
+// returns the current value, or adds it with the default expiration and returns
+// the value.
+func (c *cache[K, V]) TouchOrAdd(k K, v V) V { return c.TouchOrAddWithExpire(k, v, DefaultExpiration) }
+
 // SetWithExpire sets a cache item, replacing any existing item.
 //
 // If the duration is 0 (DefaultExpiration), the cache's default expiration time
@@ -167,7 +176,9 @@ func (c *cache[K, V]) TouchWithExpire(k K, d time.Duration) (V, bool) {
 		return c.zero(), false
 	}
 
-	item.Expiration = time.Now().Add(d).UnixNano()
+	if d > 0 {
+		item.Expiration = time.Now().Add(d).UnixNano()
+	}
 	c.items[k] = item
 	return item.Object, true
 }
@@ -206,6 +217,54 @@ func (c *cache[K, V]) ReplaceWithExpire(k K, v V, d time.Duration) error {
 	}
 	c.set(k, v, d)
 	return nil
+}
+
+// GetOrAddWithExpire returns an value from the cache if it exists. If it
+// doesn't exist, the given value is added and returned.
+//
+// If the duration is 0 (DefaultExpiration), the cache's default expiration time
+// is used. If it is -1 (NoExpiration), the item never expires.
+func (c *cache[K, V]) GetOrAddWithExpire(k K, v V, d time.Duration) V {
+	if d == DefaultExpiration {
+		d = c.defaultExpiration
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// "Inlining" of Get and Expired
+	item, ok := c.items[k]
+	if !ok || (item.Expiration > 0 && time.Now().UnixNano() > item.Expiration) {
+		item = c.set(k, v, d)
+	}
+	return item.Object
+}
+
+// TouchOrAdd replaces the expiry of a key with the given expiration and returns
+// the current value, or adds it with the given expiration and returns the
+// value.
+//
+// If the duration is 0 (DefaultExpiration), the cache's default expiration time
+// is used. If it is -1 (NoExpiration), the item never expires.
+func (c *cache[K, V]) TouchOrAddWithExpire(k K, v V, d time.Duration) V {
+	if d == DefaultExpiration {
+		d = c.defaultExpiration
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// "Inlining" of Get and Expired
+	item, ok := c.items[k]
+	if !ok || (item.Expiration > 0 && time.Now().UnixNano() > item.Expiration) {
+		return c.set(k, v, d).Object
+	}
+
+	if d > 0 {
+		item.Expiration = time.Now().Add(d).UnixNano()
+	}
+	c.items[k] = item
+	return item.Object
 }
 
 // Get an item from the cache.
@@ -278,37 +337,73 @@ func (c *cache[K, V]) GetWithExpire(k K) (V, time.Time, bool) {
 //
 // This is thread-safe; for example to increment a number:
 //
-//   cache.Modify("one", func(v int) int { return v + 1 })
+//	cache.Modify("one", func(v int) int { return v + 1 })
 //
 // Or setting a map key:
 //
-//   cache.Modify("key", func(v map[string]string) map[string]string {
-//         v["k"] = "v"
-//         return v
-//   })
+//	cache.Modify("key", func(v map[string]string) map[string]string {
+//	      v["k"] = "v"
+//	      return v
+//	})
 //
 // This is thread-safe and can be safely run by multiple goroutines modifying
 // the same key. If you would use Get() + Set() then two goroutines may Get()
 // the same value and the modification of one of them will be lost.
 //
-// This is not run for keys that are not set yet; the boolean return indicates
-// if the key was set and if the function was applied.
+// This is not run for keys that are not yet set; the boolean return indicates
+// if the key was set and if the function was run. See [ModifySet] for a variant
+// that will also set the key.
 func (c *cache[K, V]) Modify(k K, f func(V) V) (V, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// "Inlining" of get and Expired
 	item, ok := c.items[k]
-	if !ok {
-		return c.zero(), false
-	}
-	if item.Expiration > 0 && time.Now().UnixNano() > item.Expiration {
+	if !ok || (item.Expiration > 0 && time.Now().UnixNano() > item.Expiration) {
 		return c.zero(), false
 	}
 
 	item.Object = f(item.Object)
 	c.items[k] = item
 	return item.Object, true
+}
+
+// ModifySet modifies the value of a key. This is similar to [Modify], but also
+// sets keys that don't exist yet or are expired (with the cache's default
+// expiry).
+//
+// In the callback v will be set to the zero value if the key isn't set yet; the
+// boolean argument indicates if the key exists. For example to increment only
+// existing keys:
+//
+//	newval, ok := cache.ModifySet("n", func(v int, exists bool) int {
+//	    if !exists {
+//	        return 0, true
+//	    }
+//	    return v + 1, true
+//	})
+//
+// Like [Modify], it returns the new value and whether the key was set (past
+// tense: the key will always be set after calling ModifySet).
+func (c *cache[K, V]) ModifySet(k K, f func(V, bool) V) (V, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// "Inlining" of get and Expired
+	item, ok := c.items[k]
+	if !ok || (item.Expiration > 0 && time.Now().UnixNano() > item.Expiration) {
+		ok = false
+	}
+
+	item.Object = f(item.Object, ok)
+	if ok {
+		c.delete(k)
+	}
+	if !ok && c.defaultExpiration > 0 {
+		item.Expiration = time.Now().Add(c.defaultExpiration).UnixNano()
+	}
+	c.items[k] = item
+	return item.Object, ok
 }
 
 // Delete an item from the cache. Does nothing if the key is not in the cache.
@@ -420,6 +515,31 @@ func (c *cache[K, V]) Items() map[K]Item[V] {
 	return m
 }
 
+// ItemsAny returns all items, like [Items], but untyped.
+//
+// This can be useful in some cases where you want to iterate over multiple
+// caches, for example for debugging, so you can assign them to a generic
+// interface:
+//
+//	interface {
+//	   ItemsAny() map[any]zcache.Item[any]
+//	}
+func (c *cache[K, V]) ItemsAny() map[any]Item[any] {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	m := make(map[any]Item[any], len(c.items))
+	now := time.Now().UnixNano()
+	for k, v := range c.items {
+		// "Inlining" of Expired
+		if v.Expiration > 0 && now > v.Expiration {
+			continue
+		}
+		m[k] = Item[any]{Object: v.Object, Expiration: v.Expiration}
+	}
+	return m
+}
+
 // Keys gets a list of all keys, in no particular order.
 func (c *cache[K, V]) Keys() []K {
 	c.mu.RLock()
@@ -504,7 +624,7 @@ func (c *cache[K, V]) DeleteFunc(filter func(key K, item Item[V]) (del, stop boo
 	return m
 }
 
-func (c *cache[K, V]) set(k K, v V, d time.Duration) {
+func (c *cache[K, V]) set(k K, v V, d time.Duration) Item[V] {
 	var e int64
 	if d == DefaultExpiration {
 		d = c.defaultExpiration
@@ -512,10 +632,12 @@ func (c *cache[K, V]) set(k K, v V, d time.Duration) {
 	if d > 0 {
 		e = time.Now().Add(d).UnixNano()
 	}
-	c.items[k] = Item[V]{
+	item := Item[V]{
 		Object:     v,
 		Expiration: e,
 	}
+	c.items[k] = item
+	return item
 }
 
 func (c *cache[K, V]) get(k K) (V, bool) {
