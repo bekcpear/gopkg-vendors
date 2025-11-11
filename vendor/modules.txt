@@ -199,8 +199,9 @@ github.com/creachadair/command
 # github.com/creachadair/flax v0.0.5
 ## explicit; go 1.23
 github.com/creachadair/flax
-# github.com/creachadair/mds v0.25.2
-## explicit; go 1.23
+# github.com/creachadair/mds v0.25.10
+## explicit; go 1.24
+github.com/creachadair/mds/mapset
 github.com/creachadair/mds/mdiff
 github.com/creachadair/mds/mstr
 github.com/creachadair/mds/slice
@@ -446,8 +447,8 @@ github.com/jmespath/go-jmespath
 ## explicit; go 1.20
 github.com/jsimonetti/rtnetlink
 github.com/jsimonetti/rtnetlink/internal/unix
-# github.com/klauspost/compress v1.18.0
-## explicit; go 1.22
+# github.com/klauspost/compress v1.18.1
+## explicit; go 1.23
 github.com/klauspost/compress
 github.com/klauspost/compress/fse
 github.com/klauspost/compress/huff0
@@ -705,8 +706,8 @@ github.com/tailscale/peercred
 ## explicit; go 1.24.0
 github.com/tailscale/setec/client/setec
 github.com/tailscale/setec/types/api
-# github.com/tailscale/squibble v0.0.0-20250108170732-a4ca58afa694
-## explicit; go 1.23
+# github.com/tailscale/squibble v0.0.0-20251030164342-4d5df9caa993
+## explicit; go 1.24.0
 github.com/tailscale/squibble
 # github.com/tailscale/tailsql v0.0.0-20250421235516-02f85f087b97
 ## explicit; go 1.24.0

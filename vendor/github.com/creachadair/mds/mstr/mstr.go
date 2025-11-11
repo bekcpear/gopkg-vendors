@@ -60,6 +60,7 @@ func Split(s, sep string) []string {
 // "a" vs. "12") the comparison falls back to lexicographic.
 //
 // CompareNatural returns -1 if a < b, 0 if a == b, and +1 if a > b.
+// It does not allocate memory.
 func CompareNatural(a, b string) int {
 	for a != "" && b != "" {
 		va, ra, aok := parseInt(a)
@@ -71,7 +72,9 @@ func CompareNatural(a, b string) int {
 				return c
 			}
 			a, b = ra, rb
-			continue
+
+			// Reaching here, neither suffix can begin with digits (or we would
+			// have consumed them above), so fall through to the non-digit case.
 		} else if aok != bok {
 			// One begins with digits, the other does not.
 			// They cannot be equal, so compare them lexicographically.
