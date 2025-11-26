@@ -53,7 +53,7 @@ default:
 
 var Analyzer = SCAnalyzer.Analyzer
 
-func run(pass *analysis.Pass) (interface{}, error) {
+func run(pass *analysis.Pass) (any, error) {
 	fn := func(node ast.Node) {
 		swtch := node.(*ast.SwitchStmt)
 		if swtch.Tag != nil || len(swtch.Body.List) == 0 {
@@ -109,10 +109,11 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 			edits = append(edits, edit.ReplaceWithString(edit.Range{stmt.List[0].Pos(), stmt.Colon}, strings.Join(values, ", ")))
 		}
-		pos := swtch.Switch + token.Pos(len("switch"))
+		pos := swtch.Body.Lbrace
 		edits = append(edits, edit.ReplaceWithString(edit.Range{pos, pos}, " "+report.Render(pass, x)))
 		report.Report(pass, swtch, fmt.Sprintf("could use tagged switch on %s", report.Render(pass, x)),
-			report.Fixes(edit.Fix("Replace with tagged switch", edits...)))
+			report.Fixes(edit.Fix("Replace with tagged switch", edits...)),
+			report.ShortRange())
 	}
 
 	code.Preorder(pass, fn, (*ast.SwitchStmt)(nil))
