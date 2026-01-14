@@ -15,10 +15,12 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -39,6 +41,14 @@ func withPrefix(f logf, prefix string) logf {
 	return func(format string, args ...interface{}) {
 		f(prefix+format, args...)
 	}
+}
+
+func withPlatformPrefix(f logf, p v1.Platform) logf {
+	var variantSlash string
+	if v := p.Variant; v != "" {
+		variantSlash = "/" + v
+	}
+	return withPrefix(f, fmt.Sprintf("%v/%v%s: ", p.OS, p.Architecture, variantSlash))
 }
 
 // parseFiles parses a comma-separated list of colon-separated pairs
@@ -81,9 +91,12 @@ type buildParams struct {
 	publish     bool
 	ldflags     string
 	gotags      string
+	goarch      []string
 	target      string
 	verbose     bool
 	annotations map[string]string // OCI image annotations
+	volumes     map[string]struct{}
+	envVars     []string // Environment variables to add to image config
 }
 
 func main() {
@@ -92,26 +105,29 @@ func main() {
 		gopaths     = flag.String("gopaths", "", "comma-separated list of go paths in src:dst form")
 		files       = flag.String("files", "", "comma-separated list of static files in src:dst form")
 		repos       = flag.String("repos", "", "comma-separated list of image registries")
+		volumes     = flag.String("volumes", "", "comma-separated list of volumes to add")
 		tagArg      = flag.String("tags", "", "comma-separated tags")
 		ldflagsArg  = flag.String("ldflags", "", "the --ldflags value to pass to go")
 		gotags      = flag.String("gotags", "", "the --tags value to pass to go")
 		push        = flag.Bool("push", false, "publish the image")
-		target      = flag.String("target", "", "build for a specific env (options: flyio, local)")
+		target      = flag.String("target", "", `build for a specific env (options: "", "flyio", "local")`)
+		goarch      = flag.String("goarch", "arm,arm64,amd64,386", "comma-separated list of architectures to build (if supported by --base image)")
 		verbose     = flag.Bool("v", false, "verbose build output")
 		annotations = flag.String("annotations", "", `OCI image annotations https://github.com/opencontainers/image-spec/blob/main/annotations.md.
 		Annotations must be comma separated key=value pairs, i.e key1=val1,key2=val2. For a single image manifest annotations will get added to the image manifest.
 		For an image index (a multi-platform manifest list) annotations will get added to each image manifest as well as the image index.
 		Annotations with empty values are not supported.`)
+		envArg = flag.String("env", "", "comma-separated list of environment variables in KEY=value form to add to the image config")
 	)
 	flag.Parse()
 	if *tagArg == "" {
-		log.Fatal("tags must be set")
+		log.Fatal("--tags must be set")
 	}
 	if *repos == "" {
-		log.Fatal("registries must be set")
+		log.Fatal("--repos must be set")
 	}
 	if *baseImage == "" {
-		log.Fatal("baseImage must be set")
+		log.Fatal("--base must be set")
 	}
 	switch *target {
 	case "", "flyio", "local":
@@ -133,6 +149,15 @@ func main() {
 	if len(paths) == 0 && len(staticFiles) == 0 {
 		log.Fatal("at least one of --files or --gopaths must be set")
 	}
+	var vols map[string]struct{}
+	if *volumes != "" {
+		for vol := range strings.SplitSeq(*volumes, ",") {
+			if vols == nil {
+				vols = make(map[string]struct{})
+			}
+			vols[strings.TrimSpace(vol)] = struct{}{}
+		}
+	}
 
 	bp := &buildParams{
 		baseImage:   *baseImage,
@@ -144,7 +169,10 @@ func main() {
 		gotags:      *gotags,
 		target:      *target,
 		verbose:     *verbose,
+		goarch:      strings.Split(*goarch, ","),
 		annotations: parseAnnotations(*annotations),
+		volumes:     vols,
+		envVars:     parseEnv(*envArg),
 	}
 
 	if err := fetchAndBuild(bp); err != nil {
@@ -170,30 +198,22 @@ func canRunLocal(p v1.Platform) bool {
 	if p.OS != "linux" {
 		return false
 	}
-	if runtime.GOOS == "linux" {
-		return p.Architecture == runtime.GOARCH
-	}
-	if runtime.GOOS == "darwin" {
-		// macOS can run amd64 linux binaries in docker.
-		return p.Architecture == "amd64"
-	}
-	return false
+
+	return p.Architecture == runtime.GOARCH
 }
 
-func verifyPlatform(p v1.Platform, target string) error {
+func (bp *buildParams) verifyPlatform(p v1.Platform) error {
 	if p.OS != "linux" {
 		return fmt.Errorf("unsupported OS: %v", p.OS)
 	}
-	if target == "local" && !canRunLocal(p) {
-		return fmt.Errorf("not required for target %q", target)
+	if bp.target == "local" && !canRunLocal(p) {
+		return fmt.Errorf("not required for target %q", bp.target)
 	}
-	if target == "flyio" && p.Architecture != "amd64" {
-		return fmt.Errorf("not required for target %q", target)
+	if bp.target == "flyio" && p.Architecture != "amd64" {
+		return fmt.Errorf("not required for target %q", bp.target)
 	}
-	switch p.Architecture {
-	case "arm", "arm64", "amd64", "386":
-	default:
-		return fmt.Errorf("unsupported arch: %v", p.Architecture)
+	if !slices.Contains(bp.goarch, p.Architecture) {
+		return fmt.Errorf("architecture %q not in requested goarch values %q", p.Architecture, bp.goarch)
 	}
 	return nil
 }
@@ -235,11 +255,15 @@ func fetchAndBuild(bp *buildParams) error {
 			p.Variant = config.Variant
 		}
 
-		if err := verifyPlatform(p, bp.target); err != nil {
+		if err := bp.verifyPlatform(p); err != nil {
 			return err
 		}
-		logf := withPrefix(logf, fmt.Sprintf("%v/%v: ", p.OS, p.Architecture))
+		logf := withPlatformPrefix(logf, p)
 		img, err := createImageForBase(bp, logf, baseImage, p)
+		if err != nil {
+			return err
+		}
+		img, err = applyEnvVars(img, bp.envVars)
 		if err != nil {
 			return err
 		}
@@ -280,11 +304,14 @@ func fetchAndBuild(bp *buildParams) error {
 	var adds []mutate.IndexAddendum
 	// Try to build images for all supported platforms.
 	for _, id := range im.Manifests {
-		logf := withPrefix(logf, fmt.Sprintf("%v/%v: ", id.Platform.OS, id.Platform.Architecture))
 		if id.Platform == nil {
 			return fmt.Errorf("unknown platform for image: %v", bp.baseImage)
 		}
-		if err := verifyPlatform(*id.Platform, bp.target); err != nil {
+		if id.Platform.OS == "unknown" {
+			continue
+		}
+		logf := withPlatformPrefix(logf, *id.Platform)
+		if err := bp.verifyPlatform(*id.Platform); err != nil {
 			logf("skipping: %v", err)
 			continue
 		}
@@ -302,14 +329,31 @@ func fetchAndBuild(bp *buildParams) error {
 		// Ensure that any provided OCI annotations are added to each OCI image manifest.
 		img = mutate.Annotations(img, bp.annotations).(v1.Image)
 
-		if args := flag.Args(); len(args) > 0 {
-			img, err = mutate.Config(img, v1.Config{
-				Cmd: args,
+		img, err = applyEnvVars(img, bp.envVars)
+		if err != nil {
+			return err
+		}
+
+		if bp.volumes != nil {
+			img, err = mutateConfig(img, func(c *v1.Config) error {
+				c.Volumes = bp.volumes
+				return nil
 			})
 			if err != nil {
 				return err
 			}
 		}
+
+		if args := flag.Args(); len(args) > 0 {
+			img, err = mutateConfig(img, func(c *v1.Config) error {
+				c.Cmd = args
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+
 		d, err := img.Digest()
 		if err != nil {
 			return err
@@ -391,11 +435,8 @@ func goarm(platform v1.Platform) (string, error) {
 		return "", fmt.Errorf("not arm: %v", platform.Architecture)
 	}
 	v := platform.Variant
-	if len(v) != 2 {
-		return "", fmt.Errorf("unexpected varient: %v", v)
-	}
-	if v[0] != 'v' || !('0' <= v[1] && v[1] <= '9') {
-		return "", fmt.Errorf("unexpected varient: %v", v)
+	if len(v) != 2 || v[0] != 'v' || !('0' <= v[1] && v[1] <= '9') {
+		return "", fmt.Errorf("unexpected ARM variant %q", v)
 	}
 	return string(v[1]), nil
 }
@@ -623,4 +664,75 @@ func parseAnnotations(s string) map[string]string {
 		annotations[kv[0]] = kv[1]
 	}
 	return annotations
+}
+
+// parseEnv accepts a string with comma separated KEY=value pairs of environment variables
+// and returns them as a slice of "KEY=value" strings.
+func parseEnv(s string) []string {
+	if len(s) == 0 {
+		return nil
+	}
+	var envVars []string
+	for env := range strings.SplitSeq(s, ",") {
+		env = strings.TrimSpace(env)
+		if len(env) == 0 {
+			continue
+		}
+		if !strings.Contains(env, "=") {
+			continue
+		}
+		envVars = append(envVars, env)
+	}
+	return envVars
+}
+
+// applyEnvVars applies environment variables to an image config, merging with existing env vars.
+// New env vars override existing ones with the same key.
+func applyEnvVars(img v1.Image, newEnvVars []string) (v1.Image, error) {
+	if len(newEnvVars) == 0 {
+		return img, nil
+	}
+	config, err := img.ConfigFile()
+	if err != nil {
+		return nil, fmt.Errorf("error getting config: %w", err)
+	}
+
+	envMap := make(map[string]string)
+	for _, kv := range config.Config.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			envMap[k] = v
+		}
+	}
+
+	for _, env := range newEnvVars {
+		if k, v, ok := strings.Cut(env, "="); ok {
+			envMap[k] = v
+		}
+	}
+
+	// Apply the merged env vars
+	return mutateConfig(img, func(c *v1.Config) error {
+		c.Env = nil
+		for _, k := range slices.Sorted(maps.Keys(envMap)) {
+			c.Env = append(c.Env, k+"="+envMap[k])
+		}
+		return nil
+	})
+}
+
+// mutateConfig returns img with its config mutated by f.
+//
+// The pointer given to f is a deep copy of the existing config,
+// so any fields untouched by f will be preserved.
+func mutateConfig(img v1.Image, f func(*v1.Config) error) (v1.Image, error) {
+	config, err := img.ConfigFile()
+	if err != nil {
+		return nil, fmt.Errorf("error getting config: %w", err)
+	}
+
+	confCopy := config.DeepCopy()
+	if err := f(&confCopy.Config); err != nil {
+		return nil, err
+	}
+	return mutate.Config(img, confCopy.Config)
 }
