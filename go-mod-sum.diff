@@ -1,5 +1,5 @@
 diff --git a/go.mod b/go.mod
-index 9ff1d55..26b7f5f 100644
+index 4861799..a06c8b0 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -24,7 +24,7 @@ require (
@@ -7,8 +7,8 @@ index 9ff1d55..26b7f5f 100644
  	github.com/pion/transport/v2 v2.2.10
  	github.com/pires/go-proxyproto v0.8.1
 -	github.com/quic-go/quic-go v0.55.0
-+	github.com/quic-go/quic-go v0.58.0
- 	github.com/refraction-networking/utls v1.8.1
++	github.com/quic-go/quic-go v0.59.0
+ 	github.com/refraction-networking/utls v1.8.2
  	github.com/seiflotfy/cuckoofilter v0.0.0-20220411075957-e3b120b3f5fb
  	github.com/stretchr/testify v1.11.1
 @@ -79,7 +79,7 @@ require (
@@ -21,7 +21,7 @@ index 9ff1d55..26b7f5f 100644
  	github.com/rs/cors v1.7.0 // indirect
  	github.com/secure-io/siv-go v0.0.0-20180922214919-5ff40651e2c4 // indirect
 diff --git a/go.sum b/go.sum
-index b05fdc6..7c99b7f 100644
+index c6b9aea..814ddc9 100644
 --- a/go.sum
 +++ b/go.sum
 @@ -438,10 +438,10 @@ github.com/prometheus/procfs v0.0.8/go.mod h1:7Qr8sr6344vo1JqZ6HhLceV9o3AJ1Ff+Gx
@@ -34,8 +34,8 @@ index b05fdc6..7c99b7f 100644
 -github.com/quic-go/quic-go v0.55.0/go.mod h1:DR51ilwU1uE164KuWXhinFcKWGlEjzys2l8zUl5Ss1U=
 +github.com/quic-go/qpack v0.6.0 h1:g7W+BMYynC1LbYLSqRt8PBg5Tgwxn214ZZR34VIOjz8=
 +github.com/quic-go/qpack v0.6.0/go.mod h1:lUpLKChi8njB4ty2bFLX2x4gzDqXwUpaO1DP9qMDZII=
-+github.com/quic-go/quic-go v0.58.0 h1:ggY2pvZaVdB9EyojxL1p+5mptkuHyX5MOSv4dgWF4Ug=
-+github.com/quic-go/quic-go v0.58.0/go.mod h1:upnsH4Ju1YkqpLXC305eW3yDZ4NfnNbmQRCMWS58IKU=
++github.com/quic-go/quic-go v0.59.0 h1:OLJkp1Mlm/aS7dpKgTc6cnpynnD2Xg7C1pwL6vy/SAw=
++github.com/quic-go/quic-go v0.59.0/go.mod h1:upnsH4Ju1YkqpLXC305eW3yDZ4NfnNbmQRCMWS58IKU=
  github.com/rcrowley/go-metrics v0.0.0-20181016184325-3113b8401b8a/go.mod h1:bCqnVzQkZxMG4s8nGwiZ5l3QUCyqpo9Y+/ZMZ9VjZe4=
- github.com/refraction-networking/utls v1.8.1 h1:yNY1kapmQU8JeM1sSw2H2asfTIwWxIkrMJI0pRUOCAo=
- github.com/refraction-networking/utls v1.8.1/go.mod h1:jkSOEkLqn+S/jtpEHPOsVv/4V4EVnelwbMQl4vCWXAM=
+ github.com/refraction-networking/utls v1.8.2 h1:j4Q1gJj0xngdeH+Ox/qND11aEfhpgoEvV+S9iJ2IdQo=
+ github.com/refraction-networking/utls v1.8.2/go.mod h1:jkSOEkLqn+S/jtpEHPOsVv/4V4EVnelwbMQl4vCWXAM=
