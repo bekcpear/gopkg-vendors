@@ -1,5 +1,5 @@
 diff --git a/go.mod b/go.mod
-index 4861799..a06c8b0 100644
+index 45cd7a5..d242b7b 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -24,7 +24,7 @@ require (
@@ -21,7 +21,7 @@ index 4861799..a06c8b0 100644
  	github.com/rs/cors v1.7.0 // indirect
  	github.com/secure-io/siv-go v0.0.0-20180922214919-5ff40651e2c4 // indirect
 diff --git a/go.sum b/go.sum
-index c6b9aea..814ddc9 100644
+index 7beeec5..08533d0 100644
 --- a/go.sum
 +++ b/go.sum
 @@ -438,10 +438,10 @@ github.com/prometheus/procfs v0.0.8/go.mod h1:7Qr8sr6344vo1JqZ6HhLceV9o3AJ1Ff+Gx
