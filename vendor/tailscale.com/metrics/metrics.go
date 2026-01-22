@@ -11,7 +11,6 @@ import (
 	"io"
 	"slices"
 	"strings"
-	"sync"
 
 	"tailscale.com/syncs"
 )
@@ -30,6 +29,21 @@ type Set struct {
 	expvar.Map
 }
 
+// NewSet creates and publishes a new Set with the given name.
+func NewSet(name string) *Set {
+	s := &Set{}
+	expvar.Publish(name, s)
+	return s
+}
+
+// NewLabelMap creates a new LabelMap metric with the given
+// metric name and label name, and adds it to the Set.
+func (s *Set) NewLabelMap(metric, label string) *LabelMap {
+	m := &LabelMap{Label: label}
+	s.Set(metric, m)
+	return m
+}
+
 // LabelMap is a string-to-Var map variable that satisfies the
 // expvar.Var interface.
 //
@@ -41,7 +55,15 @@ type LabelMap struct {
 	Label string
 	expvar.Map
 	// shardedIntMu orders the initialization of new shardedint keys
-	shardedIntMu sync.Mutex
+	shardedIntMu syncs.Mutex
+}
+
+// NewLabelMap creates and publishes a new LabelMap metric with the given
+// metric name and label name.
+func NewLabelMap(metric, label string) *LabelMap {
+	m := &LabelMap{Label: label}
+	expvar.Publish(metric, m)
+	return m
 }
 
 // SetInt64 sets the *Int value stored under the given map key.

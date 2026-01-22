@@ -226,7 +226,7 @@ func (s *Server) NewMux() *http.ServeMux {
 
 	// N.B. We have to strip the prefix back off for the static files, since the
 	// embedded FS thinks it is rooted at "/".
-	mux.Handle(s.prefix+"/static/", http.StripPrefix(s.prefix, http.FileServer(http.FS(staticFS))))
+	mux.Handle(s.prefix+"/static/", http.StripPrefix(s.prefix, http.FileServerFS(staticFS)))
 	return mux
 }
 
@@ -596,9 +596,9 @@ func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request, src, query st
 		caller = whois.UserProfile.LoginName
 	}
 
-	// If the caller wants the UI and didn't send a query, allow it.
+	// If the caller wants the UI or metadata, and didn't send a query, allow it.
 	// The source does not matter when there is no query.
-	if r.URL.Path == "/" && query == "" {
+	if (r.URL.Path == "/" || r.URL.Path == "/meta") && query == "" {
 		return caller, true
 	}
 	if err := s.authorize(src, whois); err != nil {

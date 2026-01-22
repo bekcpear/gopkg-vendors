@@ -3,6 +3,7 @@ package xsync
 import (
 	"fmt"
 	"hash/maphash"
+	"iter"
 	"math"
 	"runtime"
 	"strings"
@@ -647,10 +648,10 @@ func (m *Map[K, V]) resize(knownTable *mapTable[K, V], hint mapResizeHint) {
 		shrinkThreshold := int64((tableLen * entriesPerMapBucket) / mapShrinkFraction)
 		if tableLen > m.minTableLen && table.sumSize() <= shrinkThreshold {
 			// Shrink the table with factor of 2.
-			// It's fine to generate a new seed since full locking
-			// is required anyway.
+			// Analogous to growth, we must preserve the seed to ensure stable
+			// hash mapping, enabling lock-free writes to destination buckets.
 			m.totalShrinks.Add(1)
-			newTable = newMapTable[K, V](tableLen>>1, maphash.MakeSeed())
+			newTable = newMapTable[K, V](tableLen>>1, table.seed)
 		} else {
 			// No need to shrink. Wake up all waiters and give up.
 			m.resizeMu.Lock()
@@ -732,29 +733,33 @@ func (m *Map[K, V]) helpResize(seq uint64) {
 func (m *Map[K, V]) transfer(table, newTable *mapTable[K, V]) {
 	tableLen := len(table.buckets)
 	newTableLen := len(newTable.buckets)
-	stride := max((tableLen>>3)/int(maxResizeHelpers), minResizeTransferStride)
+	// Determines the concurrent task range for destination buckets.
+	// We iterate based on these properties to avoid locking destination
+	// buckets:
+	// - Grow (Pow2):   baseLen == tableLen
+	//   Entries from source bucket i move to dest buckets i and i+baseLen
+	// - Shrink (Pow2): baseLen == newTableLen
+	//   Entries from source buckets i and i+baseLen move to dest bucket i
+	// By iterating 0..baseLen and processing all possible source buckets
+	// (srcIdx += baseLen) in the inner loop, a single goroutine exclusively
+	// owns the write operations for its assigned destination buckets.
+	baseLen := min(tableLen, newTableLen)
+	stride := max((baseLen>>3)/int(maxResizeHelpers), minResizeTransferStride)
 	for {
 		// Claim work by incrementing resizeIdx.
 		nextIdx := m.resizeIdx.Add(int64(stride))
 		start := max(0, int(nextIdx)-stride)
-		if start > tableLen {
+		if start >= baseLen {
 			break
 		}
-		end := min(int(nextIdx), tableLen)
+		end := min(int(nextIdx), baseLen)
 		// Transfer buckets in this range.
 		total := 0
-		if newTableLen > tableLen {
-			// We're growing the table with 2x multiplier, so entries from a N bucket can
-			// only be transferred to N and 2*N buckets in the new table. Thus, destination
-			// buckets written by the resize helpers don't intersect, so we don't need to
-			// acquire locks in the destination buckets.
-			for i := start; i < end; i++ {
-				total += transferBucketUnsafe(&table.buckets[i], newTable)
-			}
-		} else {
-			// We're shrinking the table, so all locks must be acquired.
-			for i := start; i < end; i++ {
-				total += transferBucket(&table.buckets[i], newTable)
+		for i := start; i < end; i++ {
+			// Visit all source buckets that map to this destination bucket.
+			// When growing, runs once. When shrinking, runs twice.
+			for srcIdx := i; srcIdx < tableLen; srcIdx += baseLen {
+				total += transferBucketUnsafe(&table.buckets[srcIdx], newTable)
 			}
 		}
 		// The exact counter stripe doesn't matter here, so pick up the one
@@ -771,7 +776,7 @@ func transferBucketUnsafe[K comparable, V any](
 	rootb := b
 	rootb.mu.Lock()
 	for {
-		for i := 0; i < entriesPerMapBucket; i++ {
+		for i := range entriesPerMapBucket {
 			if eptr := b.entries[i]; eptr != nil {
 				e := (*entry[K, V])(eptr)
 				hash := maphash.Comparable(destTable.seed, e.key)
@@ -789,31 +794,11 @@ func transferBucketUnsafe[K comparable, V any](
 	}
 }
 
-func transferBucket[K comparable, V any](
-	b *bucketPadded,
-	destTable *mapTable[K, V],
-) (copied int) {
-	rootb := b
-	rootb.mu.Lock()
-	for {
-		for i := 0; i < entriesPerMapBucket; i++ {
-			if eptr := b.entries[i]; eptr != nil {
-				e := (*entry[K, V])(eptr)
-				hash := maphash.Comparable(destTable.seed, e.key)
-				bidx := uint64(len(destTable.buckets)-1) & h1(hash)
-				destb := &destTable.buckets[bidx]
-				destb.mu.Lock()
-				appendToBucket(h2(hash), e, destb)
-				destb.mu.Unlock()
-				copied++
-			}
-		}
-		if b.next == nil {
-			rootb.mu.Unlock()
-			return
-		}
-		b = (*bucketPadded)(b.next)
-	}
+// All is similar to [Range], but returns an [iter.Seq2], so is compatible with
+// Go 1.23+ iterators. All of the same caveats and behaviour from [Range] apply
+// to All.
+func (m *Map[K, V]) All() iter.Seq2[K, V] {
+	return m.Range
 }
 
 // Range calls f sequentially for each key and value present in the
@@ -840,7 +825,7 @@ func (m *Map[K, V]) Range(f func(key K, value V) bool) {
 		// the intermediate slice.
 		rootb.mu.Lock()
 		for {
-			for i := 0; i < entriesPerMapBucket; i++ {
+			for i := range entriesPerMapBucket {
 				if b.entries[i] != nil {
 					bentries = append(bentries, (*entry[K, V])(b.entries[i]))
 				}
@@ -878,7 +863,7 @@ func (m *Map[K, V]) Size() int {
 // either locked or exclusively written to by the helper during resize.
 func appendToBucket[K comparable, V any](h2 uint8, e *entry[K, V], b *bucketPadded) {
 	for {
-		for i := 0; i < entriesPerMapBucket; i++ {
+		for i := range entriesPerMapBucket {
 			if b.entries[i] == nil {
 				b.meta = setByte(b.meta, h2, i)
 				b.entries[i] = unsafe.Pointer(e)
@@ -897,7 +882,7 @@ func appendToBucket[K comparable, V any](h2 uint8, e *entry[K, V], b *bucketPadd
 }
 
 func (table *mapTable[K, V]) addSize(bucketIdx uint64, delta int) {
-	cidx := uint64(len(table.size)-1) & bucketIdx
+	cidx := bucketIdx & uint64(len(table.size)-1)
 	atomic.AddInt64(&table.size[cidx].c, int64(delta))
 }
 
@@ -997,7 +982,7 @@ func (m *Map[K, V]) Stats() MapStats {
 		for {
 			nentriesLocal := 0
 			stats.Capacity += entriesPerMapBucket
-			for i := 0; i < entriesPerMapBucket; i++ {
+			for i := range entriesPerMapBucket {
 				if atomic.LoadPointer(&b.entries[i]) != nil {
 					stats.Size++
 					nentriesLocal++

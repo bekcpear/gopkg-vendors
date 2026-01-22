@@ -1,6 +1,8 @@
 // Copyright (c) Tailscale Inc & AUTHORS
 // SPDX-License-Identifier: BSD-3-Clause
 
+//go:build !ts_omit_clientmetrics
+
 // Package clientmetric provides client-side metrics whose values
 // get occasionally logged.
 package clientmetric
@@ -18,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/util/set"
 )
 
@@ -54,6 +57,20 @@ const (
 	TypeGauge Type = iota
 	TypeCounter
 )
+
+// MetricUpdate requests that a client metric value be updated.
+//
+// This is the request body sent to /localapi/v0/upload-client-metrics.
+type MetricUpdate struct {
+	Name  string `json:"name"`
+	Type  string `json:"type"`  // one of "counter" or "gauge"
+	Value int    `json:"value"` // amount to increment by or set
+
+	// Op indicates if Value is added to the existing metric value,
+	// or if the metric is set to Value.
+	// One of "add" or "set". If empty, defaults to "add".
+	Op string `json:"op"`
+}
 
 // Metric is an integer metric value that's tracked over time.
 //
@@ -130,15 +147,20 @@ func (m *Metric) Publish() {
 	metrics[m.name] = m
 	sortedDirty = true
 
-	if m.f != nil {
-		lastLogVal = append(lastLogVal, scanEntry{f: m.f})
-	} else {
+	if m.f == nil {
 		if len(valFreeList) == 0 {
 			valFreeList = make([]int64, 256)
 		}
 		m.v = &valFreeList[0]
 		valFreeList = valFreeList[1:]
-		lastLogVal = append(lastLogVal, scanEntry{v: m.v})
+	}
+
+	if buildfeatures.HasLogTail {
+		if m.f != nil {
+			lastLogVal = append(lastLogVal, scanEntry{f: m.f})
+		} else {
+			lastLogVal = append(lastLogVal, scanEntry{v: m.v})
+		}
 	}
 
 	m.regIdx = len(unsorted)
@@ -319,6 +341,9 @@ const (
 //   - increment a metric: (decrements if negative)
 //     'I' + hex(varint(wireid)) + hex(varint(value))
 func EncodeLogTailMetricsDelta() string {
+	if !buildfeatures.HasLogTail {
+		return ""
+	}
 	mu.Lock()
 	defer mu.Unlock()
 

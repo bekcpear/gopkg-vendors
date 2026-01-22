@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"tailscale.com/net/tsaddr"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tka"
 	"tailscale.com/types/key"
@@ -26,14 +27,9 @@ import (
 // The fields should all be considered read-only. They might
 // alias parts of previous NetworkMap values.
 type NetworkMap struct {
-	SelfNode   tailcfg.NodeView
-	AllCaps    set.Set[tailcfg.NodeCapability] // set version of SelfNode.Capabilities + SelfNode.CapMap
-	NodeKey    key.NodePublic
-	PrivateKey key.NodePrivate
-	Expiry     time.Time
-	// Name is the DNS name assigned to this node.
-	// It is the MapResponse.Node.Name value and ends with a period.
-	Name string
+	SelfNode tailcfg.NodeView
+	AllCaps  set.Set[tailcfg.NodeCapability] // set version of SelfNode.Capabilities + SelfNode.CapMap
+	NodeKey  key.NodePublic
 
 	MachineKey key.MachinePublic
 
@@ -159,8 +155,11 @@ func (nm *NetworkMap) SelfNodeOrZero() tailcfg.NodeView {
 // AnyPeersAdvertiseRoutes reports whether any peer is advertising non-exit node routes.
 func (nm *NetworkMap) AnyPeersAdvertiseRoutes() bool {
 	for _, p := range nm.Peers {
-		if p.PrimaryRoutes().Len() > 0 {
-			return true
+		// NOTE: (ChaosInTheCRD) if the peer being advertised is a tailscale ip, we ignore it in this check
+		for _, r := range p.PrimaryRoutes().All() {
+			if !tsaddr.IsTailscaleIP(r.Addr()) || !r.IsSingleIP() {
+				return true
+			}
 		}
 	}
 	return false
@@ -236,10 +235,25 @@ func MagicDNSSuffixOfNodeName(nodeName string) string {
 //
 // It will neither start nor end with a period.
 func (nm *NetworkMap) MagicDNSSuffix() string {
-	if nm == nil {
+	return MagicDNSSuffixOfNodeName(nm.SelfName())
+}
+
+// SelfName returns nm.SelfNode.Name, or the empty string
+// if nm is nil or nm.SelfNode is invalid.
+func (nm *NetworkMap) SelfName() string {
+	if nm == nil || !nm.SelfNode.Valid() {
 		return ""
 	}
-	return MagicDNSSuffixOfNodeName(nm.Name)
+	return nm.SelfNode.Name()
+}
+
+// SelfKeyExpiry returns nm.SelfNode.KeyExpiry, or the zero
+// value if nil or nm.SelfNode is invalid.
+func (nm *NetworkMap) SelfKeyExpiry() time.Time {
+	if nm == nil || !nm.SelfNode.Valid() {
+		return time.Time{}
+	}
+	return nm.SelfNode.KeyExpiry()
 }
 
 // DomainName returns the name of the NetworkMap's
@@ -250,6 +264,22 @@ func (nm *NetworkMap) DomainName() string {
 		return ""
 	}
 	return nm.Domain
+}
+
+// TailnetDisplayName returns the admin-editable name contained in
+// NodeAttrTailnetDisplayName. If the capability is not present it
+// returns an empty string.
+func (nm *NetworkMap) TailnetDisplayName() string {
+	if nm == nil || !nm.SelfNode.Valid() {
+		return ""
+	}
+
+	tailnetDisplayNames, err := tailcfg.UnmarshalNodeCapViewJSON[string](nm.SelfNode.CapMap(), tailcfg.NodeAttrTailnetDisplayName)
+	if err != nil || len(tailnetDisplayNames) == 0 {
+		return ""
+	}
+
+	return tailnetDisplayNames[0]
 }
 
 // HasSelfCapability reports whether nm.SelfNode contains capability c.

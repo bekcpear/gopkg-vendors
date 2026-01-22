@@ -11,9 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
-	"runtime"
 	"slices"
-	"sync"
 	"time"
 	"unsafe"
 
@@ -21,7 +19,6 @@ import (
 	"tailscale.com/derp"
 	"tailscale.com/derp/derphttp"
 	"tailscale.com/health"
-	"tailscale.com/logtail/backoff"
 	"tailscale.com/net/dnscache"
 	"tailscale.com/net/netcheck"
 	"tailscale.com/net/tsaddr"
@@ -30,9 +27,9 @@ import (
 	"tailscale.com/tstime/mono"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
+	"tailscale.com/util/backoff"
 	"tailscale.com/util/mak"
 	"tailscale.com/util/rands"
-	"tailscale.com/util/sysresources"
 	"tailscale.com/util/testenv"
 )
 
@@ -94,7 +91,7 @@ func (c *Conn) fallbackDERPRegionForPeer(peer key.NodePublic) (regionID int) {
 type activeDerp struct {
 	c       *derphttp.Client
 	cancel  context.CancelFunc
-	writeCh chan<- derpWriteRequest
+	writeCh chan derpWriteRequest
 	// lastWrite is the time of the last request for its write
 	// channel (currently even if there was no write).
 	// It is always non-nil and initialized to a non-zero Time.
@@ -219,17 +216,28 @@ func (c *Conn) derpRegionCodeLocked(regionID int) string {
 	return ""
 }
 
+// setHomeDERPGaugeLocked updates the home DERP gauge metric.
+//
+// c.mu must be held.
+func (c *Conn) setHomeDERPGaugeLocked(derpNum int) {
+	if c.homeDERPGauge != nil {
+		c.homeDERPGauge.Set(float64(derpNum))
+	}
+}
+
 // c.mu must NOT be held.
 func (c *Conn) setNearestDERP(derpNum int) (wantDERP bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.wantDerpLocked() {
 		c.myDerp = 0
+		c.setHomeDERPGaugeLocked(0)
 		c.health.SetMagicSockDERPHome(0, c.homeless)
 		return false
 	}
 	if c.homeless {
 		c.myDerp = 0
+		c.setHomeDERPGaugeLocked(0)
 		c.health.SetMagicSockDERPHome(0, c.homeless)
 		return false
 	}
@@ -241,6 +249,7 @@ func (c *Conn) setNearestDERP(derpNum int) (wantDERP bool) {
 		metricDERPHomeChange.Add(1)
 	}
 	c.myDerp = derpNum
+	c.setHomeDERPGaugeLocked(derpNum)
 	c.health.SetMagicSockDERPHome(derpNum, c.homeless)
 
 	if c.privateKey.IsZero() {
@@ -282,59 +291,20 @@ func (c *Conn) goDerpConnect(regionID int) {
 	go c.derpWriteChanForRegion(regionID, key.NodePublic{})
 }
 
-var (
-	bufferedDerpWrites     int
-	bufferedDerpWritesOnce sync.Once
-)
-
-// bufferedDerpWritesBeforeDrop returns how many packets writes can be queued
-// up the DERP client to write on the wire before we start dropping.
-func bufferedDerpWritesBeforeDrop() int {
-	// For mobile devices, always return the previous minimum value of 32;
-	// we can do this outside the sync.Once to avoid that overhead.
-	if runtime.GOOS == "ios" || runtime.GOOS == "android" {
-		return 32
-	}
-
-	bufferedDerpWritesOnce.Do(func() {
-		// Some rough sizing: for the previous fixed value of 32, the
-		// total consumed memory can be:
-		// = numDerpRegions * messages/region * sizeof(message)
-		//
-		// For sake of this calculation, assume 100 DERP regions; at
-		// time of writing (2023-04-03), we have 24.
-		//
-		// A reasonable upper bound for the worst-case average size of
-		// a message is a *disco.CallMeMaybe message with 16 endpoints;
-		// since sizeof(netip.AddrPort) = 32, that's 512 bytes. Thus:
-		// = 100 * 32 * 512
-		// = 1638400 (1.6MiB)
-		//
-		// On a reasonably-small node with 4GiB of memory that's
-		// connected to each region and handling a lot of load, 1.6MiB
-		// is about 0.04% of the total system memory.
-		//
-		// For sake of this calculation, then, let's double that memory
-		// usage to 0.08% and scale based on total system memory.
-		//
-		// For a 16GiB Linux box, this should buffer just over 256
-		// messages.
-		systemMemory := sysresources.TotalMemory()
-		memoryUsable := float64(systemMemory) * 0.0008
-
-		const (
-			theoreticalDERPRegions  = 100
-			messageMaximumSizeBytes = 512
-		)
-		bufferedDerpWrites = int(memoryUsable / (theoreticalDERPRegions * messageMaximumSizeBytes))
-
-		// Never drop below the previous minimum value.
-		if bufferedDerpWrites < 32 {
-			bufferedDerpWrites = 32
-		}
-	})
-	return bufferedDerpWrites
-}
+// derpWriteQueueDepth is the depth of the in-process write queue to a single
+// DERP region. DERP connections are TCP, and so the actual write queue depth is
+// substantially larger than this suggests - often scaling into megabytes
+// depending on dynamic TCP parameters and platform TCP tuning. This queue is
+// excess of the TCP buffer depth, which means it's almost pure buffer bloat,
+// and does not want to be deep - if there are key situations where a node can't
+// keep up, either the TCP link to DERP is too slow, or there is a
+// synchronization issue in the write path, fixes should be focused on those
+// paths, rather than extending this queue.
+// TODO(raggi): make this even shorter, ideally this should be a fairly direct
+// line into a socket TCP buffer. The challenge at present is that connect and
+// reconnect are in the write path and we don't want to block other write
+// operations on those.
+const derpWriteQueueDepth = 32
 
 // derpWriteChanForRegion returns a channel to which to send DERP packet write
 // requests. It creates a new DERP connection to regionID if necessary.
@@ -344,7 +314,7 @@ func bufferedDerpWritesBeforeDrop() int {
 //
 // It returns nil if the network is down, the Conn is closed, or the regionID is
 // not known.
-func (c *Conn) derpWriteChanForRegion(regionID int, peer key.NodePublic) chan<- derpWriteRequest {
+func (c *Conn) derpWriteChanForRegion(regionID int, peer key.NodePublic) chan derpWriteRequest {
 	if c.networkDown() {
 		return nil
 	}
@@ -429,7 +399,7 @@ func (c *Conn) derpWriteChanForRegion(regionID int, peer key.NodePublic) chan<- 
 	dc.DNSCache = dnscache.Get()
 
 	ctx, cancel := context.WithCancel(c.connCtx)
-	ch := make(chan derpWriteRequest, bufferedDerpWritesBeforeDrop())
+	ch := make(chan derpWriteRequest, derpWriteQueueDepth)
 
 	ad.c = dc
 	ad.writeCh = ch
@@ -759,8 +729,8 @@ func (c *Conn) processDERPReadResult(dm derpReadResult, b []byte) (n int, ep *en
 	}
 
 	ep.noteRecvActivity(srcAddr, mono.Now())
-	if stats := c.stats.Load(); stats != nil {
-		stats.UpdateRxPhysical(ep.nodeAddr, srcAddr.ap, 1, dm.n)
+	if update := c.connCounter.Load(); update != nil {
+		update(0, netip.AddrPortFrom(ep.nodeAddr, 0), srcAddr.ap, 1, dm.n, true)
 	}
 
 	c.metrics.inboundPacketsDERPTotal.Add(1)
@@ -878,7 +848,6 @@ func (c *Conn) maybeCloseDERPsOnRebind(okayLocalIPs []netip.Prefix) {
 			c.closeOrReconnectDERPLocked(regionID, "rebind-default-route-change")
 			continue
 		}
-		regionID := regionID
 		dc := ad.c
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

@@ -20,6 +20,7 @@ import (
 
 	"tailscale.com/envknob"
 	"tailscale.com/net/netx"
+	"tailscale.com/syncs"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/cloudenv"
 	"tailscale.com/util/singleflight"
@@ -97,7 +98,7 @@ type Resolver struct {
 
 	sf singleflight.Group[string, ipRes]
 
-	mu      sync.Mutex
+	mu      syncs.Mutex
 	ipCache map[string]ipCacheEntry
 }
 
@@ -204,6 +205,9 @@ func (r *Resolver) LookupIP(ctx context.Context, host string) (ip, v6 netip.Addr
 				v6 = naIP
 			}
 			allIPs = append(allIPs, naIP)
+		}
+		if !ip.IsValid() && v6.IsValid() {
+			ip = v6
 		}
 		r.dlogf("returning %d static results", len(allIPs))
 		return
@@ -471,7 +475,7 @@ type dialCall struct {
 	d                            *dialer
 	network, address, host, port string
 
-	mu    sync.Mutex           // lock ordering: dialer.mu, then dialCall.mu
+	mu    syncs.Mutex          // lock ordering: dialer.mu, then dialCall.mu
 	fails map[netip.Addr]error // set of IPs that failed to dial thus far
 }
 

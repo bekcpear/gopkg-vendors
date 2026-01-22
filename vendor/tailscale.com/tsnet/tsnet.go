@@ -27,11 +27,16 @@ import (
 	"time"
 
 	"tailscale.com/client/local"
-	"tailscale.com/client/tailscale"
 	"tailscale.com/control/controlclient"
 	"tailscale.com/envknob"
+	_ "tailscale.com/feature/c2n"
+	_ "tailscale.com/feature/condregister/identityfederation"
+	_ "tailscale.com/feature/condregister/oauthkey"
+	_ "tailscale.com/feature/condregister/portmapper"
+	_ "tailscale.com/feature/condregister/useproxy"
 	"tailscale.com/health"
 	"tailscale.com/hostinfo"
+	"tailscale.com/internal/client/tailscale"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnauth"
 	"tailscale.com/ipn/ipnlocal"
@@ -111,6 +116,37 @@ type Server struct {
 	// used.
 	AuthKey string
 
+	// ClientSecret, if non-empty, is the OAuth client secret
+	// that will be used to generate authkeys via OAuth. It
+	// will be preferred over the TS_CLIENT_SECRET environment
+	// variable. If the node is already created (from state
+	// previously stored in Store), then this field is not
+	// used.
+	ClientSecret string
+
+	// ClientID, if non-empty, is the client ID used to generate
+	// authkeys via workload identity federation. It will be
+	// preferred over the TS_CLIENT_ID environment variable.
+	// If the node is already created (from state previously
+	// stored in Store), then this field is not used.
+	ClientID string
+
+	// IDToken, if non-empty, is the ID token from the identity
+	// provider to exchange with the control server for workload
+	// identity federation. It will be preferred over the
+	// TS_ID_TOKEN environment variable. If the node is already
+	// created (from state previously stored in Store), then this
+	// field is not used.
+	IDToken string
+
+	// Audience, if non-empty, is the audience to use when requesting
+	// an ID token from a well-known identity provider to exchange
+	// with the control server for workload identity federation. It
+	// will be preferred over the TS_AUDIENCE environment variable. If
+	// the node is already created (from state previously stored in Store),
+	// then this field is not used.
+	Audience string
+
 	// ControlURL optionally specifies the coordination server URL.
 	// If empty, the Tailscale default is used.
 	ControlURL string
@@ -124,27 +160,34 @@ type Server struct {
 	// field at zero unless you know what you are doing.
 	Port uint16
 
+	// AdvertiseTags specifies tags that should be applied to this node, for
+	// purposes of ACL enforcement. These can be referenced from the ACL policy
+	// document. Note that advertising a tag on the client doesn't guarantee
+	// that the control server will allow the node to adopt that tag.
+	AdvertiseTags []string
+
 	getCertForTesting func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 
-	initOnce         sync.Once
-	initErr          error
-	lb               *ipnlocal.LocalBackend
-	sys              *tsd.System
-	netstack         *netstack.Impl
-	netMon           *netmon.Monitor
-	rootPath         string // the state directory
-	hostname         string
-	shutdownCtx      context.Context
-	shutdownCancel   context.CancelFunc
-	proxyCred        string        // SOCKS5 proxy auth for loopbackListener
-	localAPICred     string        // basic auth password for loopbackListener
-	loopbackListener net.Listener  // optional loopback for localapi and proxies
-	localAPIListener net.Listener  // in-memory, used by localClient
-	localClient      *local.Client // in-memory
-	localAPIServer   *http.Server
-	logbuffer        *filch.Filch
-	logtail          *logtail.Logger
-	logid            logid.PublicID
+	initOnce             sync.Once
+	initErr              error
+	lb                   *ipnlocal.LocalBackend
+	sys                  *tsd.System
+	netstack             *netstack.Impl
+	netMon               *netmon.Monitor
+	rootPath             string // the state directory
+	hostname             string
+	shutdownCtx          context.Context
+	shutdownCancel       context.CancelFunc
+	proxyCred            string        // SOCKS5 proxy auth for loopbackListener
+	localAPICred         string        // basic auth password for loopbackListener
+	loopbackListener     net.Listener  // optional loopback for localapi and proxies
+	localAPIListener     net.Listener  // in-memory, used by localClient
+	localClient          *local.Client // in-memory
+	localAPIServer       *http.Server
+	resetServeConfigOnce sync.Once
+	logbuffer            *filch.Filch
+	logtail              *logtail.Logger
+	logid                logid.PublicID
 
 	mu                  sync.Mutex
 	listeners           map[listenKey]*listener
@@ -274,7 +317,13 @@ func (s *Server) Loopback() (addr string, proxyCred, localAPICred string, err er
 		// out the CONNECT code from tailscaled/proxy.go that uses
 		// httputil.ReverseProxy and adding auth support.
 		go func() {
-			lah := localapi.NewHandler(ipnauth.Self, s.lb, s.logf, s.logid)
+			lah := localapi.NewHandler(localapi.HandlerConfig{
+				Actor:    ipnauth.Self,
+				Backend:  s.lb,
+				Logf:     s.logf,
+				LogID:    s.logid,
+				EventBus: s.sys.Bus.Get(),
+			})
 			lah.PermitWrite = true
 			lah.PermitRead = true
 			lah.RequiredPassword = s.localAPICred
@@ -334,7 +383,7 @@ func (s *Server) Up(ctx context.Context) (*ipnstate.Status, error) {
 		return nil, fmt.Errorf("tsnet.Up: %w", err)
 	}
 
-	watcher, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState|ipn.NotifyNoPrivateKeys)
+	watcher, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
 	if err != nil {
 		return nil, fmt.Errorf("tsnet.Up: %w", err)
 	}
@@ -348,8 +397,8 @@ func (s *Server) Up(ctx context.Context) (*ipnstate.Status, error) {
 		if n.ErrMessage != nil {
 			return nil, fmt.Errorf("tsnet.Up: backend: %s", *n.ErrMessage)
 		}
-		if s := n.State; s != nil {
-			if *s == ipn.Running {
+		if st := n.State; st != nil {
+			if *st == ipn.Running {
 				status, err := lc.Status(ctx)
 				if err != nil {
 					return nil, fmt.Errorf("tsnet.Up: %w", err)
@@ -358,11 +407,15 @@ func (s *Server) Up(ctx context.Context) (*ipnstate.Status, error) {
 					return nil, errors.New("tsnet.Up: running, but no ip")
 				}
 
-				// Clear the persisted serve config state to prevent stale configuration
-				// from code changes. This is a temporary workaround until we have a better
-				// way to handle this. (2023-03-11)
-				if err := lc.SetServeConfig(ctx, new(ipn.ServeConfig)); err != nil {
-					return nil, fmt.Errorf("tsnet.Up: %w", err)
+				// The first time Up is run, clear the persisted serve config.
+				// We do this to prevent messy interactions with stale config in
+				// the face of code changes.
+				var srvResetErr error
+				s.resetServeConfigOnce.Do(func() {
+					srvResetErr = lc.SetServeConfig(ctx, new(ipn.ServeConfig))
+				})
+				if srvResetErr != nil {
+					return nil, fmt.Errorf("tsnet.Up: clearing serve config: %w", err)
 				}
 
 				return status, nil
@@ -435,10 +488,7 @@ func (s *Server) Close() error {
 		ln.closeLocked()
 	}
 	wg.Wait()
-
-	if bus := s.sys.Bus.Get(); bus != nil {
-		bus.Close()
-	}
+	s.sys.Bus.Get().Close()
 	s.closed = true
 	return nil
 }
@@ -484,6 +534,16 @@ func (s *Server) TailscaleIPs() (ip4, ip6 netip.Addr) {
 	return ip4, ip6
 }
 
+// LogtailWriter returns an [io.Writer] that writes to Tailscale's logging service and will be only visible to Tailscale's
+// support team. Logs written there cannot be retrieved by the user. This method always returns a non-nil value.
+func (s *Server) LogtailWriter() io.Writer {
+	if s.logtail == nil {
+		return io.Discard
+	}
+
+	return s.logtail
+}
+
 func (s *Server) getAuthKey() string {
 	if v := s.AuthKey; v != "" {
 		return v
@@ -492,6 +552,34 @@ func (s *Server) getAuthKey() string {
 		return v
 	}
 	return os.Getenv("TS_AUTH_KEY")
+}
+
+func (s *Server) getClientSecret() string {
+	if v := s.ClientSecret; v != "" {
+		return v
+	}
+	return os.Getenv("TS_CLIENT_SECRET")
+}
+
+func (s *Server) getClientID() string {
+	if v := s.ClientID; v != "" {
+		return v
+	}
+	return os.Getenv("TS_CLIENT_ID")
+}
+
+func (s *Server) getIDToken() string {
+	if v := s.IDToken; v != "" {
+		return v
+	}
+	return os.Getenv("TS_ID_TOKEN")
+}
+
+func (s *Server) getAudience() string {
+	if v := s.Audience; v != "" {
+		return v
+	}
+	return os.Getenv("TS_AUDIENCE")
 }
 
 func (s *Server) start() (reterr error) {
@@ -559,7 +647,7 @@ func (s *Server) start() (reterr error) {
 
 	sys := tsd.NewSystem()
 	s.sys = sys
-	if err := s.startLogger(&closePool, sys.HealthTracker(), tsLogf); err != nil {
+	if err := s.startLogger(&closePool, sys.HealthTracker.Get(), tsLogf); err != nil {
 		return err
 	}
 
@@ -570,6 +658,7 @@ func (s *Server) start() (reterr error) {
 	closePool.add(s.netMon)
 
 	s.dialer = &tsdial.Dialer{Logf: tsLogf} // mutated below (before used)
+	s.dialer.SetBus(sys.Bus.Get())
 	eng, err := wgengine.NewUserspaceEngine(tsLogf, wgengine.Config{
 		EventBus:      sys.Bus.Get(),
 		ListenPort:    s.Port,
@@ -577,7 +666,7 @@ func (s *Server) start() (reterr error) {
 		Dialer:        s.dialer,
 		SetSubsystem:  sys.Set,
 		ControlKnobs:  sys.ControlKnobs(),
-		HealthTracker: sys.HealthTracker(),
+		HealthTracker: sys.HealthTracker.Get(),
 		Metrics:       sys.UserMetricsRegistry(),
 	})
 	if err != nil {
@@ -585,7 +674,7 @@ func (s *Server) start() (reterr error) {
 	}
 	closePool.add(s.dialer)
 	sys.Set(eng)
-	sys.HealthTracker().SetMetricsRegistry(sys.UserMetricsRegistry())
+	sys.HealthTracker.Get().SetMetricsRegistry(sys.UserMetricsRegistry())
 
 	// TODO(oxtoacart): do we need to support Taildrive on tsnet, and if so, how?
 	ns, err := netstack.Create(tsLogf, sys.Tun.Get(), eng, sys.MagicSock.Get(), s.dialer, sys.DNSManager.Get(), sys.ProxyMapper())
@@ -659,7 +748,11 @@ func (s *Server) start() (reterr error) {
 	prefs.WantRunning = true
 	prefs.ControlURL = s.ControlURL
 	prefs.RunWebClient = s.RunWebClient
-	authKey := s.getAuthKey()
+	prefs.AdvertiseTags = s.AdvertiseTags
+	authKey, err := s.resolveAuthKey()
+	if err != nil {
+		return fmt.Errorf("error resolving auth key: %w", err)
+	}
 	err = lb.Start(ipn.Options{
 		UpdatePrefs: prefs,
 		AuthKey:     authKey,
@@ -679,7 +772,13 @@ func (s *Server) start() (reterr error) {
 	go s.printAuthURLLoop()
 
 	// Run the localapi handler, to allow fetching LetsEncrypt certs.
-	lah := localapi.NewHandler(ipnauth.Self, lb, tsLogf, s.logid)
+	lah := localapi.NewHandler(localapi.HandlerConfig{
+		Actor:    ipnauth.Self,
+		Backend:  lb,
+		Logf:     tsLogf,
+		LogID:    s.logid,
+		EventBus: sys.Bus.Get(),
+	})
 	lah.PermitWrite = true
 	lah.PermitRead = true
 
@@ -697,6 +796,51 @@ func (s *Server) start() (reterr error) {
 	}()
 	closePool.add(s.localAPIListener)
 	return nil
+}
+
+func (s *Server) resolveAuthKey() (string, error) {
+	authKey := s.getAuthKey()
+	var err error
+	// Try to use an OAuth secret to generate an auth key if that functionality
+	// is available.
+	resolveViaOAuth, oauthOk := tailscale.HookResolveAuthKey.GetOk()
+	if oauthOk {
+		clientSecret := authKey
+		if authKey == "" {
+			clientSecret = s.getClientSecret()
+		}
+		authKey, err = resolveViaOAuth(s.shutdownCtx, clientSecret, s.AdvertiseTags)
+		if err != nil {
+			return "", err
+		}
+	}
+	// Try to resolve the auth key via workload identity federation if that functionality
+	// is available and no auth key is yet determined.
+	resolveViaWIF, wifOk := tailscale.HookResolveAuthKeyViaWIF.GetOk()
+	if wifOk && authKey == "" {
+		clientID := s.getClientID()
+		idToken := s.getIDToken()
+		audience := s.getAudience()
+		if clientID != "" && idToken == "" && audience == "" {
+			return "", fmt.Errorf("client ID for workload identity federation found, but ID token and audience are empty")
+		}
+		if idToken != "" && audience != "" {
+			return "", fmt.Errorf("only one of ID token and audience should be for workload identity federation")
+		}
+		if clientID == "" {
+			if idToken != "" {
+				return "", fmt.Errorf("ID token for workload identity federation found, but client ID is empty")
+			}
+			if audience != "" {
+				return "", fmt.Errorf("audience for workload identity federation found, but client ID is empty")
+			}
+		}
+		authKey, err = resolveViaWIF(s.shutdownCtx, s.ControlURL, clientID, idToken, audience, s.AdvertiseTags)
+		if err != nil {
+			return "", err
+		}
+	}
+	return authKey, nil
 }
 
 func (s *Server) startLogger(closePool *closeOnErrorPool, health *health.Tracker, tsLogf logger.Logf) error {
@@ -730,6 +874,7 @@ func (s *Server) startLogger(closePool *closeOnErrorPool, health *health.Tracker
 		Stderr:       io.Discard, // log everything to Buffer
 		Buffer:       s.logbuffer,
 		CompressLogs: true,
+		Bus:          s.sys.Bus.Get(),
 		HTTPC:        &http.Client{Transport: logpolicy.NewLogtailTransport(logtail.DefaultHost, s.netMon, health, tsLogf)},
 		MetricsDelta: clientmetric.EncodeLogTailMetricsDelta,
 	}
@@ -892,60 +1037,6 @@ func (s *Server) getUDPHandlerForFlow(src, dst netip.AddrPort) (handler func(net
 		return nil, true // don't handle, don't forward to localhost
 	}
 	return func(c nettype.ConnPacketConn) { ln.handle(c) }, true
-}
-
-// APIClient returns a tailscale.Client that can be used to make authenticated
-// requests to the Tailscale control server.
-// It requires the user to set tailscale.I_Acknowledge_This_API_Is_Unstable.
-//
-// Deprecated: use AuthenticatedAPITransport with tailscale.com/client/tailscale/v2 instead.
-func (s *Server) APIClient() (*tailscale.Client, error) {
-	if !tailscale.I_Acknowledge_This_API_Is_Unstable {
-		return nil, errors.New("use of Client without setting I_Acknowledge_This_API_Is_Unstable")
-	}
-	if err := s.Start(); err != nil {
-		return nil, err
-	}
-
-	c := tailscale.NewClient("-", nil)
-	c.UserAgent = "tailscale-tsnet"
-	c.HTTPClient = &http.Client{Transport: s.lb.KeyProvingNoiseRoundTripper()}
-	return c, nil
-}
-
-// I_Acknowledge_This_API_Is_Experimental must be set true to use AuthenticatedAPITransport()
-// for now.
-var I_Acknowledge_This_API_Is_Experimental = false
-
-// AuthenticatedAPITransport provides an HTTP transport that can be used with
-// the control server API without needing additional authentication details. It
-// authenticates using the current client's nodekey.
-//
-// It requires the user to set I_Acknowledge_This_API_Is_Experimental.
-//
-// For example:
-//
-//	import "net/http"
-//	import "tailscale.com/client/tailscale/v2"
-//	import "tailscale.com/tsnet"
-//
-//	var s *tsnet.Server
-//	...
-//	rt, err := s.AuthenticatedAPITransport()
-//	// handler err ...
-//	var client tailscale.Client{HTTP: http.Client{
-//	    Timeout: 1*time.Minute,
-//	    UserAgent: "your-useragent-here",
-//	    Transport: rt,
-//	}}
-func (s *Server) AuthenticatedAPITransport() (http.RoundTripper, error) {
-	if !I_Acknowledge_This_API_Is_Experimental {
-		return nil, errors.New("use of AuthenticatedAPITransport without setting I_Acknowledge_This_API_Is_Experimental")
-	}
-	if err := s.Start(); err != nil {
-		return nil, err
-	}
-	return s.lb.KeyProvingNoiseRoundTripper(), nil
 }
 
 // Listen announces only on the Tailscale network.
@@ -1161,11 +1252,25 @@ func (s *Server) ListenFunnel(network, addr string, opts ...FunnelOption) (net.L
 	}
 	domain := st.CertDomains[0]
 	hp := ipn.HostPort(domain + ":" + portStr)
+	var cleanupOnClose func() error
 	if !srvConfig.AllowFunnel[hp] {
 		mak.Set(&srvConfig.AllowFunnel, hp, true)
 		srvConfig.AllowFunnel[hp] = true
 		if err := lc.SetServeConfig(ctx, srvConfig); err != nil {
 			return nil, err
+		}
+		cleanupOnClose = func() error {
+			sc, err := lc.GetServeConfig(ctx)
+			if err != nil {
+				return fmt.Errorf("cleaning config changes: %w", err)
+			}
+			if sc.AllowFunnel != nil {
+				delete(sc.AllowFunnel, hp)
+			}
+			if err := lc.SetServeConfig(ctx, sc); err != nil {
+				return fmt.Errorf("cleaning config changes: %w", err)
+			}
+			return nil
 		}
 	}
 
@@ -1174,6 +1279,7 @@ func (s *Server) ListenFunnel(network, addr string, opts ...FunnelOption) (net.L
 	if err != nil {
 		return nil, err
 	}
+	ln = &cleanupListener{Listener: ln, cleanup: cleanupOnClose}
 	return tls.NewListener(ln, tlsConfig), nil
 }
 
@@ -1269,6 +1375,12 @@ func (s *Server) listen(network, addr string, lnOn listenOn) (net.Listener, erro
 	}
 	s.mu.Unlock()
 	return ln, nil
+}
+
+// GetRootPath returns the root path of the tsnet server.
+// This is where the state file and other data is stored.
+func (s *Server) GetRootPath() string {
+	return s.rootPath
 }
 
 // CapturePcap can be called by the application code compiled with tsnet to save a pcap
@@ -1376,3 +1488,20 @@ type addr struct{ ln *listener }
 
 func (a addr) Network() string { return a.ln.keys[0].network }
 func (a addr) String() string  { return a.ln.addr }
+
+// cleanupListener wraps a net.Listener with a function to be run on Close.
+type cleanupListener struct {
+	net.Listener
+	cleanupOnce sync.Once
+	cleanup     func() error // nil if unused
+}
+
+func (cl *cleanupListener) Close() error {
+	var cleanupErr error
+	cl.cleanupOnce.Do(func() {
+		if cl.cleanup != nil {
+			cleanupErr = cl.cleanup()
+		}
+	})
+	return errors.Join(cl.Listener.Close(), cleanupErr)
+}

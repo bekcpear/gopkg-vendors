@@ -15,10 +15,11 @@ import (
 	"strings"
 
 	"tailscale.com/envknob"
+	"tailscale.com/feature"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/hostinfo"
 	"tailscale.com/net/netaddr"
 	"tailscale.com/net/tsaddr"
-	"tailscale.com/net/tshttpproxy"
 	"tailscale.com/util/mak"
 )
 
@@ -148,12 +149,28 @@ type Interface struct {
 	Desc     string     // extra description (used on Windows)
 }
 
-func (i Interface) IsLoopback() bool { return isLoopback(i.Interface) }
-func (i Interface) IsUp() bool       { return isUp(i.Interface) }
+func (i Interface) IsLoopback() bool {
+	if i.Interface == nil {
+		return false
+	}
+	return isLoopback(i.Interface)
+}
+
+func (i Interface) IsUp() bool {
+	if i.Interface == nil {
+		return false
+	}
+	return isUp(i.Interface)
+}
+
 func (i Interface) Addrs() ([]net.Addr, error) {
 	if i.AltAddrs != nil {
 		return i.AltAddrs, nil
 	}
+	if i.Interface == nil {
+		return nil, nil
+	}
+
 	return i.Interface.Addrs()
 }
 
@@ -181,6 +198,10 @@ func (ifaces InterfaceList) ForeachInterfaceAddress(fn func(Interface, netip.Pre
 			case *net.IPNet:
 				if pfx, ok := netaddr.FromStdIPNet(v); ok {
 					fn(iface, pfx)
+				}
+			case *net.IPAddr:
+				if ip, ok := netip.AddrFromSlice(v.IP); ok {
+					fn(iface, netip.PrefixFrom(ip, ip.BitLen()))
 				}
 			}
 		}
@@ -213,6 +234,10 @@ func (ifaces InterfaceList) ForeachInterface(fn func(Interface, []netip.Prefix))
 			case *net.IPNet:
 				if pfx, ok := netaddr.FromStdIPNet(v); ok {
 					pfxs = append(pfxs, pfx)
+				}
+			case *net.IPAddr:
+				if ip, ok := netip.AddrFromSlice(v.IP); ok {
+					pfxs = append(pfxs, netip.PrefixFrom(ip, ip.BitLen()))
 				}
 			}
 		}
@@ -262,6 +287,9 @@ type State struct {
 
 	// PAC is the URL to the Proxy Autoconfig URL, if applicable.
 	PAC string
+
+	// TailscaleInterfaceIndex is the index of the Tailscale interface
+	TailscaleInterfaceIndex int
 }
 
 func (s *State) String() string {
@@ -476,6 +504,16 @@ func getState(optTSInterfaceName string) (*State, error) {
 		ifUp := ni.IsUp()
 		s.Interface[ni.Name] = ni
 		s.InterfaceIPs[ni.Name] = append(s.InterfaceIPs[ni.Name], pfxs...)
+
+		// Skip uninteresting interfaces.
+		if IsInterestingInterface != nil && !IsInterestingInterface(ni, pfxs) {
+			return
+		}
+
+		if isTailscaleInterface(ni.Name, pfxs) {
+			s.TailscaleInterfaceIndex = ni.Index
+		}
+
 		if !ifUp || isTSInterfaceName || isTailscaleInterface(ni.Name, pfxs) {
 			return
 		}
@@ -501,13 +539,15 @@ func getState(optTSInterfaceName string) (*State, error) {
 		}
 	}
 
-	if s.AnyInterfaceUp() {
+	if buildfeatures.HasUseProxy && s.AnyInterfaceUp() {
 		req, err := http.NewRequest("GET", LoginEndpointForProxyDetermination, nil)
 		if err != nil {
 			return nil, err
 		}
-		if u, err := tshttpproxy.ProxyFromEnvironment(req); err == nil && u != nil {
-			s.HTTPProxy = u.String()
+		if proxyFromEnv, ok := feature.HookProxyFromEnvironment.GetOk(); ok {
+			if u, err := proxyFromEnv(req); err == nil && u != nil {
+				s.HTTPProxy = u.String()
+			}
 		}
 		if getPAC != nil {
 			s.PAC = getPAC()
@@ -570,6 +610,9 @@ var disableLikelyHomeRouterIPSelf = envknob.RegisterBool("TS_DEBUG_DISABLE_LIKEL
 // the LAN using that gateway.
 // This is used as the destination for UPnP, NAT-PMP, PCP, etc queries.
 func LikelyHomeRouterIP() (gateway, myIP netip.Addr, ok bool) {
+	if !buildfeatures.HasPortMapper {
+		return
+	}
 	// If we don't have a way to get the home router IP, then we can't do
 	// anything; just return.
 	if likelyHomeRouterIP == nil {

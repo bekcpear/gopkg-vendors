@@ -5,6 +5,7 @@
 package web
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,9 +24,10 @@ import (
 
 	"tailscale.com/client/local"
 	"tailscale.com/client/tailscale/apitype"
-	"tailscale.com/clientupdate"
 	"tailscale.com/envknob"
 	"tailscale.com/envknob/featureknob"
+	"tailscale.com/feature"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/hostinfo"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
@@ -36,6 +38,7 @@ import (
 	"tailscale.com/types/logger"
 	"tailscale.com/types/views"
 	"tailscale.com/util/httpm"
+	"tailscale.com/util/syspolicy/policyclient"
 	"tailscale.com/version"
 	"tailscale.com/version/distro"
 )
@@ -49,6 +52,7 @@ type Server struct {
 	mode ServerMode
 
 	logf    logger.Logf
+	polc    policyclient.Client // must be non-nil
 	lc      *local.Client
 	timeNow func() time.Time
 
@@ -139,8 +143,12 @@ type ServerOpts struct {
 	TimeNow func() time.Time
 
 	// Logf optionally provides a logger function.
-	// log.Printf is used as default.
+	// If nil, log.Printf is used as default.
 	Logf logger.Logf
+
+	// PolicyClient, if non-nil, will be used to fetch policy settings.
+	// If nil, the default policy client will be used.
+	PolicyClient policyclient.Client
 
 	// The following two fields are required and used exclusively
 	// in ManageServerMode to facilitate the control server login
@@ -178,6 +186,7 @@ func NewServer(opts ServerOpts) (s *Server, err error) {
 	}
 	s = &Server{
 		mode:           opts.Mode,
+		polc:           cmp.Or(opts.PolicyClient, policyclient.Get()),
 		logf:           opts.Logf,
 		devMode:        envknob.Bool("TS_DEBUG_WEB_CLIENT_DEV"),
 		lc:             opts.LocalClient,
@@ -488,6 +497,10 @@ func (s *Server) authorizeRequest(w http.ResponseWriter, r *http.Request) (ok bo
 	// Client using system-specific auth.
 	switch distro.Get() {
 	case distro.Synology:
+		if !buildfeatures.HasSynology {
+			// Synology support not built in.
+			return false
+		}
 		authorized, _ := authorizeSynology(r)
 		return authorized
 	case distro.QNAP:
@@ -950,7 +963,7 @@ func (s *Server) serveGetNodeData(w http.ResponseWriter, r *http.Request) {
 		UnraidToken:      os.Getenv("UNRAID_CSRF_TOKEN"),
 		RunningSSHServer: prefs.RunSSH,
 		URLPrefix:        strings.TrimSuffix(s.pathPrefix, "/"),
-		ControlAdminURL:  prefs.AdminPageURL(),
+		ControlAdminURL:  prefs.AdminPageURL(s.polc),
 		LicensesURL:      licenses.LicensesURL(),
 		Features:         availableFeatures(),
 
@@ -970,9 +983,18 @@ func (s *Server) serveGetNodeData(w http.ResponseWriter, r *http.Request) {
 		data.ClientVersion = cv
 	}
 
-	if st.CurrentTailnet != nil {
-		data.TailnetName = st.CurrentTailnet.MagicDNSSuffix
-		data.DomainName = st.CurrentTailnet.Name
+	profile, _, err := s.lc.ProfileStatus(r.Context())
+	if err != nil {
+		s.logf("error fetching profiles: %v", err)
+		// If for some reason we can't fetch profiles,
+		// continue to use st.CurrentTailnet if set.
+		if st.CurrentTailnet != nil {
+			data.TailnetName = st.CurrentTailnet.MagicDNSSuffix
+			data.DomainName = st.CurrentTailnet.Name
+		}
+	} else {
+		data.TailnetName = profile.NetworkProfile.MagicDNSName
+		data.DomainName = profile.NetworkProfile.DisplayNameOrDefault()
 	}
 	if st.Self.Tags != nil {
 		data.Tags = st.Self.Tags.AsSlice()
@@ -1032,7 +1054,7 @@ func availableFeatures() map[string]bool {
 		"advertise-routes":    true, // available on all platforms
 		"use-exit-node":       featureknob.CanUseExitNode() == nil,
 		"ssh":                 featureknob.CanRunTailscaleSSH() == nil,
-		"auto-update":         version.IsUnstableBuild() && clientupdate.CanAutoUpdate(),
+		"auto-update":         version.IsUnstableBuild() && feature.CanAutoUpdate(),
 	}
 	return features
 }
