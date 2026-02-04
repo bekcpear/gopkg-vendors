@@ -65,6 +65,9 @@ import (
 	"github.com/tailscale/setec/types/api"
 )
 
+// Assert that Client implements [VersioningStoreClient].
+var _ VersioningStoreClient = &Client{}
+
 // Client is a raw client to the secret management server.
 // If you're just consuming secrets, you probably want to use a Store
 // instead.
@@ -116,6 +119,8 @@ func do[RESP, REQ any](ctx context.Context, c Client, path string, req REQ) (RES
 			return resp, api.ErrAccessDenied
 		case http.StatusNotModified:
 			return resp, api.ErrValueNotChanged
+		case http.StatusPreconditionFailed:
+			return resp, api.ErrVersionClaimed
 		}
 		return resp, fmt.Errorf("request returned status %d: %q", code, string(bytes.TrimSpace(errBs)))
 	}
@@ -197,6 +202,19 @@ func (c Client) Put(ctx context.Context, name string, value []byte) (version api
 		Name:  name,
 		Value: value,
 	})
+}
+
+// CreateVersion creates a specific version of a secret, sets its value and immediately activates that version.
+// It fails if this version of the secret ever had a value.
+//
+// Access requirement: "create-version"
+func (c Client) CreateVersion(ctx context.Context, name string, version api.SecretVersion, value []byte) error {
+	_, err := do[struct{}](ctx, c, "/api/create-version", api.CreateVersionRequest{
+		Name:    name,
+		Version: version,
+		Value:   value,
+	})
+	return err
 }
 
 // Activate changes the active version of the secret called name to version.
