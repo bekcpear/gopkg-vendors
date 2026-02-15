@@ -35,10 +35,6 @@ github.com/apernet/quic-go/quicvarint
 # github.com/boljen/go-bitmap v0.0.0-20151001105940-23cd2fb0ce7d
 ## explicit
 github.com/boljen/go-bitmap
-# github.com/bufbuild/protocompile v0.14.1
-## explicit; go 1.21
-github.com/bufbuild/protocompile/internal/editions
-github.com/bufbuild/protocompile/protoutil
 # github.com/cenkalti/backoff/v4 v4.1.1
 ## explicit; go 1.13
 github.com/cenkalti/backoff/v4
@@ -64,7 +60,7 @@ github.com/gabriel-vasile/mimetype/internal/json
 github.com/gabriel-vasile/mimetype/internal/magic
 github.com/gabriel-vasile/mimetype/internal/markup
 github.com/gabriel-vasile/mimetype/internal/scan
-# github.com/go-chi/chi/v5 v5.2.4
+# github.com/go-chi/chi/v5 v5.2.5
 ## explicit; go 1.22
 github.com/go-chi/chi/v5
 github.com/go-chi/chi/v5/middleware
@@ -119,15 +115,23 @@ github.com/gorilla/websocket
 # github.com/improbable-eng/grpc-web v0.15.0
 ## explicit; go 1.16
 github.com/improbable-eng/grpc-web/go/grpcweb
-# github.com/jhump/protoreflect v1.17.0
-## explicit; go 1.21
+# github.com/jhump/protoreflect v1.18.0
+## explicit; go 1.24.0
 github.com/jhump/protoreflect/codec
 github.com/jhump/protoreflect/desc
 github.com/jhump/protoreflect/desc/internal
+github.com/jhump/protoreflect/desc/internal/protoutil
 github.com/jhump/protoreflect/desc/sourceinfo
 github.com/jhump/protoreflect/dynamic
 github.com/jhump/protoreflect/internal
 github.com/jhump/protoreflect/internal/codec
+# github.com/jhump/protoreflect/v2 v2.0.0-beta.1
+## explicit; go 1.21
+github.com/jhump/protoreflect/v2/internal
+github.com/jhump/protoreflect/v2/internal/reparse
+github.com/jhump/protoreflect/v2/internal/sort
+github.com/jhump/protoreflect/v2/protoresolve
+github.com/jhump/protoreflect/v2/sourceinfo
 # github.com/klauspost/compress v1.17.4
 ## explicit; go 1.19
 github.com/klauspost/compress
@@ -151,7 +155,7 @@ github.com/leodido/go-urn/scim/schema
 # github.com/lunixbochs/struc v0.0.0-20200707160740-784aaebc1d40
 ## explicit; go 1.12
 github.com/lunixbochs/struc
-# github.com/miekg/dns v1.1.70
+# github.com/miekg/dns v1.1.72
 ## explicit; go 1.24.0
 github.com/miekg/dns
 # github.com/mustafaturan/bus v1.0.2
@@ -225,7 +229,7 @@ github.com/pion/transport/v2/replaydetector
 github.com/pion/transport/v2/udp
 # github.com/pion/transport/v3 v3.0.7
 ## explicit; go 1.19
-# github.com/pires/go-proxyproto v0.8.1
+# github.com/pires/go-proxyproto v0.11.0
 ## explicit; go 1.24
 github.com/pires/go-proxyproto
 # github.com/pmezard/go-difflib v1.0.0
@@ -379,7 +383,7 @@ go.uber.org/mock/mockgen/model
 # go4.org/netipx v0.0.0-20230303233057-f1b76eb4bb35
 ## explicit; go 1.18
 go4.org/netipx
-# golang.org/x/crypto v0.47.0
+# golang.org/x/crypto v0.48.0
 ## explicit; go 1.24.0
 golang.org/x/crypto/chacha20
 golang.org/x/crypto/chacha20poly1305
@@ -395,13 +399,13 @@ golang.org/x/crypto/sha3
 ## explicit; go 1.20
 golang.org/x/exp/constraints
 golang.org/x/exp/rand
-# golang.org/x/mod v0.31.0
+# golang.org/x/mod v0.32.0
 ## explicit; go 1.24.0
 golang.org/x/mod/internal/lazyregexp
 golang.org/x/mod/modfile
 golang.org/x/mod/module
 golang.org/x/mod/semver
-# golang.org/x/net v0.49.0
+# golang.org/x/net v0.50.0
 ## explicit; go 1.24.0
 golang.org/x/net/bpf
 golang.org/x/net/context
@@ -412,6 +416,7 @@ golang.org/x/net/http2/h2c
 golang.org/x/net/http2/hpack
 golang.org/x/net/idna
 golang.org/x/net/internal/httpcommon
+golang.org/x/net/internal/httpsfv
 golang.org/x/net/internal/iana
 golang.org/x/net/internal/socket
 golang.org/x/net/internal/socks
@@ -423,12 +428,12 @@ golang.org/x/net/trace
 # golang.org/x/sync v0.19.0
 ## explicit; go 1.24.0
 golang.org/x/sync/errgroup
-# golang.org/x/sys v0.40.0
+# golang.org/x/sys v0.41.0
 ## explicit; go 1.24.0
 golang.org/x/sys/cpu
 golang.org/x/sys/unix
 golang.org/x/sys/windows
-# golang.org/x/text v0.33.0
+# golang.org/x/text v0.34.0
 ## explicit; go 1.24.0
 golang.org/x/text/internal/language
 golang.org/x/text/internal/language/compact
@@ -441,7 +446,7 @@ golang.org/x/text/unicode/norm
 # golang.org/x/time v0.5.0
 ## explicit; go 1.18
 golang.org/x/time/rate
-# golang.org/x/tools v0.40.0
+# golang.org/x/tools v0.41.0
 ## explicit; go 1.24.0
 golang.org/x/tools/cover
 golang.org/x/tools/go/ast/astutil
@@ -468,10 +473,10 @@ golang.org/x/tools/internal/stdlib
 golang.org/x/tools/internal/typeparams
 golang.org/x/tools/internal/typesinternal
 golang.org/x/tools/internal/versions
-# google.golang.org/genproto/googleapis/rpc v0.0.0-20251029180050-ab9386a59fda
+# google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217
 ## explicit; go 1.24.0
 google.golang.org/genproto/googleapis/rpc/status
-# google.golang.org/grpc v1.78.0
+# google.golang.org/grpc v1.79.1
 ## explicit; go 1.24.0
 google.golang.org/grpc
 google.golang.org/grpc/attributes
@@ -499,6 +504,7 @@ google.golang.org/grpc/health/grpc_health_v1
 google.golang.org/grpc/internal
 google.golang.org/grpc/internal/backoff
 google.golang.org/grpc/internal/balancer/gracefulswitch
+google.golang.org/grpc/internal/balancer/weight
 google.golang.org/grpc/internal/balancerload
 google.golang.org/grpc/internal/binarylog
 google.golang.org/grpc/internal/buffer
