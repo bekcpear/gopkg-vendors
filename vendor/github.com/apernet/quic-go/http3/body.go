@@ -4,28 +4,33 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 
 	"github.com/apernet/quic-go"
 )
 
-// A Hijacker allows hijacking of the stream creating part of a quic.Session from a http.Response.Body.
-// It is used by WebTransport to create WebTransport streams after a session has been established.
-type Hijacker interface {
-	Connection() Connection
+// Settingser allows waiting for and retrieving the peer's HTTP/3 settings.
+type Settingser interface {
+	// ReceivedSettings returns a channel that is closed once the peer's SETTINGS frame was received.
+	// Settings can be obtained from the Settings method after the channel was closed.
+	ReceivedSettings() <-chan struct{}
+	// Settings returns the settings received on this connection.
+	// It is only valid to call this function after the channel returned by ReceivedSettings was closed.
+	Settings() *Settings
 }
 
 var errTooMuchData = errors.New("peer sent too much data")
 
 // The body is used in the requestBody (for a http.Request) and the responseBody (for a http.Response).
 type body struct {
-	str *stream
+	str *Stream
 
 	remainingContentLength int64
 	violatedContentLength  bool
 	hasContentLength       bool
 }
 
-func newBody(str *stream, contentLength int64) *body {
+func newBody(str *Stream, contentLength int64) *body {
 	b := &body{str: str}
 	if contentLength >= 0 {
 		b.hasContentLength = true
@@ -80,7 +85,7 @@ type requestBody struct {
 
 var _ io.ReadCloser = &requestBody{}
 
-func newRequestBody(str *stream, contentLength int64, connCtx context.Context, rcvdSettings <-chan struct{}, getSettings func() *Settings) *requestBody {
+func newRequestBody(str *Stream, contentLength int64, connCtx context.Context, rcvdSettings <-chan struct{}, getSettings func() *Settings) *requestBody {
 	return &requestBody{
 		body:         *newBody(str, contentLength),
 		connCtx:      connCtx,
@@ -95,13 +100,13 @@ type hijackableBody struct {
 	// only set for the http.Response
 	// The channel is closed when the user is done with this response:
 	// either when Read() errors, or when Close() is called.
-	reqDone       chan<- struct{}
-	reqDoneClosed bool
+	reqDone     chan<- struct{}
+	reqDoneOnce sync.Once
 }
 
 var _ io.ReadCloser = &hijackableBody{}
 
-func newResponseBody(str *stream, contentLength int64, done chan<- struct{}) *hijackableBody {
+func newResponseBody(str *Stream, contentLength int64, done chan<- struct{}) *hijackableBody {
 	return &hijackableBody{
 		body:    *newBody(str, contentLength),
 		reqDone: done,
@@ -117,13 +122,11 @@ func (r *hijackableBody) Read(b []byte) (int, error) {
 }
 
 func (r *hijackableBody) requestDone() {
-	if r.reqDoneClosed || r.reqDone == nil {
-		return
-	}
 	if r.reqDone != nil {
-		close(r.reqDone)
+		r.reqDoneOnce.Do(func() {
+			close(r.reqDone)
+		})
 	}
-	r.reqDoneClosed = true
 }
 
 func (r *hijackableBody) Close() error {

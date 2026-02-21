@@ -17,7 +17,7 @@ type packetEPsRWMutex struct {
 var packetEPslockNames []string
 
 // lockNameIndex is used as an index passed to NestedLock and NestedUnlock,
-// refering to an index within lockNames.
+// referring to an index within lockNames.
 // Values are specified using the "consts" field of go_template_instance.
 type packetEPslockNameIndex int
 
@@ -92,5 +92,5 @@ func packetEPsinitLockNames() {}
 
 func init() {
 	packetEPsinitLockNames()
-	packetEPsprefixIndex = locking.NewMutexClass(reflect.TypeOf(packetEPsRWMutex{}), packetEPslockNames)
+	packetEPsprefixIndex = locking.NewMutexClass(reflect.TypeFor[packetEPsRWMutex](), packetEPslockNames)
 }

@@ -19,7 +19,7 @@ var cleanupEndpointsprefixIndex *locking.MutexClass
 var cleanupEndpointslockNames []string
 
 // lockNameIndex is used as an index passed to NestedLock and NestedUnlock,
-// refering to an index within lockNames.
+// referring to an index within lockNames.
 // Values are specified using the "consts" field of go_template_instance.
 type cleanupEndpointslockNameIndex int
 
@@ -60,5 +60,5 @@ func cleanupEndpointsinitLockNames() {}
 
 func init() {
 	cleanupEndpointsinitLockNames()
-	cleanupEndpointsprefixIndex = locking.NewMutexClass(reflect.TypeOf(cleanupEndpointsMutex{}), cleanupEndpointslockNames)
+	cleanupEndpointsprefixIndex = locking.NewMutexClass(reflect.TypeFor[cleanupEndpointsMutex](), cleanupEndpointslockNames)
 }

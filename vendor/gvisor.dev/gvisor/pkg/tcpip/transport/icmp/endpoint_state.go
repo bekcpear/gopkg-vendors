@@ -15,9 +15,11 @@
 package icmp
 
 import (
+	"context"
 	"fmt"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport"
@@ -29,28 +31,44 @@ func (p *icmpPacket) saveReceivedAt() int64 {
 }
 
 // loadReceivedAt is invoked by stateify.
-func (p *icmpPacket) loadReceivedAt(nsec int64) {
+func (p *icmpPacket) loadReceivedAt(_ context.Context, nsec int64) {
 	p.receivedAt = time.Unix(0, nsec)
 }
 
 // afterLoad is invoked by stateify.
-func (e *endpoint) afterLoad() {
-	stack.StackFromEnv.RegisterRestoredEndpoint(e)
+func (e *endpoint) afterLoad(ctx context.Context) {
+	if e.stack.IsSaveRestoreEnabled() {
+		e.stack.RegisterRestoredEndpoint(e)
+	} else {
+		stack.RestoreStackFromContext(ctx).RegisterRestoredEndpoint(e)
+	}
 }
 
 // beforeSave is invoked by stateify.
 func (e *endpoint) beforeSave() {
 	e.freeze()
+	e.stack.RegisterResumableEndpoint(e)
 }
 
-// Resume implements tcpip.ResumableEndpoint.Resume.
-func (e *endpoint) Resume(s *stack.Stack) {
-	e.thaw()
+// Restore implements tcpip.RestoredEndpoint.Restore.
+func (e *endpoint) Restore(s *stack.Stack) {
+	if err := e.net.Resume(s); err != nil {
+		log.Warningf("Closing the ICMP endpoint as it cannot be restored, err: %v", err)
+		e.Close()
+		return
+	}
 
-	e.net.Resume(s)
+	e.thaw()
+	if e.stack.IsSaveRestoreEnabled() {
+		e.ops.InitHandler(e, e.stack, tcpip.GetStackSendBufferLimits, tcpip.GetStackReceiveBufferLimits)
+		return
+	}
 
 	e.stack = s
 	e.ops.InitHandler(e, e.stack, tcpip.GetStackSendBufferLimits, tcpip.GetStackReceiveBufferLimits)
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
 	switch state := e.net.State(); state {
 	case transport.DatagramEndpointStateInitial, transport.DatagramEndpointStateClosed:
@@ -66,4 +84,9 @@ func (e *endpoint) Resume(s *stack.Stack) {
 	default:
 		panic(fmt.Sprintf("unhandled state = %s", state))
 	}
+}
+
+// Resume implements tcpip.ResumableEndpoint.Resume.
+func (e *endpoint) Resume() {
+	e.thaw()
 }

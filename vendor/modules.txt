@@ -13,24 +13,28 @@ github.com/ajg/form
 # github.com/andybalholm/brotli v1.0.6
 ## explicit; go 1.12
 github.com/andybalholm/brotli
-# github.com/apernet/quic-go v0.48.2-0.20241104191913-cb103fcecfe7
-## explicit; go 1.22
+# github.com/apernet/quic-go v0.59.1-0.20260217092621-db4786c77a22
+## explicit; go 1.24
 github.com/apernet/quic-go
 github.com/apernet/quic-go/congestion
 github.com/apernet/quic-go/http3
+github.com/apernet/quic-go/http3/qlog
 github.com/apernet/quic-go/internal/ackhandler
 github.com/apernet/quic-go/internal/congestion
 github.com/apernet/quic-go/internal/flowcontrol
 github.com/apernet/quic-go/internal/handshake
+github.com/apernet/quic-go/internal/monotime
 github.com/apernet/quic-go/internal/protocol
 github.com/apernet/quic-go/internal/qerr
-github.com/apernet/quic-go/internal/qtls
 github.com/apernet/quic-go/internal/utils
 github.com/apernet/quic-go/internal/utils/linkedlist
 github.com/apernet/quic-go/internal/utils/ringbuffer
 github.com/apernet/quic-go/internal/utils/tree
 github.com/apernet/quic-go/internal/wire
-github.com/apernet/quic-go/logging
+github.com/apernet/quic-go/monotime
+github.com/apernet/quic-go/qlog
+github.com/apernet/quic-go/qlogwriter
+github.com/apernet/quic-go/qlogwriter/jsontext
 github.com/apernet/quic-go/quicvarint
 # github.com/boljen/go-bitmap v0.0.0-20151001105940-23cd2fb0ce7d
 ## explicit
@@ -77,9 +81,8 @@ github.com/go-playground/universal-translator
 # github.com/go-playground/validator/v10 v10.30.1
 ## explicit; go 1.24.0
 github.com/go-playground/validator/v10
-# github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572
-## explicit; go 1.13
-github.com/go-task/slim-sprig
+# github.com/gobwas/ws v1.2.1
+## explicit; go 1.15
 # github.com/golang-collections/go-datastructures v0.0.0-20150211160725-59788d5eb259
 ## explicit
 github.com/golang-collections/go-datastructures/queue
@@ -106,9 +109,6 @@ github.com/google/go-cmp/cmp/internal/value
 ## explicit; go 1.12
 github.com/google/gopacket
 github.com/google/gopacket/layers
-# github.com/google/pprof v0.0.0-20240320155624-b11c3daa6f07
-## explicit; go 1.19
-github.com/google/pprof/profile
 # github.com/gorilla/websocket v1.5.3
 ## explicit; go 1.12
 github.com/gorilla/websocket
@@ -167,24 +167,6 @@ github.com/mustafaturan/monoton
 github.com/mustafaturan/monoton/encoder
 github.com/mustafaturan/monoton/mtimer
 github.com/mustafaturan/monoton/sequencer
-# github.com/onsi/ginkgo/v2 v2.17.0
-## explicit; go 1.20
-github.com/onsi/ginkgo/v2/config
-github.com/onsi/ginkgo/v2/formatter
-github.com/onsi/ginkgo/v2/ginkgo
-github.com/onsi/ginkgo/v2/ginkgo/build
-github.com/onsi/ginkgo/v2/ginkgo/command
-github.com/onsi/ginkgo/v2/ginkgo/generators
-github.com/onsi/ginkgo/v2/ginkgo/internal
-github.com/onsi/ginkgo/v2/ginkgo/labels
-github.com/onsi/ginkgo/v2/ginkgo/outline
-github.com/onsi/ginkgo/v2/ginkgo/run
-github.com/onsi/ginkgo/v2/ginkgo/unfocus
-github.com/onsi/ginkgo/v2/ginkgo/watch
-github.com/onsi/ginkgo/v2/internal/interrupt_handler
-github.com/onsi/ginkgo/v2/internal/parallel_support
-github.com/onsi/ginkgo/v2/reporters
-github.com/onsi/ginkgo/v2/types
 # github.com/patrickmn/go-cache v2.1.0+incompatible
 ## explicit
 github.com/patrickmn/go-cache
@@ -305,8 +287,8 @@ github.com/v2fly/VSign/sign
 github.com/v2fly/VSign/sign/signify
 github.com/v2fly/VSign/signerVerify
 github.com/v2fly/VSign/v2signkey
-# github.com/v2fly/hysteria/core/v2 v2.0.0-20250113081444-b0a0747ac7ab
-## explicit; go 1.22
+# github.com/v2fly/hysteria/core/v2 v2.0.0-20260220231229-39018a43855e
+## explicit; go 1.24
 github.com/v2fly/hysteria/core/v2/client
 github.com/v2fly/hysteria/core/v2/errors
 github.com/v2fly/hysteria/core/v2/international/congestion
@@ -376,15 +358,12 @@ go.starlark.net/internal/spell
 go.starlark.net/resolve
 go.starlark.net/starlark
 go.starlark.net/syntax
-# go.uber.org/mock v0.5.2
-## explicit; go 1.23
-go.uber.org/mock/mockgen
-go.uber.org/mock/mockgen/model
 # go4.org/netipx v0.0.0-20230303233057-f1b76eb4bb35
 ## explicit; go 1.18
 go4.org/netipx
 # golang.org/x/crypto v0.48.0
 ## explicit; go 1.24.0
+golang.org/x/crypto/blake2s
 golang.org/x/crypto/chacha20
 golang.org/x/crypto/chacha20poly1305
 golang.org/x/crypto/cryptobyte
@@ -394,16 +373,13 @@ golang.org/x/crypto/ed25519
 golang.org/x/crypto/hkdf
 golang.org/x/crypto/internal/alias
 golang.org/x/crypto/internal/poly1305
+golang.org/x/crypto/poly1305
 golang.org/x/crypto/sha3
 # golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842
 ## explicit; go 1.20
 golang.org/x/exp/constraints
-golang.org/x/exp/rand
 # golang.org/x/mod v0.32.0
 ## explicit; go 1.24.0
-golang.org/x/mod/internal/lazyregexp
-golang.org/x/mod/modfile
-golang.org/x/mod/module
 golang.org/x/mod/semver
 # golang.org/x/net v0.50.0
 ## explicit; go 1.24.0
@@ -443,20 +419,17 @@ golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
-# golang.org/x/time v0.5.0
-## explicit; go 1.18
+# golang.org/x/time v0.12.0
+## explicit; go 1.23.0
 golang.org/x/time/rate
 # golang.org/x/tools v0.41.0
 ## explicit; go 1.24.0
-golang.org/x/tools/cover
-golang.org/x/tools/go/ast/astutil
 golang.org/x/tools/go/ast/edge
 golang.org/x/tools/go/ast/inspector
 golang.org/x/tools/go/gcexportdata
 golang.org/x/tools/go/packages
 golang.org/x/tools/go/types/objectpath
 golang.org/x/tools/go/types/typeutil
-golang.org/x/tools/imports
 golang.org/x/tools/internal/aliases
 golang.org/x/tools/internal/event
 golang.org/x/tools/internal/event/core
@@ -464,15 +437,27 @@ golang.org/x/tools/internal/event/keys
 golang.org/x/tools/internal/event/label
 golang.org/x/tools/internal/gcimporter
 golang.org/x/tools/internal/gocommand
-golang.org/x/tools/internal/gopathwalk
-golang.org/x/tools/internal/imports
-golang.org/x/tools/internal/modindex
 golang.org/x/tools/internal/packagesinternal
 golang.org/x/tools/internal/pkgbits
 golang.org/x/tools/internal/stdlib
 golang.org/x/tools/internal/typeparams
 golang.org/x/tools/internal/typesinternal
 golang.org/x/tools/internal/versions
+# golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
+## explicit; go 1.17
+golang.zx2c4.com/wintun
+# golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
+## explicit; go 1.23.1
+golang.zx2c4.com/wireguard/conn
+golang.zx2c4.com/wireguard/conn/winrio
+golang.zx2c4.com/wireguard/device
+golang.zx2c4.com/wireguard/ipc
+golang.zx2c4.com/wireguard/ipc/namedpipe
+golang.zx2c4.com/wireguard/ratelimiter
+golang.zx2c4.com/wireguard/replay
+golang.zx2c4.com/wireguard/rwcancel
+golang.zx2c4.com/wireguard/tai64n
+golang.zx2c4.com/wireguard/tun
 # google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217
 ## explicit; go 1.24.0
 google.golang.org/genproto/googleapis/rpc/status
@@ -593,8 +578,8 @@ google.golang.org/protobuf/types/known/wrapperspb
 # gopkg.in/yaml.v3 v3.0.1
 ## explicit
 gopkg.in/yaml.v3
-# gvisor.dev/gvisor v0.0.0-20231020174304-b8a429915ff1
-## explicit; go 1.20
+# gvisor.dev/gvisor v0.0.0-20260218152508-eed1cebf761e
+## explicit; go 1.25.5
 gvisor.dev/gvisor/pkg/abi/linux/errno
 gvisor.dev/gvisor/pkg/atomicbitops
 gvisor.dev/gvisor/pkg/bits
@@ -608,6 +593,7 @@ gvisor.dev/gvisor/pkg/goid
 gvisor.dev/gvisor/pkg/linewriter
 gvisor.dev/gvisor/pkg/log
 gvisor.dev/gvisor/pkg/rand
+gvisor.dev/gvisor/pkg/rawfile
 gvisor.dev/gvisor/pkg/refs
 gvisor.dev/gvisor/pkg/sleep
 gvisor.dev/gvisor/pkg/state
@@ -625,7 +611,6 @@ gvisor.dev/gvisor/pkg/tcpip/link/channel
 gvisor.dev/gvisor/pkg/tcpip/link/fdbased
 gvisor.dev/gvisor/pkg/tcpip/link/nested
 gvisor.dev/gvisor/pkg/tcpip/link/packetsocket
-gvisor.dev/gvisor/pkg/tcpip/link/rawfile
 gvisor.dev/gvisor/pkg/tcpip/link/stopfd
 gvisor.dev/gvisor/pkg/tcpip/link/tun
 gvisor.dev/gvisor/pkg/tcpip/network/hash
@@ -637,6 +622,7 @@ gvisor.dev/gvisor/pkg/tcpip/network/ipv6
 gvisor.dev/gvisor/pkg/tcpip/ports
 gvisor.dev/gvisor/pkg/tcpip/seqnum
 gvisor.dev/gvisor/pkg/tcpip/stack
+gvisor.dev/gvisor/pkg/tcpip/stack/gro
 gvisor.dev/gvisor/pkg/tcpip/transport
 gvisor.dev/gvisor/pkg/tcpip/transport/icmp
 gvisor.dev/gvisor/pkg/tcpip/transport/internal/network

@@ -15,9 +15,10 @@
 package raw
 
 import (
-	"fmt"
+	"context"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
@@ -28,32 +29,50 @@ func (p *rawPacket) saveReceivedAt() int64 {
 }
 
 // loadReceivedAt is invoked by stateify.
-func (p *rawPacket) loadReceivedAt(nsec int64) {
+func (p *rawPacket) loadReceivedAt(_ context.Context, nsec int64) {
 	p.receivedAt = time.Unix(0, nsec)
 }
 
 // afterLoad is invoked by stateify.
-func (e *endpoint) afterLoad() {
-	stack.StackFromEnv.RegisterRestoredEndpoint(e)
+func (e *endpoint) afterLoad(ctx context.Context) {
+	if e.stack.IsSaveRestoreEnabled() {
+		e.stack.RegisterRestoredEndpoint(e)
+	} else {
+		stack.RestoreStackFromContext(ctx).RegisterRestoredEndpoint(e)
+	}
 }
 
 // beforeSave is invoked by stateify.
 func (e *endpoint) beforeSave() {
 	e.setReceiveDisabled(true)
+	e.stack.RegisterResumableEndpoint(e)
 }
 
-// Resume implements tcpip.ResumableEndpoint.Resume.
-func (e *endpoint) Resume(s *stack.Stack) {
-	e.net.Resume(s)
-
+// Restore implements tcpip.RestoredEndpoint.Restore.
+func (e *endpoint) Restore(s *stack.Stack) {
+	if err := e.net.Resume(s); err != nil {
+		log.Warningf("Closing the raw endpoint as it cannot be restored, err: %v", err)
+		e.Close()
+		return
+	}
 	e.setReceiveDisabled(false)
+	if e.stack.IsSaveRestoreEnabled() {
+		e.ops.InitHandler(e, e.stack, tcpip.GetStackSendBufferLimits, tcpip.GetStackReceiveBufferLimits)
+		return
+	}
+
 	e.stack = s
 	e.ops.InitHandler(e, e.stack, tcpip.GetStackSendBufferLimits, tcpip.GetStackReceiveBufferLimits)
 
 	if e.associated {
 		netProto := e.net.NetProto()
 		if err := e.stack.RegisterRawTransportEndpoint(netProto, e.transProto, e); err != nil {
-			panic(fmt.Sprintf("e.stack.RegisterRawTransportEndpoint(%d, %d, _): %s", netProto, e.transProto, err))
+			panic("RegisterRawTransportEndpoint failed during restore")
 		}
 	}
+}
+
+// Resume implements tcpip.ResumableEndpoint.Resume.
+func (e *endpoint) Resume() {
+	e.setReceiveDisabled(false)
 }

@@ -1,7 +1,8 @@
 // Copyright 2020 The gVisor Authors.
 //
 // Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd.
 
 // //go:linkname directives type-checked by checklinkname.
 // Runtime type copies checked by checkoffset.
@@ -29,12 +30,15 @@ func Goyield() {
 // splitting and race context are not available where it is called.
 //
 //go:nosplit
-func Gopark(unlockf func(uintptr, unsafe.Pointer) bool, lock unsafe.Pointer, reason uint8, traceEv byte, traceskip int) {
-	gopark(unlockf, lock, reason, traceEv, traceskip)
+func Gopark(unlockf func(uintptr, unsafe.Pointer) bool, lock unsafe.Pointer, reason uint8, traceReason TraceBlockReason, traceskip int) {
+	gopark(unlockf, lock, reason, traceReason, traceskip)
 }
 
 //go:linkname gopark runtime.gopark
-func gopark(unlockf func(uintptr, unsafe.Pointer) bool, lock unsafe.Pointer, reason uint8, traceEv byte, traceskip int)
+func gopark(unlockf func(uintptr, unsafe.Pointer) bool, lock unsafe.Pointer, reason uint8, traceReason TraceBlockReason, traceskip int)
+
+// TraceBlockReason is equivalent to runtime.traceBlockReason.
+type TraceBlockReason uint8
 
 //go:linkname wakep runtime.wakep
 func wakep()

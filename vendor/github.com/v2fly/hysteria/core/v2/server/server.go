@@ -10,6 +10,7 @@ import (
 
 	"github.com/apernet/quic-go"
 	"github.com/apernet/quic-go/http3"
+	"github.com/apernet/quic-go/quicvarint"
 
 	"github.com/v2fly/hysteria/core/v2/international/congestion"
 	"github.com/v2fly/hysteria/core/v2/international/protocol"
@@ -26,14 +27,26 @@ type Server interface {
 	Close() error
 }
 
+func convertToStdTLSConfig(config *Config) *tls.Config {
+	var clientAuth tls.ClientAuthType
+	if config.TLSConfig.ClientCAs != nil {
+		clientAuth = tls.RequireAndVerifyClientCert
+	} else {
+		clientAuth = tls.NoClientCert
+	}
+	return http3.ConfigureTLSConfig(&tls.Config{
+		Certificates:   config.TLSConfig.Certificates,
+		GetCertificate: config.TLSConfig.GetCertificate,
+		ClientCAs:      config.TLSConfig.ClientCAs,
+		ClientAuth:     clientAuth,
+	})
+}
+
 func NewServer(config *Config) (Server, error) {
 	if err := config.fill(); err != nil {
 		return nil, err
 	}
-	tlsConfig := http3.ConfigureTLSConfig(&tls.Config{
-		Certificates:   config.TLSConfig.Certificates,
-		GetCertificate: config.TLSConfig.GetCertificate,
-	})
+	tlsConfig := convertToStdTLSConfig(config)
 	quicConfig := &quic.Config{
 		InitialStreamReceiveWindow:     config.QUICConfig.InitialStreamReceiveWindow,
 		MaxStreamReceiveWindow:         config.QUICConfig.MaxStreamReceiveWindow,
@@ -43,6 +56,8 @@ func NewServer(config *Config) (Server, error) {
 		MaxIncomingStreams:             config.QUICConfig.MaxIncomingStreams,
 		DisablePathMTUDiscovery:        config.QUICConfig.DisablePathMTUDiscovery,
 		EnableDatagrams:                true,
+		MaxDatagramFrameSize:           protocol.MaxDatagramFrameSize,
+		DisablePathManager:             true,
 	}
 	listener, err := quic.Listen(config.Conn, tlsConfig, quicConfig)
 	if err != nil {
@@ -76,11 +91,11 @@ func (s *serverImpl) Close() error {
 	return err
 }
 
-func (s *serverImpl) handleClient(conn quic.Connection) {
+func (s *serverImpl) handleClient(conn *quic.Conn) {
 	handler := newH3sHandler(s.config, conn)
 	h3s := http3.Server{
-		Handler:        handler,
-		StreamHijacker: handler.ProxyStreamHijacker,
+		Handler:          handler,
+		StreamDispatcher: handler.ProxyStreamHijacker,
 	}
 	err := h3s.ServeQUICConn(conn)
 	// If the client is authenticated, we need to log the disconnect event
@@ -97,7 +112,7 @@ func (s *serverImpl) handleClient(conn quic.Connection) {
 
 type h3sHandler struct {
 	config *Config
-	conn   quic.Connection
+	conn   *quic.Conn
 
 	authenticated bool
 	authMutex     sync.Mutex
@@ -107,7 +122,7 @@ type h3sHandler struct {
 	udpSM *udpSessionManager // Only set after authentication
 }
 
-func newH3sHandler(config *Config, conn quic.Connection) *h3sHandler {
+func newH3sHandler(config *Config, conn *quic.Conn) *h3sHandler {
 	return &h3sHandler{
 		config: config,
 		conn:   conn,
@@ -192,20 +207,24 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *h3sHandler) ProxyStreamHijacker(ft http3.FrameType, id quic.ConnectionTracingID, stream quic.Stream, err error) (bool, error) {
+func (h *h3sHandler) ProxyStreamHijacker(ft http3.FrameType, stream *quic.Stream, err error) (bool, error) {
 	if err != nil || !h.authenticated {
 		return false, nil
 	}
 
-	// Wraps the stream with QStream, which handles Close() properly
-	stream = &utils.QStream{Stream: stream}
-
 	switch ft {
 	case protocol.FrameTypeTCPRequest:
+		// StreamDispatcher only peeks the frame type. Consume it so ReadTCPRequest
+		// starts at address length, matching pre-upgrade StreamHijacker behavior.
+		if _, err := quicvarint.Read(quicvarint.NewReader(stream)); err != nil {
+			return false, err
+		}
+		// Wraps the stream with QStream, which handles Close() properly
+		qStream := &utils.QStream{Stream: stream}
 		if h.config.StreamHijacker != nil {
-			h.config.StreamHijacker(ft, h.conn, stream, err)
+			h.config.StreamHijacker(ft, h.conn, qStream, err)
 		} else {
-			go h.handleTCPRequest(stream)
+			go h.handleTCPRequest(qStream)
 		}
 		return true, nil
 	default:
@@ -213,7 +232,7 @@ func (h *h3sHandler) ProxyStreamHijacker(ft http3.FrameType, id quic.ConnectionT
 	}
 }
 
-func (h *h3sHandler) handleTCPRequest(stream quic.Stream) {
+func (h *h3sHandler) handleTCPRequest(stream *utils.QStream) {
 	trafficLogger := h.config.TrafficLogger
 	streamStats := &StreamStats{
 		AuthID:      h.authID,
@@ -313,7 +332,7 @@ func (h *h3sHandler) masqHandler(w http.ResponseWriter, r *http.Request) {
 
 // udpIOImpl is the IO implementation for udpSessionManager with TrafficLogger support
 type udpIOImpl struct {
-	Conn          quic.Connection
+	Conn          *quic.Conn
 	AuthID        string
 	TrafficLogger TrafficLogger
 	RequestHook   RequestHook
@@ -374,7 +393,7 @@ func (io *udpIOImpl) UDP(reqAddr string) (UDPConn, error) {
 }
 
 type udpEventLoggerImpl struct {
-	Conn        quic.Connection
+	Conn        *quic.Conn
 	AuthID      string
 	EventLogger EventLogger
 }

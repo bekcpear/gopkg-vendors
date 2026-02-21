@@ -11,7 +11,7 @@ import (
 // By setting it to a large value, we allow all datagrams that fit into a QUIC packet.
 // The value is chosen such that it can still be encoded as a 2 byte varint.
 // This is a var and not a const so it can be set in tests.
-var MaxDatagramSize protocol.ByteCount = 1200
+var MaxDatagramSize protocol.ByteCount = 16383
 
 // A DatagramFrame is a DATAGRAM frame
 type DatagramFrame struct {
@@ -19,10 +19,10 @@ type DatagramFrame struct {
 	Data           []byte
 }
 
-func parseDatagramFrame(b []byte, typ uint64, _ protocol.Version) (*DatagramFrame, int, error) {
+func parseDatagramFrame(b []byte, typ FrameType, _ protocol.Version) (*DatagramFrame, int, error) {
 	startLen := len(b)
 	f := &DatagramFrame{}
-	f.DataLenPresent = typ&0x1 > 0
+	f.DataLenPresent = uint64(typ)&0x1 > 0
 
 	var length uint64
 	if f.DataLenPresent {

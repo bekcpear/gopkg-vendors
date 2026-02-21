@@ -64,7 +64,18 @@ func newUDPSessionEntry(
 		ExitFunc: exitFunc,
 	}
 
-	return
+	return e
+}
+
+func (e *UdpSessionEntry) SendChFuc(p *protocol.UDPMessage) error {
+	e.connLock.Lock()
+	defer e.connLock.Unlock()
+
+	if e.closed {
+		return errors.New("session is closed")
+	}
+	e.SendCh <- p
+	return nil
 }
 
 // CloseWithErr closes the session and calls ExitFunc with the given error.
@@ -79,12 +90,13 @@ func (e *UdpSessionEntry) CloseWithErr(err error) {
 		return
 	}
 
+	e.closed = true
+
 	if e.IsHijack {
 		close(e.ReceiveCh)
 		close(e.SendCh)
 	}
 
-	e.closed = true
 	if e.conn != nil {
 		_ = e.conn.Close()
 	}
@@ -106,8 +118,14 @@ func (e *UdpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
 	}
 
 	if e.IsHijack {
-		e.ReceiveCh <- dfMsg
-		return len(dfMsg.Data), nil
+		e.connLock.Lock()
+		err := errors.New("session is closed")
+		if !e.closed {
+			err = nil
+			e.ReceiveCh <- dfMsg
+		}
+		e.connLock.Unlock()
+		return len(dfMsg.Data), err
 	}
 
 	if e.conn == nil {
@@ -216,7 +234,7 @@ func sendMessageAutoFrag(io udpIO, buf []byte, msg *protocol.UDPMessage) error {
 	if errors.As(err, &errTooLarge) {
 		// Message too large, try fragmentation
 		msg.PacketID = uint16(rand.Intn(0xFFFF)) + 1
-		fMsgs := frag.FragUDPMessage(msg, int(errTooLarge.MaxDataLen))
+		fMsgs := frag.FragUDPMessage(msg, int(errTooLarge.MaxDatagramPayloadSize))
 		for _, fMsg := range fMsgs {
 			err := io.SendMessage(buf, &fMsg)
 			if err != nil {
@@ -285,10 +303,9 @@ func (m *udpSessionManager) idleCleanupLoop(stopCh <-chan struct{}) {
 }
 
 func (m *udpSessionManager) cleanup(idleOnly bool) {
-	timeoutEntry := make([]*UdpSessionEntry, 0, len(m.m))
-
 	// We use RLock here as we are only scanning the map, not deleting from it.
 	m.mutex.RLock()
+	timeoutEntry := make([]*UdpSessionEntry, 0, len(m.m))
 	now := time.Now()
 	for _, entry := range m.m {
 		if !idleOnly || now.Sub(entry.Last.Get()) > m.idleTimeout {
@@ -315,14 +332,14 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 			// Call the hook
 			err = m.io.Hook(firstMsgData, &addr)
 			if err != nil {
-				return
+				return conn, actualAddr, err
 			}
 			actualAddr = addr
 			// Log the event
 			m.eventLogger.New(msg.SessionID, addr)
 			// Dial target
 			conn, err = m.io.UDP(addr)
-			return
+			return conn, actualAddr, err
 		}
 		exitFunc := func(err error) {
 			// Log the event
@@ -342,8 +359,8 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 		m.mutex.Unlock()
 
 		if m.UdpSessionHijacker != nil {
-			entry.ReceiveCh = make(chan *protocol.UDPMessage, 1024)
-			entry.SendCh = make(chan *protocol.UDPMessage, 1024)
+			entry.ReceiveCh = make(chan *protocol.UDPMessage, 100)
+			entry.SendCh = make(chan *protocol.UDPMessage, 100)
 			entry.IsHijack = true
 			go entry.receiveLoop()
 			m.UdpSessionHijacker(entry, msg.Addr)

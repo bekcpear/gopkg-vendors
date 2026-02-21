@@ -17,7 +17,7 @@ type neighborCacheRWMutex struct {
 var neighborCachelockNames []string
 
 // lockNameIndex is used as an index passed to NestedLock and NestedUnlock,
-// refering to an index within lockNames.
+// referring to an index within lockNames.
 // Values are specified using the "consts" field of go_template_instance.
 type neighborCachelockNameIndex int
 
@@ -92,5 +92,5 @@ func neighborCacheinitLockNames() {}
 
 func init() {
 	neighborCacheinitLockNames()
-	neighborCacheprefixIndex = locking.NewMutexClass(reflect.TypeOf(neighborCacheRWMutex{}), neighborCachelockNames)
+	neighborCacheprefixIndex = locking.NewMutexClass(reflect.TypeFor[neighborCacheRWMutex](), neighborCachelockNames)
 }

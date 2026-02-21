@@ -17,7 +17,7 @@ type ipTablesRWMutex struct {
 var ipTableslockNames []string
 
 // lockNameIndex is used as an index passed to NestedLock and NestedUnlock,
-// refering to an index within lockNames.
+// referring to an index within lockNames.
 // Values are specified using the "consts" field of go_template_instance.
 type ipTableslockNameIndex int
 
@@ -92,5 +92,5 @@ func ipTablesinitLockNames() {}
 
 func init() {
 	ipTablesinitLockNames()
-	ipTablesprefixIndex = locking.NewMutexClass(reflect.TypeOf(ipTablesRWMutex{}), ipTableslockNames)
+	ipTablesprefixIndex = locking.NewMutexClass(reflect.TypeFor[ipTablesRWMutex](), ipTableslockNames)
 }

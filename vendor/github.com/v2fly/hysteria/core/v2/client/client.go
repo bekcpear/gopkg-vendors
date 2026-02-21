@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -26,8 +27,8 @@ type Client interface {
 	TCP(addr string) (net.Conn, error)
 	UDP() (HyUDPConn, error)
 	Close() error
-	OpenStream() (quic.Stream, error)
-	GetQuicConn() quic.Connection
+	OpenStream() (*utils.QStream, error)
+	GetQuicConn() *quic.Conn
 }
 
 type HyUDPConn interface {
@@ -59,7 +60,7 @@ type clientImpl struct {
 	config *Config
 
 	pktConn net.PacketConn
-	conn    quic.Connection
+	conn    *quic.Conn
 
 	udpSM *udpSessionManager
 }
@@ -75,6 +76,7 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 		InsecureSkipVerify:    c.config.TLSConfig.InsecureSkipVerify,
 		VerifyPeerCertificate: c.config.TLSConfig.VerifyPeerCertificate,
 		RootCAs:               c.config.TLSConfig.RootCAs,
+		GetClientCertificate:  c.config.TLSConfig.GetClientCertificate,
 	}
 	quicConfig := &quic.Config{
 		InitialStreamReceiveWindow:     c.config.QUICConfig.InitialStreamReceiveWindow,
@@ -85,13 +87,15 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 		KeepAlivePeriod:                c.config.QUICConfig.KeepAlivePeriod,
 		DisablePathMTUDiscovery:        c.config.QUICConfig.DisablePathMTUDiscovery,
 		EnableDatagrams:                true,
+		MaxDatagramFrameSize:           protocol.MaxDatagramFrameSize,
+		DisablePathManager:             true,
 	}
 	// Prepare RoundTripper
-	var conn quic.EarlyConnection
-	rt := &http3.RoundTripper{
+	var conn *quic.Conn
+	rt := &http3.Transport{
 		TLSClientConfig: tlsConfig,
 		QUICConfig:      quicConfig,
-		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			qc, err := quic.DialEarly(ctx, pktConn, c.config.ServerAddr, tlsCfg, cfg)
 			if err != nil {
 				return nil, err
@@ -162,7 +166,7 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 }
 
 // OpenStream wraps the stream with QStream, which handles Close() properly
-func (c *clientImpl) OpenStream() (quic.Stream, error) {
+func (c *clientImpl) OpenStream() (*utils.QStream, error) {
 	stream, err := c.conn.OpenStream()
 	if err != nil {
 		return nil, err
@@ -170,7 +174,7 @@ func (c *clientImpl) OpenStream() (quic.Stream, error) {
 	return &utils.QStream{Stream: stream}, nil
 }
 
-func (c *clientImpl) GetQuicConn() quic.Connection {
+func (c *clientImpl) GetQuicConn() *quic.Conn {
 	return c.conn
 }
 
@@ -227,22 +231,25 @@ func (c *clientImpl) Close() error {
 	return nil
 }
 
+var nonPermanentErrors = []error{
+	quic.StreamLimitReachedError{},
+}
+
 // wrapIfConnectionClosed checks if the error returned by quic-go
-// indicates that the QUIC connection has been permanently closed,
-// and if so, wraps the error with coreErrs.ClosedError.
-// PITFALL: sometimes quic-go has "internal errors" that are not net.Error,
-// but we still need to treat them as ClosedError.
+// is recoverable (listed in nonPermanentErrors) or permanent.
+// Recoverable errors are returned as-is,
+// permanent ones are wrapped as ClosedError.
 func wrapIfConnectionClosed(err error) error {
-	netErr, ok := err.(net.Error)
-	if !ok || !netErr.Temporary() {
-		return coreErrs.ClosedError{Err: err}
-	} else {
-		return err
+	for _, e := range nonPermanentErrors {
+		if errors.Is(err, e) {
+			return err
+		}
 	}
+	return coreErrs.ClosedError{Err: err}
 }
 
 type tcpConn struct {
-	Orig             quic.Stream
+	Orig             *utils.QStream
 	PseudoLocalAddr  net.Addr
 	PseudoRemoteAddr net.Addr
 	Established      bool
@@ -292,7 +299,7 @@ func (c *tcpConn) SetWriteDeadline(t time.Time) error {
 }
 
 type udpIOImpl struct {
-	Conn quic.Connection
+	Conn *quic.Conn
 }
 
 func (io *udpIOImpl) ReceiveMessage() (*protocol.UDPMessage, error) {

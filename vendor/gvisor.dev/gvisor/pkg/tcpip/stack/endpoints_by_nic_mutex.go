@@ -17,7 +17,7 @@ type endpointsByNICRWMutex struct {
 var endpointsByNIClockNames []string
 
 // lockNameIndex is used as an index passed to NestedLock and NestedUnlock,
-// refering to an index within lockNames.
+// referring to an index within lockNames.
 // Values are specified using the "consts" field of go_template_instance.
 type endpointsByNIClockNameIndex int
 
@@ -92,5 +92,5 @@ func endpointsByNICinitLockNames() {}
 
 func init() {
 	endpointsByNICinitLockNames()
-	endpointsByNICprefixIndex = locking.NewMutexClass(reflect.TypeOf(endpointsByNICRWMutex{}), endpointsByNIClockNames)
+	endpointsByNICprefixIndex = locking.NewMutexClass(reflect.TypeFor[endpointsByNICRWMutex](), endpointsByNIClockNames)
 }

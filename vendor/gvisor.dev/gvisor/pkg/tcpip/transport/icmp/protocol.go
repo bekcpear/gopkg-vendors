@@ -35,6 +35,8 @@ const (
 )
 
 // protocol implements stack.TransportProtocol.
+//
+// +stateify savable
 type protocol struct {
 	stack *stack.Stack
 
@@ -100,7 +102,7 @@ func (p *protocol) ParsePorts(v []byte) (src, dst uint16, err tcpip.Error) {
 
 // HandleUnknownDestinationPacket handles packets targeted at this protocol but
 // that don't match any existing endpoint.
-func (*protocol) HandleUnknownDestinationPacket(stack.TransportEndpointID, stack.PacketBufferPtr) stack.UnknownDestinationPacketDisposition {
+func (*protocol) HandleUnknownDestinationPacket(stack.TransportEndpointID, *stack.PacketBuffer) stack.UnknownDestinationPacketDisposition {
 	return stack.UnknownDestinationPacketHandled
 }
 
@@ -126,8 +128,11 @@ func (*protocol) Pause() {}
 // Resume implements stack.TransportProtocol.Resume.
 func (*protocol) Resume() {}
 
+// Restore implements stack.TransportProtocol.Restore.
+func (*protocol) Restore() {}
+
 // Parse implements stack.TransportProtocol.Parse.
-func (*protocol) Parse(pkt stack.PacketBufferPtr) bool {
+func (*protocol) Parse(pkt *stack.PacketBuffer) bool {
 	// Right now, the Parse() method is tied to enabled protocols passed into
 	// stack.New. This works for UDP and TCP, but we handle ICMP traffic even
 	// when netstack users don't pass ICMP as a supported protocol.

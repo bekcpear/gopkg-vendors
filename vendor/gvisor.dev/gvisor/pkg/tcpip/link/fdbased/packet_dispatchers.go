@@ -20,16 +20,19 @@ package fdbased
 import (
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/rawfile"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/header"
-	"gvisor.dev/gvisor/pkg/tcpip/link/rawfile"
 	"gvisor.dev/gvisor/pkg/tcpip/link/stopfd"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/stack/gro"
 )
 
 // BufConfig defines the shape of the buffer used to read packets from the NIC.
+// The duplication of 256 is intended so that the sum of the elements can cover
+// the maximum packet size we expect to receive. See TestBufConfigMaxLength.
 var BufConfig = []int{128, 256, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768}
 
+// +stateify savable
 type iovecBuffer struct {
 	// buffer is the actual buffer that holds the packet contents. Some contents
 	// are reused across calls to pullBuffer if number of requested bytes is
@@ -41,7 +44,7 @@ type iovecBuffer struct {
 	// (skipsVnetHdr) then the first iovec points to a buffer for the vnet header
 	// which is stripped before the views are passed up the stack for further
 	// processing.
-	iovecs []unix.Iovec
+	iovecs []unix.Iovec `state:"nosave"`
 
 	// sizes is an array of buffer sizes for the underlying views. sizes is
 	// immutable.
@@ -144,6 +147,8 @@ func (b *iovecBuffer) release() {
 
 // readVDispatcher uses readv() system call to read inbound packets and
 // dispatches them.
+//
+// +stateify savable
 type readVDispatcher struct {
 	stopfd.StopFD
 	// fd is the file descriptor used to send and receive packets.
@@ -154,9 +159,12 @@ type readVDispatcher struct {
 
 	// buf is the iovec buffer that contains the packet contents.
 	buf *iovecBuffer
+
+	// mgr is the processor goroutine manager.
+	mgr *processorManager
 }
 
-func newReadVDispatcher(fd int, e *endpoint) (linkDispatcher, error) {
+func newReadVDispatcher(fd int, e *endpoint, opts *Options) (linkDispatcher, error) {
 	stopFD, err := stopfd.New()
 	if err != nil {
 		return nil, err
@@ -168,18 +176,21 @@ func newReadVDispatcher(fd int, e *endpoint) (linkDispatcher, error) {
 	}
 	skipsVnetHdr := d.e.gsoKind == stack.HostGSOSupported
 	d.buf = newIovecBuffer(BufConfig, skipsVnetHdr)
+	d.mgr = newProcessorManager(opts, e)
+	d.mgr.start()
 	return d, nil
 }
 
 func (d *readVDispatcher) release() {
 	d.buf.release()
+	d.mgr.close()
 }
 
 // dispatch reads one packet from the file descriptor and dispatches it.
 func (d *readVDispatcher) dispatch() (bool, tcpip.Error) {
-	n, err := rawfile.BlockingReadvUntilStopped(d.EFD, d.fd, d.buf.nextIovecs())
-	if n <= 0 || err != nil {
-		return false, err
+	n, errno := rawfile.BlockingReadvUntilStopped(d.EFD, d.fd, d.buf.nextIovecs())
+	if n <= 0 || errno != 0 {
+		return false, tcpip.TranslateErrno(errno)
 	}
 
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
@@ -187,40 +198,21 @@ func (d *readVDispatcher) dispatch() (bool, tcpip.Error) {
 	})
 	defer pkt.DecRef()
 
-	var p tcpip.NetworkProtocolNumber
-	if d.e.hdrSize > 0 {
-		if !d.e.parseHeader(pkt) {
-			return false, nil
-		}
-		p = header.Ethernet(pkt.LinkHeader().Slice()).Type()
-	} else {
-		// We don't get any indication of what the packet is, so try to guess
-		// if it's an IPv4 or IPv6 packet.
-		// IP version information is at the first octet, so pulling up 1 byte.
-		h, ok := pkt.Data().PullUp(1)
-		if !ok {
-			return true, nil
-		}
-		switch header.IPVersion(h) {
-		case header.IPv4Version:
-			p = header.IPv4ProtocolNumber
-		case header.IPv6Version:
-			p = header.IPv6ProtocolNumber
-		default:
-			return true, nil
-		}
-	}
-
 	d.e.mu.RLock()
-	dsp := d.e.dispatcher
+	addr := d.e.addr
 	d.e.mu.RUnlock()
-	dsp.DeliverNetworkPacket(p, pkt)
-
+	if !d.e.parseInboundHeader(pkt, addr) {
+		return false, nil
+	}
+	d.mgr.queuePacket(pkt, d.e.hdrSize > 0)
+	d.mgr.wakeReady()
 	return true, nil
 }
 
 // recvMMsgDispatcher uses the recvmmsg system call to read inbound packets and
 // dispatches them.
+//
+// +stateify savable
 type recvMMsgDispatcher struct {
 	stopfd.StopFD
 	// fd is the file descriptor used to send and receive packets.
@@ -236,7 +228,16 @@ type recvMMsgDispatcher struct {
 	// reference an array of iovecs in the iovecs field defined above.  This
 	// array is passed as the parameter to recvmmsg call to retrieve
 	// potentially more than 1 packet per unix.
-	msgHdrs []rawfile.MMsgHdr
+	msgHdrs []rawfile.MMsgHdr `state:"nosave"`
+
+	// pkts is reused to avoid allocations.
+	pkts stack.PacketBufferList
+
+	// gro coalesces incoming packets to increase throughput.
+	gro gro.GRO
+
+	// mgr is the processor goroutine manager.
+	mgr *processorManager
 }
 
 const (
@@ -245,7 +246,7 @@ const (
 	MaxMsgsPerRecv = 8
 )
 
-func newRecvMMsgDispatcher(fd int, e *endpoint) (linkDispatcher, error) {
+func newRecvMMsgDispatcher(fd int, e *endpoint, opts *Options) (linkDispatcher, error) {
 	stopFD, err := stopfd.New()
 	if err != nil {
 		return nil, err
@@ -261,6 +262,10 @@ func newRecvMMsgDispatcher(fd int, e *endpoint) (linkDispatcher, error) {
 	for i := range d.bufs {
 		d.bufs[i] = newIovecBuffer(BufConfig, skipsVnetHdr)
 	}
+	d.gro.Init(opts.GRO)
+	d.mgr = newProcessorManager(opts, e)
+	d.mgr.start()
+
 	return d, nil
 }
 
@@ -268,6 +273,7 @@ func (d *recvMMsgDispatcher) release() {
 	for _, iov := range d.bufs {
 		iov.release()
 	}
+	d.mgr.close()
 }
 
 // recvMMsgDispatch reads more than one packet at a time from the file
@@ -285,58 +291,40 @@ func (d *recvMMsgDispatcher) dispatch() (bool, tcpip.Error) {
 		d.msgHdrs[k].Msg.SetIovlen(iovLen)
 	}
 
-	nMsgs, err := rawfile.BlockingRecvMMsgUntilStopped(d.EFD, d.fd, d.msgHdrs)
-	if nMsgs == -1 || err != nil {
-		return false, err
+	nMsgs, errno := rawfile.BlockingRecvMMsgUntilStopped(d.EFD, d.fd, d.msgHdrs)
+	if errno != 0 {
+		return false, tcpip.TranslateErrno(errno)
 	}
+	if nMsgs == -1 {
+		return false, nil
+	}
+
 	// Process each of received packets.
-	// Keep a list of packets so we can DecRef outside of the loop.
-	var pkts stack.PacketBufferList
 
 	d.e.mu.RLock()
+	addr := d.e.addr
 	dsp := d.e.dispatcher
 	d.e.mu.RUnlock()
 
-	defer func() { pkts.DecRef() }()
+	d.gro.Dispatcher = dsp
+	defer d.pkts.Reset()
+
 	for k := 0; k < nMsgs; k++ {
 		n := int(d.msgHdrs[k].Len)
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 			Payload: d.bufs[k].pullBuffer(n),
 		})
-		pkts.PushBack(pkt)
+		d.pkts.PushBack(pkt)
 
 		// Mark that this iovec has been processed.
 		d.msgHdrs[k].Msg.Iovlen = 0
 
-		var p tcpip.NetworkProtocolNumber
-		if d.e.hdrSize > 0 {
-			hdr, ok := pkt.LinkHeader().Consume(d.e.hdrSize)
-			if !ok {
-				return false, nil
-			}
-			p = header.Ethernet(hdr).Type()
-		} else {
-			// We don't get any indication of what the packet is, so try to guess
-			// if it's an IPv4 or IPv6 packet.
-			// IP version information is at the first octet, so pulling up 1 byte.
-			h, ok := pkt.Data().PullUp(1)
-			if !ok {
-				// Skip this packet.
-				continue
-			}
-			switch header.IPVersion(h) {
-			case header.IPv4Version:
-				p = header.IPv4ProtocolNumber
-			case header.IPv6Version:
-				p = header.IPv6ProtocolNumber
-			default:
-				// Skip this packet.
-				continue
-			}
+		if d.e.parseInboundHeader(pkt, addr) {
+			pkt.RXChecksumValidated = d.e.caps&stack.CapabilityRXChecksumOffload != 0
+			d.mgr.queuePacket(pkt, d.e.hdrSize > 0)
 		}
-
-		dsp.DeliverNetworkPacket(p, pkt)
 	}
+	d.mgr.wakeReady()
 
 	return true, nil
 }

@@ -15,7 +15,6 @@
 package tcp
 
 import (
-	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/seqnum"
@@ -35,7 +34,7 @@ type Forwarder struct {
 	maxInFlight int
 	handler     func(*ForwarderRequest)
 
-	mu       sync.Mutex
+	mu       forwarderMutex
 	inFlight map[stack.TransportEndpointID]struct{}
 	listen   *listenContext
 }
@@ -64,7 +63,7 @@ func NewForwarder(s *stack.Stack, rcvWnd, maxInFlight int, handler func(*Forward
 //
 // This function is expected to be passed as an argument to the
 // stack.SetTransportProtocolHandler function.
-func (f *Forwarder) HandlePacket(id stack.TransportEndpointID, pkt stack.PacketBufferPtr) bool {
+func (f *Forwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
 	s, err := newIncomingSegment(id, f.stack.Clock(), pkt)
 	if err != nil {
 		return false
@@ -108,7 +107,7 @@ func (f *Forwarder) HandlePacket(id stack.TransportEndpointID, pkt stack.PacketB
 // and passed to the client. Clients must eventually call Complete() on it, and
 // may optionally create an endpoint to represent it via CreateEndpoint.
 type ForwarderRequest struct {
-	mu         sync.Mutex
+	mu         forwarderRequestMutex
 	forwarder  *Forwarder
 	segment    *segment
 	synOptions header.TCPSynOptions
@@ -169,4 +168,13 @@ func (r *ForwarderRequest) CreateEndpoint(queue *waiter.Queue) (tcpip.Endpoint, 
 	}
 
 	return ep, nil
+}
+
+// ForwardedPacketExperimentOption returns the experiment option value from the
+// forwarded packet and a bool indicating whether an experiment option value was
+// found.
+func (r *ForwarderRequest) ForwardedPacketExperimentOption() (uint16, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.segment.pkt.ExperimentOptionValue()
 }

@@ -17,7 +17,7 @@ type stateConnRWMutex struct {
 var stateConnlockNames []string
 
 // lockNameIndex is used as an index passed to NestedLock and NestedUnlock,
-// refering to an index within lockNames.
+// referring to an index within lockNames.
 // Values are specified using the "consts" field of go_template_instance.
 type stateConnlockNameIndex int
 
@@ -92,5 +92,5 @@ func stateConninitLockNames() {}
 
 func init() {
 	stateConninitLockNames()
-	stateConnprefixIndex = locking.NewMutexClass(reflect.TypeOf(stateConnRWMutex{}), stateConnlockNames)
+	stateConnprefixIndex = locking.NewMutexClass(reflect.TypeFor[stateConnRWMutex](), stateConnlockNames)
 }

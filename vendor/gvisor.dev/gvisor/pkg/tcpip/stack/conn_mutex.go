@@ -17,7 +17,7 @@ type connRWMutex struct {
 var connlockNames []string
 
 // lockNameIndex is used as an index passed to NestedLock and NestedUnlock,
-// refering to an index within lockNames.
+// referring to an index within lockNames.
 // Values are specified using the "consts" field of go_template_instance.
 type connlockNameIndex int
 
@@ -92,5 +92,5 @@ func conninitLockNames() {}
 
 func init() {
 	conninitLockNames()
-	connprefixIndex = locking.NewMutexClass(reflect.TypeOf(connRWMutex{}), connlockNames)
+	connprefixIndex = locking.NewMutexClass(reflect.TypeFor[connRWMutex](), connlockNames)
 }

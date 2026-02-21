@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package linuxerr contains syscall error codes exported as an error interface
-// pointers. This allows for fast comparison and return operations comperable
+// pointers. This allows for fast comparison and return operations comparable
 // to unix.Errno constants.
 package linuxerr
 
@@ -29,7 +29,7 @@ const maxErrno uint32 = errno.EHWPOISON + 1
 
 // The following errors are semantically identical to Errno of type unix.Errno
 // or sycall.Errno. However, since the type are distinct ( these are
-// *errors.Error), they are not directly comperable. However, the Errno method
+// *errors.Error), they are not directly comparable. However, the Errno method
 // returns an Errno number such that the error can be compared to unix/syscall.Errno
 // (e.g. unix.Errno(EPERM.Errno()) == unix.EPERM is true). Converting unix/syscall.Errno
 // to the errors should be done via the lookup methods provided.
@@ -252,7 +252,7 @@ var errorSlice = []*errors.Error{
 	errno.ENODATA:         ENODATA,
 	errno.ETIME:           ETIME,
 	errno.ENOSR:           ENOSR,
-	errno.ENOSR + 1:       errNotValidError, // No valid errno betweeen ENOSR and ENOPKG.
+	errno.ENOSR + 1:       errNotValidError, // No valid errno between ENOSR and ENOPKG.
 	errno.ENOPKG:          ENOPKG,
 	errno.EREMOTE:         EREMOTE,
 	errno.ENOLINK:         ENOLINK,
@@ -355,7 +355,7 @@ func ToUnix(e *errors.Error) unix.Errno {
 	return unixErr
 }
 
-// Equals compars a linuxerr to a given error.
+// Equals compares a linuxerr to a given error.
 func Equals(e *errors.Error, err error) bool {
 	var unixErr unix.Errno
 	if e != noError {

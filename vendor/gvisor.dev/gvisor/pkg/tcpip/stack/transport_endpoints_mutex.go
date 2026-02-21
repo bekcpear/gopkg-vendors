@@ -17,7 +17,7 @@ type transportEndpointsRWMutex struct {
 var transportEndpointslockNames []string
 
 // lockNameIndex is used as an index passed to NestedLock and NestedUnlock,
-// refering to an index within lockNames.
+// referring to an index within lockNames.
 // Values are specified using the "consts" field of go_template_instance.
 type transportEndpointslockNameIndex int
 
@@ -92,5 +92,5 @@ func transportEndpointsinitLockNames() {}
 
 func init() {
 	transportEndpointsinitLockNames()
-	transportEndpointsprefixIndex = locking.NewMutexClass(reflect.TypeOf(transportEndpointsRWMutex{}), transportEndpointslockNames)
+	transportEndpointsprefixIndex = locking.NewMutexClass(reflect.TypeFor[transportEndpointsRWMutex](), transportEndpointslockNames)
 }

@@ -17,7 +17,7 @@ type routeStackRWMutex struct {
 var routeStacklockNames []string
 
 // lockNameIndex is used as an index passed to NestedLock and NestedUnlock,
-// refering to an index within lockNames.
+// referring to an index within lockNames.
 // Values are specified using the "consts" field of go_template_instance.
 type routeStacklockNameIndex int
 
@@ -92,5 +92,5 @@ func routeStackinitLockNames() {}
 
 func init() {
 	routeStackinitLockNames()
-	routeStackprefixIndex = locking.NewMutexClass(reflect.TypeOf(routeStackRWMutex{}), routeStacklockNames)
+	routeStackprefixIndex = locking.NewMutexClass(reflect.TypeFor[routeStackRWMutex](), routeStacklockNames)
 }
