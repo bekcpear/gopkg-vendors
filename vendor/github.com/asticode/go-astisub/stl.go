@@ -378,10 +378,14 @@ func newGSIBlock(s Subtitles) (g *gsiBlock) {
 			g.creationDate = *s.Metadata.STLCreationDate
 		}
 		g.countryOfOrigin = s.Metadata.STLCountryOfOrigin
-		g.displayStandardCode = s.Metadata.STLDisplayStandardCode
+		if s.Metadata.STLDisplayStandardCode != "" {
+			g.displayStandardCode = s.Metadata.STLDisplayStandardCode
+		}
 		g.editorContactDetails = s.Metadata.STLEditorContactDetails
 		g.editorName = s.Metadata.STLEditorName
-		g.framerate = s.Metadata.Framerate
+		if s.Metadata.Framerate > 0 {
+			g.framerate = s.Metadata.Framerate
+		}
 		if v, ok := stlLanguageMapping.GetInverse(s.Metadata.Language); ok {
 			g.languageCode = v.(string)
 		}
@@ -664,7 +668,7 @@ type ttiBlock struct {
 }
 
 // newTTIBlock builds an item TTI block
-func newTTIBlock(i *Item, idx int) (t *ttiBlock) {
+func newTTIBlock(i *Item, idx int, dsc string) (t *ttiBlock) {
 	// Init
 	t = &ttiBlock{
 		commentFlag:          stlCommentFlagTextContainsSubtitleData,
@@ -685,9 +689,14 @@ func newTTIBlock(i *Item, idx int) (t *ttiBlock) {
 		for _, li := range l.Items {
 			lineItems = append(lineItems, li.STLString())
 		}
-		lines = append(lines, strings.Join(lineItems, " "))
+		var lineText = strings.Join(lineItems, " ")
+		// For teletext, prepend start box control code
+		if dsc != stlDisplayStandardCodeOpenSubtitling {
+			lineText = string(rune(0x0b)) + lineText
+		}
+		lines = append(lines, lineText)
 	}
-	t.text = []byte(strings.Join(lines, string(rune(stlLineSeparator))))
+	t.text = encodeTextSTL(strings.Join(lines, string(rune(stlLineSeparator))))
 	return
 }
 
@@ -720,6 +729,31 @@ func stlVerticalPositionFromStyle(sa *StyleAttributes) int {
 func (li LineItem) STLString() string {
 	rs := li.Text
 	if li.InlineStyle != nil {
+		// Add color code prefix
+		if li.InlineStyle.STLColor != nil {
+			var colorCode byte
+			switch li.InlineStyle.STLColor {
+			case ColorBlack:
+				colorCode = 0x00
+			case ColorRed:
+				colorCode = 0x01
+			case ColorGreen:
+				colorCode = 0x02
+			case ColorYellow:
+				colorCode = 0x03
+			case ColorBlue:
+				colorCode = 0x04
+			case ColorMagenta:
+				colorCode = 0x05
+			case ColorCyan:
+				colorCode = 0x06
+			case ColorWhite:
+				colorCode = 0x07
+			default:
+				colorCode = 0x07 // Default to white
+			}
+			rs = string(rune(colorCode)) + rs
+		}
 		if li.InlineStyle.STLItalics != nil && *li.InlineStyle.STLItalics {
 			rs = string(rune(0x80)) + rs + string(rune(0x81))
 		}
@@ -754,15 +788,15 @@ func (t *ttiBlock) bytes(g *gsiBlock) (o []byte) {
 	o = append(o, byte(uint8(t.subtitleGroupNumber))) // Subtitle group number
 	var b = make([]byte, 2)
 	binary.LittleEndian.PutUint16(b, uint16(t.subtitleNumber))
-	o = append(o, b...)                                                                                              // Subtitle number
-	o = append(o, byte(uint8(t.extensionBlockNumber)))                                                               // Extension block number
-	o = append(o, t.cumulativeStatus)                                                                                // Cumulative status
-	o = append(o, formatDurationSTLBytes(t.timecodeIn, g.framerate)...)                                              // Timecode in
-	o = append(o, formatDurationSTLBytes(t.timecodeOut, g.framerate)...)                                             // Timecode out
-	o = append(o, validateVerticalPosition(t.verticalPosition, g.displayStandardCode))                               // Vertical position
-	o = append(o, t.justificationCode)                                                                               // Justification code
-	o = append(o, t.commentFlag)                                                                                     // Comment flag
-	o = append(o, astikit.BytesPad(encodeTextSTL(string(t.text)), '\x8f', 112, astikit.PadRight, astikit.PadCut)...) // Text field
+	o = append(o, b...)                                                                       // Subtitle number
+	o = append(o, byte(uint8(t.extensionBlockNumber)))                                        // Extension block number
+	o = append(o, t.cumulativeStatus)                                                         // Cumulative status
+	o = append(o, formatDurationSTLBytes(t.timecodeIn, g.framerate)...)                       // Timecode in
+	o = append(o, formatDurationSTLBytes(t.timecodeOut, g.framerate)...)                      // Timecode out
+	o = append(o, validateVerticalPosition(t.verticalPosition, g.displayStandardCode))        // Vertical position
+	o = append(o, t.justificationCode)                                                        // Justification code
+	o = append(o, t.commentFlag)                                                              // Comment flag
+	o = append(o, astikit.BytesPad(t.text, '\x8f', 112, astikit.PadRight, astikit.PadCut)...) // Text field
 	return
 }
 
@@ -858,6 +892,7 @@ func (h *stlCharacterHandler) decode(i byte) (o []byte) {
 
 type stlStyler struct {
 	boxing    *bool
+	color     *Color
 	italics   *bool
 	underline *bool
 }
@@ -868,6 +903,22 @@ func newSTLStyler() *stlStyler {
 
 func (s *stlStyler) parseSpacingAttribute(i byte) {
 	switch i {
+	case 0x00:
+		s.color = ColorBlack
+	case 0x01:
+		s.color = ColorRed
+	case 0x02:
+		s.color = ColorGreen
+	case 0x03:
+		s.color = ColorYellow
+	case 0x04:
+		s.color = ColorBlue
+	case 0x05:
+		s.color = ColorMagenta
+	case 0x06:
+		s.color = ColorCyan
+	case 0x07:
+		s.color = ColorWhite
 	case 0x80:
 		s.italics = astikit.BoolPtr(true)
 	case 0x81:
@@ -884,11 +935,11 @@ func (s *stlStyler) parseSpacingAttribute(i byte) {
 }
 
 func (s *stlStyler) hasBeenSet() bool {
-	return s.italics != nil || s.boxing != nil || s.underline != nil
+	return s.italics != nil || s.boxing != nil || s.underline != nil || s.color != nil
 }
 
 func (s *stlStyler) hasChanged(sa *StyleAttributes) bool {
-	return s.boxing != sa.STLBoxing || s.italics != sa.STLItalics || s.underline != sa.STLUnderline
+	return s.boxing != sa.STLBoxing || s.italics != sa.STLItalics || s.underline != sa.STLUnderline || s.color != sa.STLColor
 }
 
 func (s *stlStyler) propagateStyleAttributes(sa *StyleAttributes) {
@@ -898,6 +949,9 @@ func (s *stlStyler) propagateStyleAttributes(sa *StyleAttributes) {
 func (s *stlStyler) update(sa *StyleAttributes) {
 	if s.boxing != nil && s.boxing != sa.STLBoxing {
 		sa.STLBoxing = s.boxing
+	}
+	if s.color != nil && s.color != sa.STLColor {
+		sa.STLColor = s.color
 	}
 	if s.italics != nil && s.italics != sa.STLItalics {
 		sa.STLItalics = s.italics
@@ -925,7 +979,7 @@ func (s Subtitles) WriteToSTL(o io.Writer) (err error) {
 	// Loop through items
 	for idx, item := range s.Items {
 		// Write tti block
-		if _, err = o.Write(newTTIBlock(item, idx+1).bytes(g)); err != nil {
+		if _, err = o.Write(newTTIBlock(item, idx+1, g.displayStandardCode).bytes(g)); err != nil {
 			err = fmt.Errorf("astisub: writing tti block #%d failed: %w", idx+1, err)
 			return
 		}
@@ -1044,10 +1098,6 @@ func parseSTLJustificationCode(i byte) Justification {
 	}
 }
 
-func isTeletextControlCode(i byte) (b bool) {
-	return i <= 0x1f
-}
-
 func parseOpenSubtitleRow(i *Item, d decoder, fs func() styler, row []byte) error {
 	// Loop through columns
 	var l = Line{}
@@ -1059,14 +1109,22 @@ func parseOpenSubtitleRow(i *Item, d decoder, fs func() styler, row []byte) erro
 			s = fs()
 		}
 
-		if isTeletextControlCode(v) {
+		// Check if this is a valid control code (color or style codes)
+		isTeletextControlCode := v <= 0x1f
+		isColorCode := v >= 0x00 && v <= 0x07
+		isStyleCode := v >= 0x80 && v <= 0x85
+
+		// Error on teletext control codes that aren't color or style codes
+		if isTeletextControlCode && !isColorCode && !isStyleCode {
 			return errors.New("teletext control code in open text")
 		}
+
+		// Parse spacing attributes (color and style codes)
 		if s != nil {
 			s.parseSpacingAttribute(v)
 		}
 
-		// Style has been set
+		// Style has been set by a control code
 		if s != nil && s.hasBeenSet() {
 			// Style has changed
 			if s.hasChanged(li.InlineStyle) {
@@ -1081,10 +1139,12 @@ func parseOpenSubtitleRow(i *Item, d decoder, fs func() styler, row []byte) erro
 				}
 				s.update(li.InlineStyle)
 			}
-		} else {
-			// Append text
-			li.Text += string(d.decode(v))
+			// Control codes don't get appended as text, continue to next byte
+			continue
 		}
+
+		// Not a control code, append as text
+		li.Text += string(d.decode(v))
 	}
 
 	appendOpenSubtitleLineItem(&l, li, s)
