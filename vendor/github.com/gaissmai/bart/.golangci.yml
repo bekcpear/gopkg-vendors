@@ -1,34 +1,60 @@
+version: '2'
+run:
+  timeout: 5m
 linters:
   enable:
-    - gofmt
-    - gofumpt
-    - goimports
-    - govet
-    - gosimple
-    - gocyclo
-    - gosmopolitan
-    - errcheck
-    - staticcheck
-    - intrange
-    - ineffassign
-    - unused
-    - typecheck
-    - unconvert
-    - unparam
-    - misspell
     - decorder
     - errorlint
+    - gocyclo
+    - govet
+    - gosec
+    - gosmopolitan
+    - intrange
+    - misspell
     - predeclared
     - reassign
-    - stylecheck
+    - staticcheck
+    - unconvert
+    - unparam
     - usestdlibvars
     - wastedassign
-    - nakedret
-    #
-    # - gosec
-    # - dupl
-    # - wrapcheck
+    - copyloopvar
+    - tparallel
+    - gochecknoglobals
+    - nolintlint
+    - modernize
+  settings:
+    govet:
+      enable:
+        - shadow
+    gocyclo:
+      min-complexity: 30
+    gosec:
+      excludes:
+        - G404             # deterministic RNG in tests/benchmarks only
+  exclusions:
+    rules:
+      - path: '(.+)_test\.go'
+        linters:
+          - gochecknoglobals
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 
-linters-settings:
-  gocyclo:
-    min-complexity: 30
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
