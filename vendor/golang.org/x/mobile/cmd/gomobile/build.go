@@ -1,4 +1,4 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -317,6 +317,9 @@ func goCmdAt(at string, subcmd string, srcs []string, env []string, args ...stri
 	}
 	if buildX {
 		cmd.Args = append(cmd.Args, "-x")
+	}
+	if buildA {
+		cmd.Args = append(cmd.Args, "-a")
 	}
 	if buildGcflags != "" {
 		cmd.Args = append(cmd.Args, "-gcflags", buildGcflags)

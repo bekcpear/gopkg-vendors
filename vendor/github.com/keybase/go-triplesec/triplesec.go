@@ -20,9 +20,8 @@ import (
 
 	"golang.org/x/crypto/salsa20"
 	"golang.org/x/crypto/scrypt"
+	"golang.org/x/crypto/sha3"
 	"golang.org/x/crypto/twofish" //nolint
-
-	"github.com/keybase/go-crypto/sha3"
 )
 
 type RandomnessGenerator interface {
@@ -55,14 +54,16 @@ func (rtg RandomTapeGenerator) Read(b []byte) (n int, err error) {
 
 var _ RandomnessGenerator = (*RandomTapeGenerator)(nil)
 
-const SaltLen = 16
-const VersionBytesLen = 4
-const AESIVLen = 16
-const TwofishIVLen = 16
-const SalsaIVLen = 24
-const MacOutputLen = 64
-const MacKeyLen = 48
-const CipherKeyLen = 32
+const (
+	SaltLen         = 16
+	VersionBytesLen = 4
+	AESIVLen        = 16
+	TwofishIVLen    = 16
+	SalsaIVLen      = 24
+	MacOutputLen    = 64
+	MacKeyLen       = 48
+	CipherKeyLen    = 32
+)
 
 type Version uint32
 
@@ -164,7 +165,6 @@ func (c *Cipher) GetSalt() ([]byte, error) {
 }
 
 func (c *Cipher) DeriveKey(extra int) ([]byte, []byte, error) {
-
 	dkLen := c.versionParams.DkLen + extra
 
 	if c.derivedKey == nil || len(c.derivedKey) < dkLen {

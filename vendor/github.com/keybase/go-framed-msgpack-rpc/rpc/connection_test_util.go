@@ -1,12 +1,11 @@
 package rpc
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
 	"time"
-
-	"golang.org/x/net/context"
 )
 
 type testConnectionHandler struct{}
@@ -132,6 +131,10 @@ const testMaxFrameLength = 1024
 func MakeConnectionForTest(t TestLogger) (net.Conn, *Connection) {
 	clientConn, serverConn := net.Pipe()
 	logOutput := testLogOutput{t: t}
+	// If t has a Cleanup method (like *testing.T), register cleanup
+	if tc, ok := t.(interface{ Cleanup(func()) }); ok {
+		tc.Cleanup(func() { logOutput.MarkDone() })
+	}
 	logFactory := NewSimpleLogFactory(&logOutput, nil)
 	instrumenterStorage := NewMemoryInstrumentationStorage()
 	transporter := NewTransport(clientConn, logFactory,

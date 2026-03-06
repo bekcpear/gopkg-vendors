@@ -1,3 +1,7 @@
+// Copyright 2015 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package main
 
 import (
@@ -6,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -140,7 +143,7 @@ func buildEnvInit() (cleanup func(), err error) {
 		tmpdir = "$WORK"
 		cleanupFn = func() {}
 	} else {
-		tmpdir, err = ioutil.TempDir("", "gomobile-work-")
+		tmpdir, err = os.MkdirTemp("", "gomobile-work-")
 		if err != nil {
 			return nil, err
 		}
@@ -336,7 +339,7 @@ func checkNDKRoot(ndkRoot string, targets []targetInfo) error {
 
 // compatibleNDKRoots searches the side-by-side NDK dirs for compatible SDKs.
 func compatibleNDKRoots(ndkForest string, targets []targetInfo) ([]string, error) {
-	ndkDirs, err := ioutil.ReadDir(ndkForest)
+	ndkDirs, err := os.ReadDir(ndkForest)
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +390,7 @@ func ndkRoot(targets ...targetInfo) (string, error) {
 		return "$NDK_PATH", nil
 	}
 
-	// Try the ANDROID_NDK_HOME variable.  This approach is deprecated, but it
+	// Try the ANDROID_NDK_HOME variable. This approach is deprecated, but it
 	// has the highest priority because it represents an explicit user choice.
 	if ndkRoot := os.Getenv("ANDROID_NDK_HOME"); ndkRoot != "" {
 		if err := checkNDKRoot(ndkRoot, targets); err != nil {
