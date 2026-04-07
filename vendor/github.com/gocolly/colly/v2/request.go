@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
 )
 
 // Request is the representation of a HTTP request made by a Collector
@@ -81,7 +80,7 @@ func (r *Request) New(method, URL string, body io.Reader) (*Request, error) {
 		Ctx:       r.Ctx,
 		Headers:   &http.Header{},
 		Host:      r.Host,
-		ID:        atomic.AddUint32(&r.collector.requestCount, 1),
+		ID:        r.collector.requestCount.Add(1),
 		collector: r.collector,
 	}, nil
 }
@@ -89,6 +88,11 @@ func (r *Request) New(method, URL string, body io.Reader) (*Request, error) {
 // Abort cancels the HTTP request when called in an OnRequest callback
 func (r *Request) Abort() {
 	r.abort = true
+}
+
+// IsAbort returns true if the request has been aborted
+func (r *Request) IsAbort() bool {
+	return r.abort
 }
 
 // AbsoluteURL returns with the resolved absolute URL of an URL chunk.
@@ -152,6 +156,9 @@ func (r *Request) PostMultipart(URL string, requestData map[string][]byte) error
 // Retry submits HTTP request again with the same parameters
 func (r *Request) Retry() error {
 	r.Headers.Del("Cookie")
+	if _, ok := r.Body.(io.ReadSeeker); r.Body != nil && !ok {
+		return ErrRetryBodyUnseekable
+	}
 	return r.collector.scrape(r.URL.String(), r.Method, r.Depth, r.Body, r.Ctx, *r.Headers, false)
 }
 

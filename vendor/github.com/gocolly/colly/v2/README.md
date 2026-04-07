@@ -14,6 +14,7 @@ With Colly you can easily extract structured data from websites, which can be us
 [![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Fgocolly%2Fcolly.svg?type=shield)](https://app.fossa.io/projects/git%2Bgithub.com%2Fgocolly%2Fcolly?ref=badge_shield)
 [![Twitter URL](https://img.shields.io/badge/twitter-follow-green.svg)](https://twitter.com/gocolly)
 
+
 ## Features
 
 -   Clean API
@@ -31,6 +32,13 @@ With Colly you can easily extract structured data from websites, which can be us
 ## Example
 
 ```go
+
+import (
+	"fmt"
+
+	"github.com/gocolly/colly/v2"
+)
+
 func main() {
 	c := colly.NewCollector()
 
@@ -51,17 +59,8 @@ See [examples folder](https://github.com/gocolly/colly/tree/master/_examples) fo
 
 ## Installation
 
-Add colly to your `go.mod` file:
+`go get github.com/gocolly/colly/v2`
 
-```
-module github.com/x/y
-
-go 1.14
-
-require (
-        github.com/gocolly/colly/v2 latest
-)
-```
 
 ## Bugs
 
@@ -73,14 +72,14 @@ Below is a list of public, open source projects that use Colly:
 
 -   [greenpeace/check-my-pages](https://github.com/greenpeace/check-my-pages) Scraping script to test the Spanish Greenpeace web archive.
 -   [altsab/gowap](https://github.com/altsab/gowap) Wappalyzer implementation in Go.
--   [jesuiscamille/goquotes](https://github.com/jesuiscamille/goquotes) A quotes scrapper, making your day a little better!
+-   [jesuiscamille/goquotes](https://github.com/jesuiscamille/goquotes) A quotes scraper, making your day a little better!
 -   [jivesearch/jivesearch](https://github.com/jivesearch/jivesearch) A search engine that doesn't track you.
 -   [Leagify/colly-draft-prospects](https://github.com/Leagify/colly-draft-prospects) A scraper for future NFL Draft prospects.
 -   [lucasepe/go-ps4](https://github.com/lucasepe/go-ps4) Search playstation store for your favorite PS4 games using the command line.
 -   [yringler/inside-chassidus-scraper](https://github.com/yringler/inside-chassidus-scraper) Scrapes Rabbi Paltiel's web site for lesson metadata.
 -   [gamedb/gamedb](https://github.com/gamedb/gamedb) A database of Steam games.
 -   [lawzava/scrape](https://github.com/lawzava/scrape) CLI for email scraping from any website.
--   [eureka101v/WeiboSpiderGo](https://github.com/eureka101v/WeiboSpiderGo) A sina weibo(chinese twitter) scrapper
+-   [eureka101v/WeiboSpiderGo](https://github.com/eureka101v/WeiboSpiderGo) A sina weibo(chinese twitter) scraper
 -   [Go-phie/gophie](https://github.com/Go-phie/gophie) Search, Download and Stream movies from your terminal
 -   [imthaghost/goclone](https://github.com/imthaghost/goclone) Clone websites to your computer within seconds.
 -   [superiss/spidy](https://github.com/superiss/spidy) Crawl the web and collect expired domains.

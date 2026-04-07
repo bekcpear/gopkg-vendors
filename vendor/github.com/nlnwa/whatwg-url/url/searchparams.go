@@ -25,12 +25,14 @@ type NameValuePair struct {
 	Name, Value string
 }
 
-type searchParams struct {
+// SearchParams represents a set of query parameters.
+type SearchParams struct {
 	url    *Url
 	params []*NameValuePair
 }
 
-func (s *searchParams) init(query string) {
+func (s *SearchParams) init(query string) {
+	s.params = s.params[:0]
 	p := strings.Split(query, "&")
 	for _, q := range p {
 		if q == "" {
@@ -49,19 +51,24 @@ func (s *searchParams) init(query string) {
 	}
 }
 
-func (s *searchParams) update() {
+func (s *SearchParams) update() {
+	if s.url == nil {
+		return
+	}
 	query := s.String()
-	if (query == "" && s.url.search != nil) || query != "" {
-		s.url.search = &query
+	if (query == "" && s.url.query != nil) || query != "" {
+		s.url.query = &query
 	}
 }
 
-func (s *searchParams) Append(name, value string) {
+// Append appends a new name/value pair to the search parameters.
+func (s *SearchParams) Append(name, value string) {
 	s.params = append(s.params, &NameValuePair{Name: name, Value: value})
 	s.update()
 }
 
-func (s *searchParams) Delete(name string) {
+// Delete deletes the given search parameter, and its associated value(s), from the search parameters.
+func (s *SearchParams) Delete(name string) {
 	var result []*NameValuePair
 	for _, nvp := range s.params {
 		if nvp.Name != name {
@@ -72,7 +79,8 @@ func (s *searchParams) Delete(name string) {
 	s.update()
 }
 
-func (s *searchParams) Get(name string) string {
+// Get returns the first value associated with the given search parameter name.
+func (s *SearchParams) Get(name string) string {
 	for _, nvp := range s.params {
 		if nvp.Name == name {
 			return nvp.Value
@@ -81,7 +89,8 @@ func (s *searchParams) Get(name string) string {
 	return ""
 }
 
-func (s *searchParams) GetAll(name string) []string {
+// GetAll returns all the values associated with the given search parameter name.
+func (s *SearchParams) GetAll(name string) []string {
 	var result []string
 	for _, nvp := range s.params {
 		if nvp.Name == name {
@@ -91,7 +100,8 @@ func (s *searchParams) GetAll(name string) []string {
 	return result
 }
 
-func (s *searchParams) Has(name string) bool {
+// Has returns true if the search parameters contains a parameter with the given name.
+func (s *SearchParams) Has(name string) bool {
 	for _, nvp := range s.params {
 		if nvp.Name == name {
 			return true
@@ -100,46 +110,54 @@ func (s *searchParams) Has(name string) bool {
 	return false
 }
 
-func (s *searchParams) Set(name, value string) {
+// Set sets the value associated with name to value. It replaces any existing values associated with name.
+func (s *SearchParams) Set(name, value string) {
 	isSet := false
-	for idx, nvp := range s.params {
+	params := s.params[:0]
+	for i, nvp := range s.params {
 		if nvp.Name == name {
 			if isSet {
-				s.params = append(s.params[:idx], s.params[idx+1:]...)
-			} else {
-				nvp.Value = value
-				isSet = true
+				s.params[i] = nil
+				continue
 			}
+			nvp.Value = value
+			isSet = true
 		}
+		params = append(params, nvp)
 	}
 	if !isSet {
-		s.Append(name, value)
+		s.params = append(params, &NameValuePair{Name: name, Value: value})
+	} else {
+		s.params = params
 	}
 	s.update()
 }
 
-func (s *searchParams) Sort() {
+// Sort sorts the search parameters by name.
+func (s *SearchParams) Sort() {
 	sort.SliceStable(s.params, func(i, j int) bool {
 		return s.params[i].Name < s.params[j].Name
 	})
 	s.update()
 }
 
-func (s *searchParams) SortAbsolute() {
+// SortAbsolute sorts the search parameters by name and value.
+func (s *SearchParams) SortAbsolute() {
 	sort.SliceStable(s.params, func(i, j int) bool {
 		return s.params[i].Name+s.params[i].Value < s.params[j].Name+s.params[j].Value
 	})
 	s.update()
 }
 
-func (s *searchParams) Iterate(f func(pair *NameValuePair)) {
+// Iterate iterates over the search parameters.
+func (s *SearchParams) Iterate(f func(pair *NameValuePair)) {
 	for _, nvp := range s.params {
 		f(nvp)
 	}
 	s.update()
 }
 
-func (s *searchParams) String() string {
+func (s *SearchParams) String() string {
 	output := strings.Builder{}
 	for idx, nvp := range s.params {
 		if idx > 0 {
@@ -147,15 +165,17 @@ func (s *searchParams) String() string {
 		}
 
 		s.QueryEscape(nvp.Name, &output)
-		if nvp.Value != "" {
+		if !s.url.parser.opts.skipEqualsForEmptySearchParamsValue || nvp.Value != "" {
 			output.WriteRune('=')
+		}
+		if nvp.Value != "" {
 			s.QueryEscape(nvp.Value, &output)
 		}
 	}
 	return output.String()
 }
 
-func (s *searchParams) QueryEscape(st string, output *strings.Builder) {
+func (s *SearchParams) QueryEscape(st string, output *strings.Builder) {
 	for _, b := range st {
 		if b == 0x0020 {
 			output.WriteRune(0x002B)
@@ -163,4 +183,19 @@ func (s *searchParams) QueryEscape(st string, output *strings.Builder) {
 			output.WriteString(s.url.parser.percentEncodeRune(b, s.url.parser.opts.queryPercentEncodeSet))
 		}
 	}
+}
+
+// Clone returns a deep copy of the search parameters.
+func (s *SearchParams) Clone() *SearchParams {
+	sp := &SearchParams{
+		url:    s.url,
+		params: make([]*NameValuePair, len(s.params)),
+	}
+	for i, nvp := range s.params {
+		sp.params[i] = &NameValuePair{
+			Name:  nvp.Name,
+			Value: nvp.Value,
+		}
+	}
+	return sp
 }
