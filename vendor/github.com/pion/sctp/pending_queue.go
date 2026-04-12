@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 package sctp
 
 import (
@@ -22,8 +25,16 @@ func (q *pendingBaseQueue) pop() *chunkPayloadData {
 	if len(q.queue) == 0 {
 		return nil
 	}
+
 	c := q.queue[0]
-	q.queue = q.queue[1:]
+	q.queue[0] = nil
+
+	if len(q.queue) == 0 {
+		q.queue = nil
+	} else {
+		q.queue = q.queue[1:]
+	}
+
 	return c
 }
 
@@ -31,6 +42,7 @@ func (q *pendingBaseQueue) get(i int) *chunkPayloadData {
 	if len(q.queue) == 0 || i < 0 || i >= len(q.queue) {
 		return nil
 	}
+
 	return q.queue[i]
 }
 
@@ -48,11 +60,16 @@ type pendingQueue struct {
 	unorderedIsSelected bool
 }
 
-// Pending queue errors
+// Pending queue errors.
 var (
-	ErrUnexpectedChuckPoppedUnordered = errors.New("unexpected chunk popped (unordered)")
-	ErrUnexpectedChuckPoppedOrdered   = errors.New("unexpected chunk popped (ordered)")
+	ErrUnexpectedChunkPoppedUnordered = errors.New("unexpected chunk popped (unordered)")
+	ErrUnexpectedChunkPoppedOrdered   = errors.New("unexpected chunk popped (ordered)")
 	ErrUnexpectedQState               = errors.New("unexpected q state (should've been selected)")
+
+	// Deprecated: use ErrUnexpectedChunkPoppedUnordered.
+	ErrUnexpectedChuckPoppedUnordered = ErrUnexpectedChunkPoppedUnordered
+	// Deprecated: use ErrUnexpectedChunkPoppedOrdered.
+	ErrUnexpectedChuckPoppedOrdered = ErrUnexpectedChunkPoppedOrdered
 )
 
 func newPendingQueue() *pendingQueue {
@@ -76,40 +93,42 @@ func (q *pendingQueue) peek() *chunkPayloadData {
 		if q.unorderedIsSelected {
 			return q.unorderedQueue.get(0)
 		}
+
 		return q.orderedQueue.get(0)
 	}
 
 	if c := q.unorderedQueue.get(0); c != nil {
 		return c
 	}
+
 	return q.orderedQueue.get(0)
 }
 
-func (q *pendingQueue) pop(c *chunkPayloadData) error {
-	if q.selected {
+func (q *pendingQueue) pop(chunkPayload *chunkPayloadData) error { //nolint:cyclop
+	if q.selected { //nolint:nestif
 		var popped *chunkPayloadData
 		if q.unorderedIsSelected {
 			popped = q.unorderedQueue.pop()
-			if popped != c {
-				return ErrUnexpectedChuckPoppedUnordered
+			if popped != chunkPayload {
+				return ErrUnexpectedChunkPoppedUnordered
 			}
 		} else {
 			popped = q.orderedQueue.pop()
-			if popped != c {
-				return ErrUnexpectedChuckPoppedOrdered
+			if popped != chunkPayload {
+				return ErrUnexpectedChunkPoppedOrdered
 			}
 		}
 		if popped.endingFragment {
 			q.selected = false
 		}
 	} else {
-		if !c.beginningFragment {
+		if !chunkPayload.beginningFragment {
 			return ErrUnexpectedQState
 		}
-		if c.unordered {
+		if chunkPayload.unordered {
 			popped := q.unorderedQueue.pop()
-			if popped != c {
-				return ErrUnexpectedChuckPoppedUnordered
+			if popped != chunkPayload {
+				return ErrUnexpectedChunkPoppedUnordered
 			}
 			if !popped.endingFragment {
 				q.selected = true
@@ -117,8 +136,8 @@ func (q *pendingQueue) pop(c *chunkPayloadData) error {
 			}
 		} else {
 			popped := q.orderedQueue.pop()
-			if popped != c {
-				return ErrUnexpectedChuckPoppedOrdered
+			if popped != chunkPayload {
+				return ErrUnexpectedChunkPoppedOrdered
 			}
 			if !popped.endingFragment {
 				q.selected = true
@@ -126,7 +145,13 @@ func (q *pendingQueue) pop(c *chunkPayloadData) error {
 			}
 		}
 	}
-	q.nBytes -= len(c.userData)
+
+	// guard against negative values (should never happen, but just in case).
+	q.nBytes -= len(chunkPayload.userData)
+	if q.nBytes < 0 {
+		q.nBytes = 0
+	}
+
 	return nil
 }
 

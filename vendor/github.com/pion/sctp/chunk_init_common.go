@@ -1,9 +1,13 @@
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 package sctp
 
 import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 /*
@@ -46,6 +50,7 @@ type chunkInitCommon struct {
 	numInboundStreams              uint16
 	initialTSN                     uint32
 	params                         []param
+	unrecognizedParams             []paramHeader
 }
 
 const (
@@ -53,10 +58,9 @@ const (
 	initOptionalVarHeaderLength = 4
 )
 
-// Init chunk errors
+// Init chunk errors.
 var (
 	ErrInitChunkParseParamTypeFailed = errors.New("failed to parse param type")
-	ErrInitChunkUnmarshalParam       = errors.New("failed unmarshalling param in Init Chunk")
 	ErrInitAckMarshalParam           = errors.New("unable to marshal parameter for INIT/INITACK")
 )
 
@@ -88,18 +92,21 @@ func (i *chunkInitCommon) unmarshal(raw []byte) error {
 	remaining := len(raw) - offset
 	for remaining > 0 {
 		if remaining > initOptionalVarHeaderLength {
-			pType, err := parseParamType(raw[offset:])
-			if err != nil {
+			var pHeader paramHeader
+			if err := pHeader.unmarshal(raw[offset:]); err != nil {
 				return fmt.Errorf("%w: %v", ErrInitChunkParseParamTypeFailed, err) //nolint:errorlint
 			}
-			p, err := buildParam(pType, raw[offset:])
+
+			p, err := buildParam(pHeader.typ, raw[offset:])
 			if err != nil {
-				return fmt.Errorf("%w: %v", ErrInitChunkUnmarshalParam, err) //nolint:errorlint
+				i.unrecognizedParams = append(i.unrecognizedParams, pHeader)
+			} else {
+				i.params = append(i.params, p)
 			}
-			i.params = append(i.params, p)
-			padding := getPadding(p.length())
-			offset += p.length() + padding
-			remaining -= p.length() + padding
+
+			padding := getPadding(pHeader.length())
+			offset += pHeader.length() + padding
+			remaining -= pHeader.length() + padding
 		} else {
 			break
 		}
@@ -121,7 +128,7 @@ func (i *chunkInitCommon) marshal() ([]byte, error) {
 			return nil, fmt.Errorf("%w: %v", ErrInitAckMarshalParam, err) //nolint:errorlint
 		}
 
-		out = append(out, pp...)
+		out = append(out, pp...) //nolint:makezero // TODO: fix
 
 		// Chunks (including Type, Length, and Value fields) are padded out
 		// by the sender with all zero bytes to be a multiple of 4 bytes
@@ -138,7 +145,7 @@ func (i *chunkInitCommon) marshal() ([]byte, error) {
 	return out, nil
 }
 
-// String makes chunkInitCommon printable
+// String makes chunkInitCommon printable.
 func (i chunkInitCommon) String() string {
 	format := `initiateTag: %d
 	advertisedReceiverWindowCredit: %d
@@ -146,7 +153,8 @@ func (i chunkInitCommon) String() string {
 	numInboundStreams: %d
 	initialTSN: %d`
 
-	res := fmt.Sprintf(format,
+	var res strings.Builder
+	fmt.Fprintf(&res, format,
 		i.initiateTag,
 		i.advertisedReceiverWindowCredit,
 		i.numOutboundStreams,
@@ -155,7 +163,19 @@ func (i chunkInitCommon) String() string {
 	)
 
 	for i, param := range i.params {
-		res += fmt.Sprintf("Param %d:\n %s", i, param)
+		fmt.Fprintf(&res, "Param %d:\n %s", i, param)
 	}
-	return res
+
+	return res.String()
+}
+
+// allZero returns true if every byte is 0x00.
+func allZero(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+
+	return true
 }

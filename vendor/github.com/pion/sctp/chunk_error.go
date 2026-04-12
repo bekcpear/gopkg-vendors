@@ -1,8 +1,12 @@
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 package sctp // nolint:dupl
 
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 /*
@@ -38,7 +42,7 @@ type chunkError struct {
 	errorCauses []errorCause
 }
 
-// Error chunk errors
+// Error chunk errors.
 var (
 	ErrChunkTypeNotCtError   = errors.New("ChunkType is not of type ctError")
 	ErrBuildErrorChunkFailed = errors.New("failed build Error Chunk")
@@ -54,11 +58,7 @@ func (a *chunkError) unmarshal(raw []byte) error {
 	}
 
 	offset := chunkHeaderSize
-	for {
-		if len(raw)-offset < 4 {
-			break
-		}
-
+	for len(raw)-offset >= 4 {
 		e, err := buildErrorCause(raw[offset:])
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrBuildErrorChunkFailed, err) //nolint:errorlint
@@ -67,6 +67,7 @@ func (a *chunkError) unmarshal(raw []byte) error {
 		offset += int(e.length())
 		a.errorCauses = append(a.errorCauses, e)
 	}
+
 	return nil
 }
 
@@ -81,6 +82,7 @@ func (a *chunkError) marshal() ([]byte, error) {
 		}
 		a.raw = append(a.raw, raw...)
 	}
+
 	return a.chunkHeader.marshal()
 }
 
@@ -88,13 +90,14 @@ func (a *chunkError) check() (abort bool, err error) {
 	return false, nil
 }
 
-// String makes chunkError printable
+// String makes chunkError printable.
 func (a *chunkError) String() string {
-	res := a.chunkHeader.String()
+	var res strings.Builder
+	res.WriteString(a.chunkHeader.String())
 
 	for _, cause := range a.errorCauses {
-		res += fmt.Sprintf("\n - %s", cause)
+		fmt.Fprintf(&res, "\n - %s", cause)
 	}
 
-	return res
+	return res.String()
 }
