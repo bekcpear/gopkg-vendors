@@ -42,7 +42,7 @@ func (pack *Pack) logicBuild(bindir string) error {
 
 	pkgs := append([]string{}, cfg.GokrazyPackagesOrDefault()...)
 	pkgs = append(pkgs, cfg.Packages...)
-	pkgs = append(pkgs, build.InitDeps(cfg.InternalCompatibilityFlags.InitPkg)...)
+	pkgs = append(pkgs, build.InitDeps(cfg.InternalCompatibilityFlags.InitPkg, cfg.InternalCompatibilityFlags.InitImportPath)...)
 	noBuildPkgs := []string{
 		cfg.KernelPackageOrDefault(),
 	}
@@ -91,7 +91,7 @@ func (pack *Pack) logicBuild(bindir string) error {
 
 	var extraFiles map[string][]*FileInfo
 	trace.WithRegion(context.Background(), "findextrafiles", func() {
-		extraFiles, err = FindExtraFiles(cfg)
+		extraFiles, err = FindExtraFiles(cfg, pack.moduleRoot)
 	})
 	if err != nil {
 		return err
@@ -135,6 +135,7 @@ func (pack *Pack) logicBuild(bindir string) error {
 			dontStart:        pack.dontStart,
 			waitForClock:     pack.waitForClock,
 			basenames:        pack.basenames,
+			initImportPath:   cfg.InternalCompatibilityFlags.InitImportPath,
 		}
 		if cfg.InternalCompatibilityFlags.OverwriteInit != "" {
 			return gokrazyInit.dump(cfg.InternalCompatibilityFlags.OverwriteInit)
@@ -333,7 +334,7 @@ func (pack *Pack) logicBuild(bindir string) error {
 	var sbom []byte
 	var sbomWithHash SBOMWithHash
 	trace.WithRegion(context.Background(), "sbom", func() {
-		sbom, sbomWithHash, err = generateSBOM(pack.FileCfg, foundBins)
+		sbom, sbomWithHash, err = generateSBOM(pack.FileCfg, foundBins, pack.moduleRoot)
 	})
 	if err != nil {
 		return err
@@ -614,7 +615,7 @@ func mkdirp(root *FileInfo, dir string) *FileInfo {
 	return parent
 }
 
-func FindExtraFiles(cfg *config.Struct) (map[string][]*FileInfo, error) {
+func FindExtraFiles(cfg *config.Struct, moduleRoot string) (map[string][]*FileInfo, error) {
 	result := make(map[string][]*FileInfo)
 	for pkg, pc := range cfg.PackageConfig {
 		var fileInfos []*FileInfo
@@ -671,5 +672,26 @@ func FindExtraFiles(cfg *config.Struct) (map[string][]*FileInfo, error) {
 
 		result[pkg] = fileInfos
 	}
+
+	// Auto-discover extra files from _gokrazy/extrafiles/ directories
+	// within package source trees. This matches the behavior of
+	// gokrazy/tools, which allows packages like serial-busybox to
+	// bundle architecture-specific binaries without explicit config.
+	allPkgs := append(cfg.GokrazyPackagesOrDefault(), cfg.Packages...)
+	pkgDirs, err := build.PackageDirs(moduleRoot, allPkgs)
+	if err != nil {
+		return nil, err
+	}
+	for idx, pkg := range allPkgs {
+		subdir := filepath.Join(pkgDirs[idx], "_gokrazy", "extrafiles")
+		root := &FileInfo{}
+		if err := addExtraFilesFromDir(pkg, subdir, root); err != nil {
+			return nil, err
+		}
+		if len(root.Dirents) > 0 {
+			result[pkg] = append(result[pkg], root)
+		}
+	}
+
 	return result, nil
 }

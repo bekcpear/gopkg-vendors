@@ -55,7 +55,7 @@ func readBuildID(f *os.File) (string, error) {
 	return buildid.ReadELF(f.Name(), f, data)
 }
 
-func generateSBOM(cfg *config.Struct, foundBins []foundBin) ([]byte, SBOMWithHash, error) {
+func generateSBOM(cfg *config.Struct, foundBins []foundBin, moduleRoot string) ([]byte, SBOMWithHash, error) {
 	formattedCfg, err := cfg.FormatForFile()
 	if err != nil {
 		return nil, SBOMWithHash{}, err
@@ -101,7 +101,7 @@ func generateSBOM(cfg *config.Struct, foundBins []foundBin) ([]byte, SBOMWithHas
 		return nil, SBOMWithHash{}, err
 	}
 
-	extraFiles, err := FindExtraFiles(cfg)
+	extraFiles, err := FindExtraFiles(cfg, moduleRoot)
 	if err != nil {
 		return nil, SBOMWithHash{}, err
 	}
@@ -168,7 +168,7 @@ func generateSBOM(cfg *config.Struct, foundBins []foundBin) ([]byte, SBOMWithHas
 
 func getGokrazySystemPackages(cfg *config.Struct) []string {
 	pkgs := append([]string{}, cfg.GokrazyPackagesOrDefault()...)
-	pkgs = append(pkgs, build.InitDeps(cfg.InternalCompatibilityFlags.InitPkg)...)
+	pkgs = append(pkgs, build.InitDeps(cfg.InternalCompatibilityFlags.InitPkg, cfg.InternalCompatibilityFlags.InitImportPath)...)
 	pkgs = append(pkgs, cfg.KernelPackageOrDefault())
 	if fw := cfg.FirmwarePackageOrDefault(); fw != "" {
 		pkgs = append(pkgs, fw)

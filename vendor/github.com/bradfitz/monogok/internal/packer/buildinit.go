@@ -22,7 +22,7 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/gokrazy/gokrazy"
+	gokrazy {{ printf "%q" .InitImportPath }}
 )
 
 // buildTimestamp can be overridden by specifying e.g.
@@ -117,6 +117,7 @@ type gokrazyInit struct {
 	waitForClock     map[string]bool
 	basenames        map[string]string
 	buildTimestamp   string
+	initImportPath   string // import path of the init library; if empty, the default is used
 }
 
 func mapKeyBasename[M ~map[string]V, V any](basenames map[string]string, m M) M {
@@ -134,6 +135,10 @@ func mapKeyBasename[M ~map[string]V, V any](basenames map[string]string, m M) M 
 func (g *gokrazyInit) generate() ([]byte, error) {
 	var buf bytes.Buffer
 
+	importPath := g.initImportPath
+	if importPath == "" {
+		importPath = build.DefaultInitImportPath
+	}
 	if err := initTmpl.Execute(&buf, struct {
 		Binaries       []string
 		BuildTimestamp string
@@ -141,6 +146,7 @@ func (g *gokrazyInit) generate() ([]byte, error) {
 		Env            map[string][]string
 		DontStart      map[string]bool
 		WaitForClock   map[string]bool
+		InitImportPath string
 	}{
 		Binaries:       flattenFiles("/", g.root),
 		BuildTimestamp: g.buildTimestamp,
@@ -148,6 +154,7 @@ func (g *gokrazyInit) generate() ([]byte, error) {
 		Env:            mapKeyBasename(g.basenames, g.envFileContents),
 		DontStart:      mapKeyBasename(g.basenames, g.dontStart),
 		WaitForClock:   mapKeyBasename(g.basenames, g.waitForClock),
+		InitImportPath: importPath,
 	}); err != nil {
 		return nil, err
 	}

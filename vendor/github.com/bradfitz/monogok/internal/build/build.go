@@ -75,11 +75,18 @@ func Env() []string {
 	return env
 }
 
-func InitDeps(initPkg string) []string {
+// DefaultInitImportPath is the import path of the init library package
+// imported by the auto-generated init main when InitImportPath is unset.
+const DefaultInitImportPath = "github.com/gokrazy/gokrazy"
+
+func InitDeps(initPkg, initImportPath string) []string {
 	if initPkg != "" {
 		return []string{initPkg}
 	}
-	return []string{"github.com/gokrazy/gokrazy"}
+	if initImportPath != "" {
+		return []string{initImportPath}
+	}
+	return []string{DefaultInitImportPath}
 }
 
 // BuildEnv holds the build directory (module root) for all build operations.
