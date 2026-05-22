@@ -58,6 +58,10 @@ type NetworkPacketInfo struct {
 	// address.
 	LocalAddressBroadcast bool
 
+	// LocalAddressTemporary is true if the packet's local address is a temporary
+	// address.
+	LocalAddressTemporary bool
+
 	// IsForwardedPacket is true if the packet is being forwarded.
 	IsForwardedPacket bool
 }
@@ -203,18 +207,18 @@ type PacketMMapOpts struct {
 	IsRx           bool
 	Cooked         bool
 	Stack          *Stack
-	Stats          *tcpip.TransportEndpointStats
 	Wq             *waiter.Queue
-	NICID          tcpip.NICID
-	NetProto       tcpip.NetworkProtocolNumber
 	PacketEndpoint MappablePacketEndpoint
+	Version        int
+	Reserve        uint32
 }
 
 // PacketMMapEndpoint is the interface implemented by endpoints to handle memory
 // mapped packets over the packet transport protocol (PACKET_MMAP).
 type PacketMMapEndpoint interface {
 	// HandlePacket is called by the stack when new packets arrive that
-	// match the endpoint.
+	// match the endpoint. It returns true if the packet was handled by the
+	// endpoint and false otherwise.
 	//
 	// Implementers should treat packet as immutable and should copy it
 	// before modification.
@@ -223,13 +227,17 @@ type PacketMMapEndpoint interface {
 	// should construct its own ethernet header for applications.
 	//
 	// HandlePacket may modify pkt.
-	HandlePacket(nicID tcpip.NICID, netProto tcpip.NetworkProtocolNumber, pkt *PacketBuffer)
+	HandlePacket(nicID tcpip.NICID, netProto tcpip.NetworkProtocolNumber, pkt *PacketBuffer) bool
 
 	// Close releases any resources associated with the endpoint.
 	Close()
 
 	// Readiness returns the events that the endpoint is ready for.
 	Readiness(mask waiter.EventMask) waiter.EventMask
+
+	// Stats returns the statistics for the endpoint that can be used for
+	// getsockopt(PACKET_STATISTICS).
+	Stats() tcpip.TpacketStats
 }
 
 // UnknownDestinationPacketDisposition enumerates the possible return values from
@@ -864,6 +872,9 @@ type NetworkEndpoint interface {
 	// minus the network endpoint max header length.
 	MTU() uint32
 
+	// EndpointHeaderSize returns the size of this endpoint header.
+	EndpointHeaderSize() uint32
+
 	// MaxHeaderLength returns the maximum size the network (and lower
 	// level layers combined) headers can have. Higher levels use this
 	// information to reserve space in the front of the packets they're
@@ -1127,7 +1138,6 @@ const (
 	CapabilityRXChecksumOffload
 	CapabilityResolutionRequired
 	CapabilitySaveRestore
-	CapabilityDisconnectOk
 	CapabilityLoopback
 )
 

@@ -1,11 +1,12 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
-//go:build go1.24
+//go:build go1.25
 
 package loader
 
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -249,9 +250,7 @@ func GetDeprecatedProperties(configDicts ...map[string]any) map[string]string {
 
 	for _, configDict := range configDicts {
 		deprecatedProperties := getProperties(getServices(configDict), types.DeprecatedProperties)
-		for key, value := range deprecatedProperties {
-			deprecated[key] = value
-		}
+		maps.Copy(deprecated, deprecatedProperties)
 	}
 
 	return deprecated

@@ -8,8 +8,8 @@ import (
 	"strings"
 )
 
-// Flags returns a SetFlags function that calls bind(fs, v) for each v and the
-// given flag set.
+// Flags returns a function with the signature of the [C.SetFlags] callback,
+// that calls bind(fs, v) for each v and the given flag set.
 func Flags(bind func(*flag.FlagSet, any), vs ...any) func(*Env, *flag.FlagSet) {
 	return func(_ *Env, fs *flag.FlagSet) {
 		for _, v := range vs {
@@ -23,7 +23,7 @@ func Flags(bind func(*flag.FlagSet, any), vs ...any) func(*Env, *flag.FlagSet) {
 func (c *C) usageLines(flags HelpFlags) []string {
 	var lines []string
 	prefix := c.Name + " "
-	for _, line := range strings.Split(c.Usage, "\n") {
+	for line := range strings.SplitSeq(c.Usage, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -75,12 +75,16 @@ func FailWithUsage(env *Env) error {
 
 // splitFlags constructs two slices from args, the first containing all flags
 // and their arguments matched by fs, the second containing all the other free
-// arguments. Flag values are not parsed. Flag-shaped strings not matched by fs
-// are treated as free arguments.  An error is reported if a flag lacks its
-// argument.
+// arguments.
+//
+// The arguments for flags mentioned in fs are checked for presence, but are
+// not parsed.  An error is reported if a flag lacks its argument.
+// Flag-shaped strings NOT matched by fs are treated as free arguments.
+// We do not at this point have enough information to know whether
+// such a flag-candidate requires an argument, as that requires the FlagSet.
 func splitFlags(fs *flag.FlagSet, args []string) (flags, free []string, _ error) {
 	var wantArg bool
-	for _, s := range args {
+	for i, s := range args {
 		// Case 1: The previous argument is a flag that needs a value.
 		if wantArg {
 			flags = append(flags, s)
@@ -88,8 +92,20 @@ func splitFlags(fs *flag.FlagSet, args []string) (flags, free []string, _ error)
 			continue
 		}
 
-		// Treat "-" and "--" as free arguments to simplify the logic below.
-		if s == "-" || s == "--" {
+		// Some shortcuts to simplify processing below:
+		if s == "-" {
+			// Bare "-" is flag-shaped, but treated as a non-flag argument for parsing.
+			free = append(free, s)
+			continue
+		} else if s == "--" {
+			// Bare "--" is consumed by the flag parser as a signal to stop parsing.
+			// Seeing it when we have not yet observed any other free arguments,
+			// we give up looking for flags belonging to this set.
+			if len(free) == 0 {
+				flags = append(flags, s)
+				free = append(free, args[i+1:]...)
+				break
+			}
 			free = append(free, s)
 			continue
 		}
@@ -151,7 +167,8 @@ type CInfo struct {
 type FlagInfo struct {
 	Name          string `json:"name"`
 	Usage         string `json:"usage"`
-	DefaultString string `json:"defaultString,omitempty"`
+	DefaultString string `json:"defaultString,omitzero"`
+	Private       bool   `json:"private,omitzero"`
 }
 
 // Info constructs a [CInfo] record for c and its subcommands.  The provided
@@ -174,6 +191,7 @@ func (c *C) Info(flags HelpFlags) *CInfo {
 			Name:          f.Name,
 			Usage:         u,
 			DefaultString: f.DefValue,
+			Private:       ok,
 		})
 	})
 	if flags.wantCommands() {

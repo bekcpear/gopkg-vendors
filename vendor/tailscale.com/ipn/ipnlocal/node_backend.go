@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package ipnlocal
@@ -6,12 +6,14 @@ package ipnlocal
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"net/netip"
 	"slices"
 	"sync"
 	"sync/atomic"
 
 	"go4.org/netipx"
+	"tailscale.com/appc"
 	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/ipn"
 	"tailscale.com/net/dns"
@@ -22,14 +24,13 @@ import (
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/netmap"
-	"tailscale.com/types/ptr"
 	"tailscale.com/types/views"
 	"tailscale.com/util/dnsname"
 	"tailscale.com/util/eventbus"
 	"tailscale.com/util/mak"
 	"tailscale.com/util/slicesx"
+	"tailscale.com/util/testenv"
 	"tailscale.com/wgengine/filter"
-	"tailscale.com/wgengine/magicsock"
 )
 
 // nodeBackend is node-specific [LocalBackend] state. It is usually the current node.
@@ -77,10 +78,14 @@ type nodeBackend struct {
 
 	// initialized once and immutable
 	eventClient    *eventbus.Client
-	filterPub      *eventbus.Publisher[magicsock.FilterUpdate]
-	nodeViewsPub   *eventbus.Publisher[magicsock.NodeViewsUpdate]
-	nodeMutsPub    *eventbus.Publisher[magicsock.NodeMutationsUpdate]
 	derpMapViewPub *eventbus.Publisher[tailcfg.DERPMapView]
+
+	// homeDERP lives here temporarily. as long as mapSession is short lived, we
+	// don't have a location delivering netmaps to local backend that knows our
+	// homeDERP hence why it is cached here for now.
+	// TODO(cmol): move this field into a refactored mapSession that is not
+	// short lived.
+	homeDERP atomic.Int64
 
 	// TODO(nickkhyl): maybe use sync.RWMutex?
 	mu syncs.Mutex // protects the following fields
@@ -106,6 +111,16 @@ type nodeBackend struct {
 	// nodeByAddr maps nodes' own addresses (excluding subnet routes) to node IDs.
 	// It is mutated in place (with mu held) and must not escape the [nodeBackend].
 	nodeByAddr map[netip.Addr]tailcfg.NodeID
+
+	// nodeByKey is an index of node public key to node ID for fast lookups.
+	// It is mutated in place (with mu held) and must not escape the [nodeBackend].
+	nodeByKey map[key.NodePublic]tailcfg.NodeID
+
+	// keyWaitersForTest is the test-only registry of channels waiting for
+	// a given peer key to first appear in the netmap. See
+	// [nodeBackend.AwaitNodeKeyForTest]. It is populated lazily and remains
+	// nil in production, where no test installs a waiter.
+	keyWaitersForTest map[key.NodePublic]chan struct{}
 }
 
 func newNodeBackend(ctx context.Context, logf logger.Logf, bus *eventbus.Bus) *nodeBackend {
@@ -120,11 +135,7 @@ func newNodeBackend(ctx context.Context, logf logger.Logf, bus *eventbus.Bus) *n
 	// Default filter blocks everything and logs nothing.
 	noneFilter := filter.NewAllowNone(logger.Discard, &netipx.IPSet{})
 	nb.filterAtomic.Store(noneFilter)
-	nb.filterPub = eventbus.Publish[magicsock.FilterUpdate](nb.eventClient)
-	nb.nodeViewsPub = eventbus.Publish[magicsock.NodeViewsUpdate](nb.eventClient)
-	nb.nodeMutsPub = eventbus.Publish[magicsock.NodeMutationsUpdate](nb.eventClient)
 	nb.derpMapViewPub = eventbus.Publish[tailcfg.DERPMapView](nb.eventClient)
-	nb.filterPub.Publish(magicsock.FilterUpdate{Filter: nb.filterAtomic.Load()})
 	return nb
 }
 
@@ -199,19 +210,8 @@ func (nb *nodeBackend) NodeByAddr(ip netip.Addr) (_ tailcfg.NodeID, ok bool) {
 func (nb *nodeBackend) NodeByKey(k key.NodePublic) (_ tailcfg.NodeID, ok bool) {
 	nb.mu.Lock()
 	defer nb.mu.Unlock()
-	if nb.netMap == nil {
-		return 0, false
-	}
-	if self := nb.netMap.SelfNode; self.Valid() && self.Key() == k {
-		return self.ID(), true
-	}
-	// TODO(bradfitz,nickkhyl): add nodeByKey like nodeByAddr instead of walking peers.
-	for _, n := range nb.peers {
-		if n.Key() == k {
-			return n.ID(), true
-		}
-	}
-	return 0, false
+	nid, ok := nb.nodeByKey[k]
+	return nid, ok
 }
 
 func (nb *nodeBackend) NodeByID(id tailcfg.NodeID) (_ tailcfg.NodeView, ok bool) {
@@ -420,7 +420,7 @@ func (nb *nodeBackend) netMapWithPeers() *netmap.NetworkMap {
 	if nb.netMap == nil {
 		return nil
 	}
-	nm := ptr.To(*nb.netMap) // shallow clone
+	nm := new(*nb.netMap) // shallow clone
 	nm.Peers = slicesx.MapValues(nb.peers)
 	slices.SortFunc(nm.Peers, func(a, b tailcfg.NodeView) int {
 		return cmp.Compare(a.ID(), b.ID())
@@ -433,16 +433,51 @@ func (nb *nodeBackend) SetNetMap(nm *netmap.NetworkMap) {
 	defer nb.mu.Unlock()
 	nb.netMap = nm
 	nb.updateNodeByAddrLocked()
+	nb.updateNodeByKeyLocked()
 	nb.updatePeersLocked()
-	nv := magicsock.NodeViewsUpdate{}
+	nb.signalKeyWaitersForTestLocked()
 	if nm != nil {
-		nv.SelfNode = nm.SelfNode
-		nv.Peers = nm.Peers
 		nb.derpMapViewPub.Publish(nm.DERPMap.View())
 	} else {
 		nb.derpMapViewPub.Publish(tailcfg.DERPMapView{})
 	}
-	nb.nodeViewsPub.Publish(nv)
+}
+
+// AwaitNodeKeyForTest returns a channel that is closed once a peer with the
+// given node key first appears in this nodeBackend's peer index, or
+// immediately (a closed channel) if it's already present. It is intended for
+// in-process benchmarks that drive synthetic netmap deltas and need a
+// zero-overhead signal that the client has applied a delta, replacing
+// poll-based [local.Client.WhoIsNodeKey] loops in tests. It panics outside
+// of tests.
+func (nb *nodeBackend) AwaitNodeKeyForTest(k key.NodePublic) <-chan struct{} {
+	testenv.AssertInTest()
+	nb.mu.Lock()
+	defer nb.mu.Unlock()
+	if _, ok := nb.nodeByKey[k]; ok {
+		return syncs.ClosedChan()
+	}
+	if ch, ok := nb.keyWaitersForTest[k]; ok {
+		return ch
+	}
+	ch := make(chan struct{})
+	mak.Set(&nb.keyWaitersForTest, k, ch)
+	return ch
+}
+
+// signalKeyWaitersForTestLocked closes any waiter channels whose keys now
+// appear in nb.nodeByKey. It is cheap when there are no waiters, which is
+// the common case in production. It is called from [nodeBackend.SetNetMap]
+// after the per-key index has been rebuilt.
+//
+// Caller must hold nb.mu.
+func (nb *nodeBackend) signalKeyWaitersForTestLocked() {
+	for k, ch := range nb.keyWaitersForTest {
+		if _, ok := nb.nodeByKey[k]; ok {
+			close(ch)
+			delete(nb.keyWaitersForTest, k)
+		}
+	}
 }
 
 func (nb *nodeBackend) updateNodeByAddrLocked() {
@@ -477,6 +512,37 @@ func (nb *nodeBackend) updateNodeByAddrLocked() {
 	for k, v := range nb.nodeByAddr {
 		if v == 0 {
 			delete(nb.nodeByAddr, k)
+		}
+	}
+}
+
+func (nb *nodeBackend) updateNodeByKeyLocked() {
+	nm := nb.netMap
+	if nm == nil {
+		nb.nodeByKey = nil
+		return
+	}
+
+	if nb.nodeByKey == nil {
+		nb.nodeByKey = map[key.NodePublic]tailcfg.NodeID{}
+	}
+	// First pass, mark everything unwanted.
+	for k := range nb.nodeByKey {
+		nb.nodeByKey[k] = 0
+	}
+	addNode := func(n tailcfg.NodeView) {
+		nb.nodeByKey[n.Key()] = n.ID()
+	}
+	if nm.SelfNode.Valid() {
+		addNode(nm.SelfNode)
+	}
+	for _, p := range nm.Peers {
+		addNode(p)
+	}
+	// Third pass, actually delete the unwanted items.
+	for k, v := range nb.nodeByKey {
+		if v == 0 {
+			delete(nb.nodeByKey, k)
 		}
 	}
 }
@@ -518,9 +584,6 @@ func (nb *nodeBackend) UpdateNetmapDelta(muts []netmap.NodeMutation) (handled bo
 	// call (e.g. its endpoints + online status both change)
 	var mutableNodes map[tailcfg.NodeID]*tailcfg.Node
 
-	update := magicsock.NodeMutationsUpdate{
-		Mutations: make([]netmap.NodeMutation, 0, len(muts)),
-	}
 	for _, m := range muts {
 		n, ok := mutableNodes[m.NodeIDBeingMutated()]
 		if !ok {
@@ -531,14 +594,12 @@ func (nb *nodeBackend) UpdateNetmapDelta(muts []netmap.NodeMutation) (handled bo
 			}
 			n = nv.AsStruct()
 			mak.Set(&mutableNodes, nv.ID(), n)
-			update.Mutations = append(update.Mutations, m)
 		}
 		m.Apply(n)
 	}
 	for nid, n := range mutableNodes {
 		nb.peers[nid] = n.View()
 	}
-	nb.nodeMutsPub.Publish(update)
 	return true
 }
 
@@ -560,7 +621,6 @@ func (nb *nodeBackend) filter() *filter.Filter {
 
 func (nb *nodeBackend) setFilter(f *filter.Filter) {
 	nb.filterAtomic.Store(f)
-	nb.filterPub.Publish(magicsock.FilterUpdate{Filter: f})
 }
 
 func (nb *nodeBackend) dnsConfigForNetmap(prefs ipn.PrefsView, selfExpired bool, versionOS string) *dns.Config {
@@ -694,8 +754,9 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 	}
 
 	dcfg := &dns.Config{
-		Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
-		Hosts:  map[dnsname.FQDN][]netip.Addr{},
+		AcceptDNS: prefs.CorpDNS(),
+		Routes:    map[dnsname.FQDN][]*dnstype.Resolver{},
+		Hosts:     map[dnsname.FQDN][]netip.Addr{},
 	}
 
 	// selfV6Only is whether we only have IPv6 addresses ourselves.
@@ -749,8 +810,20 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 		dcfg.Hosts[fqdn] = ips
 	}
 	set(nm.SelfName(), nm.GetAddresses())
+	if nm.AllCaps.Contains(tailcfg.NodeAttrDNSSubdomainResolve) {
+		if fqdn, err := dnsname.ToFQDN(nm.SelfName()); err == nil {
+			dcfg.SubdomainHosts.Make()
+			dcfg.SubdomainHosts.Add(fqdn)
+		}
+	}
 	for _, peer := range peers {
 		set(peer.Name(), peer.Addresses())
+		if peer.CapMap().Contains(tailcfg.NodeAttrDNSSubdomainResolve) {
+			if fqdn, err := dnsname.ToFQDN(peer.Name()); err == nil {
+				dcfg.SubdomainHosts.Make()
+				dcfg.SubdomainHosts.Add(fqdn)
+			}
+		}
 	}
 	for _, rec := range nm.DNS.ExtraRecords {
 		switch rec.Type {
@@ -841,6 +914,25 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 
 	// Add split DNS routes, with no regard to exit node configuration.
 	addSplitDNSRoutes(nm.DNS.Routes)
+
+	// Add split DNS routes for conn25
+	conn25DNSTargets := appc.PickSplitDNSPeers(nm.HasCap, nm.SelfNode, peers, prefs.AppConnector().Advertise)
+	if conn25DNSTargets != nil {
+		var m map[string][]*dnstype.Resolver
+		for domain, candidateSplitDNSPeers := range conn25DNSTargets {
+			for _, peer := range candidateSplitDNSPeers {
+				base := peerAPIBase(nm, peer)
+				if base == "" {
+					continue
+				}
+				mak.Set(&m, domain, []*dnstype.Resolver{{Addr: fmt.Sprintf("%s/dns-query", base)}})
+				break // Just make one resolver for the first peer we can get a peerAPIBase for.
+			}
+		}
+		if m != nil {
+			addSplitDNSRoutes(m)
+		}
+	}
 
 	// Set FallbackResolvers as the default resolvers in the
 	// scenarios that can't handle a purely split-DNS config. See

@@ -1,3 +1,5 @@
+// Copyright (C) Michael J. Fromberger. All Rights Reserved.
+
 // Package slice implements some useful functions for slices.
 package slice
 
@@ -78,6 +80,8 @@ func Partition[T any](vs []T, keep func(T) bool) []T {
 // Zero sets all the elements of vs to their zero value.
 //
 // Deprecated: Use the built-in clear function instead.
+//
+//go:fix inline
 func Zero[T any, Slice ~[]T](vs Slice) { clear(vs) }
 
 // MapKeys extracts a slice of the keys from a map.  The resulting slice is in
@@ -120,6 +124,8 @@ func At[T any, Slice ~[]T](ss Slice, i int) T {
 // PtrAt returns a pointer to the element of ss at offset i.  Negative offsets
 // count backward from the end of the slice.  If i is out of range, PtrAt
 // returns nil.
+//
+// Deprecated: Use the address-of operator directly.
 func PtrAt[T any, Slice ~[]T](ss Slice, i int) *T {
 	if pos, ok := indexCheck(i, len(ss)); ok {
 		return &ss[pos]

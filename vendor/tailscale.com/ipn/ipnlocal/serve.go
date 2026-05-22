@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !ts_omit_serve
@@ -276,7 +276,7 @@ func (b *LocalBackend) updateServeTCPPortNetMapAddrListenersLocked(ports []uint1
 		}
 	}
 
-	nm := b.NetMap()
+	nm := b.NetMapNoPeers()
 	if nm == nil {
 		b.logf("netMap is nil")
 		return
@@ -333,7 +333,7 @@ func (b *LocalBackend) setServeConfigLocked(config *ipn.ServeConfig, etag string
 		return errors.New("can't reconfigure tailscaled when using a config file; config file is locked")
 	}
 
-	nm := b.NetMap()
+	nm := b.NetMapNoPeers()
 	if nm == nil {
 		return errors.New("netMap is nil")
 	}
@@ -835,8 +835,8 @@ func (b *LocalBackend) proxyHandlerForBackend(backend string) (http.Handler, err
 	targetURL, insecure := expandProxyArg(backend)
 
 	// Handle unix: scheme specially
-	if strings.HasPrefix(targetURL, "unix:") {
-		socketPath := strings.TrimPrefix(targetURL, "unix:")
+	if after, ok := strings.CutPrefix(targetURL, "unix:"); ok {
+		socketPath := after
 		if socketPath == "" {
 			return nil, fmt.Errorf("empty unix socket path")
 		}

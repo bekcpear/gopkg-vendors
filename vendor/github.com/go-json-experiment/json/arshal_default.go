@@ -208,7 +208,7 @@ func makeStringArshaler(t reflect.Type) *arshaler {
 		if optimizeCommon && !mo.Flags.Get(jsonflags.AnyWhitespace|jsonflags.StringifyBoolsAndStrings) && !xe.Tokens.Last.NeedObjectName() {
 			b := xe.Buf
 			b = xe.Tokens.MayAppendDelim(b, '"')
-			b, err := jsonwire.AppendQuote(b, s, &mo.Flags)
+			b, err := jsonwire.AppendQuote(b, []byte(s), &mo.Flags)
 			if err == nil {
 				xe.Buf = b
 				xe.Tokens.Last.Increment()
@@ -222,7 +222,7 @@ func makeStringArshaler(t reflect.Type) *arshaler {
 		}
 
 		if mo.Flags.Get(jsonflags.StringifyBoolsAndStrings) {
-			b, err := jsonwire.AppendQuote(nil, s, &mo.Flags)
+			b, err := jsonwire.AppendQuote(nil, []byte(s), &mo.Flags)
 			if err != nil {
 				return newMarshalErrorBefore(enc, t, &jsontext.SyntacticError{Err: err})
 			}
@@ -718,10 +718,10 @@ func makeFloatArshaler(t reflect.Type) *arshaler {
 			if stringify && k == '0' {
 				break
 			}
-			fv, ok := jsonwire.ParseFloat(val, bits)
+			fv, err := strconv.ParseFloat(string(val), bits)
 			va.SetFloat(fv)
-			if !ok {
-				return newUnmarshalErrorAfterWithValue(dec, t, strconv.ErrRange)
+			if err != nil {
+				return newUnmarshalErrorAfterWithValue(dec, t, errors.Unwrap(err))
 			}
 			return nil
 		}
@@ -1033,7 +1033,7 @@ func makeMapArshaler(t reflect.Type) *arshaler {
 // mapKeyWithUniqueRepresentation reports whether all possible values of k
 // marshal to a different JSON value, and whether all possible JSON values
 // that can unmarshal into k unmarshal to different Go values.
-// In other words, the representation must be a bijective.
+// In other words, the representation must be a bijection.
 func mapKeyWithUniqueRepresentation(k reflect.Kind, allowInvalidUTF8 bool) bool {
 	switch k {
 	case reflect.Bool,
@@ -1042,7 +1042,7 @@ func mapKeyWithUniqueRepresentation(k reflect.Kind, allowInvalidUTF8 bool) bool 
 		return true
 	case reflect.String:
 		// For strings, we have to be careful since names with invalid UTF-8
-		// maybe unescape to the same Go string value.
+		// may unescape to the same Go string value.
 		return !allowInvalidUTF8
 	default:
 		// Floating-point kinds are not listed above since NaNs
@@ -1076,6 +1076,34 @@ func makeStructArshaler(t reflect.Type) *arshaler {
 		if errInit != nil && !mo.Flags.Get(jsonflags.ReportErrorsWithLegacySemantics) {
 			return newMarshalErrorBefore(enc, errInit.GoType, errInit.Err)
 		}
+		// Validate that `string` struct tags only appear on valid
+		// field types.
+		//
+		// `string` tag type validation only occurs with new error
+		// semantics. Legacy semantics ignores errors.
+		//
+		// This validation is effectively a makeStructFields error that
+		// occurs before any marshalling begins, but since it depends
+		// on the marshal options it can't be part of the sync.Once.
+		if fields.hasString && !mo.Flags.Get(jsonflags.ReportErrorsWithLegacySemantics) {
+			for i := range fields.flattened {
+				f := &fields.flattened[i]
+				if f.string {
+					if !mo.Flags.Get(jsonflags.StringifyWithLegacySemantics) {
+						if !canStringify(f.typ, f.format) {
+							st := va.Type() // Type of the enclosing struct.
+							return newMarshalErrorBefore(enc, st, newInvalidStringTagError(st.Field(f.index0).Name, false))
+						}
+					} else {
+						if !canLegacyStringify(f.typ, f.format) {
+							st := va.Type() // Type of the enclosing struct.
+							return newMarshalErrorBefore(enc, st, newInvalidStringTagError(st.Field(f.index0).Name, true))
+						}
+					}
+				}
+			}
+		}
+
 		if err := enc.WriteToken(jsontext.BeginObject); err != nil {
 			return err
 		}
@@ -1148,7 +1176,7 @@ func makeStructArshaler(t reflect.Type) *arshaler {
 				if !f.nameNeedEscape {
 					b = append(b, f.quotedName...)
 				} else {
-					b, _ = jsonwire.AppendQuote(b, f.name, &mo.Flags)
+					b, _ = jsonwire.AppendQuote(b, []byte(f.name), &mo.Flags)
 				}
 				xe.Buf = b
 				xe.Names.ReplaceLastQuotedOffset(n0)
@@ -1163,8 +1191,11 @@ func makeStructArshaler(t reflect.Type) *arshaler {
 			flagsOriginal := mo.Flags
 			if f.string {
 				if !mo.Flags.Get(jsonflags.StringifyWithLegacySemantics) {
-					mo.Flags.Set(jsonflags.StringifyNumbers | 1)
-				} else if canLegacyStringify(f.typ) {
+					// Note that errors are reported above.
+					if canStringify(f.typ, f.format) {
+						mo.Flags.Set(jsonflags.StringifyNumbers | 1)
+					}
+				} else if canLegacyStringify(f.typ, f.format) {
 					mo.Flags.Set(jsonflags.StringifyNumbers | jsonflags.StringifyBoolsAndStrings | 1)
 				}
 			}
@@ -1198,7 +1229,7 @@ func makeStructArshaler(t reflect.Type) *arshaler {
 			}
 			prevIdx = f.id
 		}
-		if fields.inlinedFallback != nil && !(mo.Flags.Get(jsonflags.DiscardUnknownMembers) && fields.inlinedFallback.unknown) {
+		if fields.inlinedFallback != nil {
 			var insertUnquotedName func([]byte) bool
 			if !mo.Flags.Get(jsonflags.AllowDuplicateNames) {
 				insertUnquotedName = func(name []byte) bool {
@@ -1250,6 +1281,34 @@ func makeStructArshaler(t reflect.Type) *arshaler {
 			if errInit != nil && !uo.Flags.Get(jsonflags.ReportErrorsWithLegacySemantics) {
 				return newUnmarshalErrorAfter(dec, errInit.GoType, errInit.Err)
 			}
+			// Validate that `string` struct tags only appear on valid
+			// field types.
+			//
+			// `string` tag type validation only occurs with new error
+			// semantics. Legacy semantics ignores errors.
+			//
+			// This validation is effectively a makeStructFields error that
+			// occurs before any marshalling begins, but since it depends
+			// on the marshal options it can't be part of the sync.Once.
+			if fields.hasString && !uo.Flags.Get(jsonflags.ReportErrorsWithLegacySemantics) {
+				for i := range fields.flattened {
+					f := &fields.flattened[i]
+					if f.string {
+						if !uo.Flags.Get(jsonflags.StringifyWithLegacySemantics) {
+							if !canStringify(f.typ, f.format) {
+								st := va.Type() // Type of the enclosing struct.
+								return newUnmarshalErrorAfter(dec, st, newInvalidStringTagError(st.Field(f.index0).Name, false))
+							}
+						} else {
+							if !canLegacyStringify(f.typ, f.format) {
+								st := va.Type() // Type of the enclosing struct.
+								return newUnmarshalErrorAfter(dec, st, newInvalidStringTagError(st.Field(f.index0).Name, true))
+							}
+						}
+					}
+				}
+			}
+
 			var seenIdxs uintSet
 			xd.Tokens.Last.DisableNamespace()
 			var errUnmarshal error
@@ -1270,7 +1329,7 @@ func makeStructArshaler(t reflect.Type) *arshaler {
 						}
 					}
 					if f == nil {
-						if uo.Flags.Get(jsonflags.RejectUnknownMembers) && (fields.inlinedFallback == nil || fields.inlinedFallback.unknown) {
+						if uo.Flags.Get(jsonflags.RejectUnknownMembers) && fields.inlinedFallback == nil {
 							err := newUnmarshalErrorAfter(dec, t, ErrUnknownName)
 							if !uo.Flags.Get(jsonflags.ReportErrorsWithLegacySemantics) {
 								return err
@@ -1288,7 +1347,7 @@ func makeStructArshaler(t reflect.Type) *arshaler {
 								return err
 							}
 						} else {
-							// Marshal into value capable of storing arbitrary object members.
+							// Unmarshal into a value capable of storing arbitrary object members.
 							if err := unmarshalInlinedFallbackNext(dec, va, uo, fields.inlinedFallback, val, name); err != nil {
 								if isFatalError(err, uo.Flags) {
 									return err
@@ -1312,8 +1371,11 @@ func makeStructArshaler(t reflect.Type) *arshaler {
 				flagsOriginal := uo.Flags
 				if f.string {
 					if !uo.Flags.Get(jsonflags.StringifyWithLegacySemantics) {
-						uo.Flags.Set(jsonflags.StringifyNumbers | 1)
-					} else if canLegacyStringify(f.typ) {
+						// Note that errors are reported above.
+						if canStringify(f.typ, f.format) {
+							uo.Flags.Set(jsonflags.StringifyNumbers | 1)
+						}
+					} else if canLegacyStringify(f.typ, f.format) {
 						uo.Flags.Set(jsonflags.StringifyNumbers | jsonflags.StringifyBoolsAndStrings | 1)
 					}
 				}
@@ -1399,11 +1461,39 @@ func isLegacyEmpty(v addressableValue) bool {
 	return false
 }
 
+// canStringify reports whether t can be stringified according to v2, where t
+// is a number (or unnamed pointer to such).
+// The `string` option does not apply recursively to nested types within
+// a composite Go type (e.g., an array, slice, struct, map, or interface).
+func canStringify(t reflect.Type, format string) bool {
+	// Based on encoding/json.typeFields#L1126-L1143@v1.23.0
+	if t.Name() == "" && t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64:
+		return true
+	}
+	// TODO(go.dev/issue/79451): Despite being defined in terms of the Go
+	// type system the `string` tag also applies to time.Time fields with a
+	// few different `format` tags. Thus we cannot determine validity
+	// solely from the field type like all other uses.
+	if internal.ExpJSONFormat && t == timeTimeType {
+		switch format {
+		case "unix", "unixmilli", "unixmicro", "unixnano":
+			return true
+		}
+	}
+	return false
+}
+
 // canLegacyStringify reports whether t can be stringified according to v1,
 // where t is a bool, string, or number (or unnamed pointer to such).
-// In v1, the `string` option does not apply recursively to nested types within
+// The `string` option does not apply recursively to nested types within
 // a composite Go type (e.g., an array, slice, struct, map, or interface).
-func canLegacyStringify(t reflect.Type) bool {
+func canLegacyStringify(t reflect.Type, format string) bool {
 	// Based on encoding/json.typeFields#L1126-L1143@v1.23.0
 	if t.Name() == "" && t.Kind() == reflect.Ptr {
 		t = t.Elem()
@@ -1414,6 +1504,13 @@ func canLegacyStringify(t reflect.Type) bool {
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
 		reflect.Float32, reflect.Float64:
 		return true
+	}
+	// See above.
+	if internal.ExpJSONFormat && t == timeTimeType {
+		switch format {
+		case "unix", "unixmilli", "unixmicro", "unixnano":
+			return true
+		}
 	}
 	return false
 }
@@ -1871,7 +1968,7 @@ func makeInterfaceArshaler(t reflect.Type) *arshaler {
 	return &fncs
 }
 
-// isAnyType reports wether t is equivalent to the any interface type.
+// isAnyType reports whether t is equivalent to the any interface type.
 func isAnyType(t reflect.Type) bool {
 	// This is forward compatible if the Go language permits type sets within
 	// ordinary interfaces where an interface with zero methods does not

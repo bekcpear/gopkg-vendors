@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package ipnlocal
@@ -27,6 +27,7 @@ import (
 	"tailscale.com/util/goroutines"
 	"tailscale.com/util/httpm"
 	"tailscale.com/util/set"
+	"tailscale.com/util/testenv"
 	"tailscale.com/version"
 )
 
@@ -43,9 +44,6 @@ func init() {
 		// high-availability subnet routers for the control plane to probe which of
 		// several candidate nodes is reachable and actually alive.
 		RegisterC2N("/echo", handleC2NEcho)
-	}
-	if buildfeatures.HasSSH {
-		RegisterC2N("/ssh/usernames", handleC2NSSHUsernames)
 	}
 	if buildfeatures.HasLogTail {
 		RegisterC2N("POST /logtail/flush", handleC2NLogtailFlush)
@@ -290,26 +288,6 @@ func handleC2NPprof(b *LocalBackend, w http.ResponseWriter, r *http.Request) {
 	c2nPprof(w, r, profile)
 }
 
-func handleC2NSSHUsernames(b *LocalBackend, w http.ResponseWriter, r *http.Request) {
-	if !buildfeatures.HasSSH {
-		http.Error(w, feature.ErrUnavailable.Error(), http.StatusNotImplemented)
-		return
-	}
-	var req tailcfg.C2NSSHUsernamesRequest
-	if r.Method == "POST" {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-	}
-	res, err := b.getSSHUsernames(&req)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	writeJSON(w, res)
-}
-
 func handleC2NSockStats(b *LocalBackend, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	if b.sockstatLogger == nil {
@@ -345,4 +323,11 @@ func handleC2NSetNetfilterKind(b *LocalBackend, w http.ResponseWriter, r *http.R
 	b.authReconfig()
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleC2NForTest calls [handleC2N], for use by feature/ packages that
+// register C2N handlers and want to test them.
+func (b *LocalBackend) HandleC2NForTest(w http.ResponseWriter, r *http.Request) {
+	testenv.AssertInTest()
+	b.handleC2N(w, r)
 }

@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package netutil
@@ -41,8 +41,8 @@ func CalcAdvertiseRoutes(advertiseRoutes string, advertiseDefaultRoute bool) ([]
 	routeMap := map[netip.Prefix]bool{}
 	if advertiseRoutes != "" {
 		var default4, default6 bool
-		advroutes := strings.Split(advertiseRoutes, ",")
-		for _, s := range advroutes {
+		advroutes := strings.SplitSeq(advertiseRoutes, ",")
+		for s := range advroutes {
 			ipp, err := netip.ParsePrefix(s)
 			if err != nil {
 				return nil, fmt.Errorf("%q is not a valid IP address or CIDR prefix", s)

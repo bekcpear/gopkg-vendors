@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package dns
@@ -318,7 +318,7 @@ func (db *nrptRuleDatabase) writeNRPTRule(ruleID string, servers, doms []string)
 		}
 		defer key.Close()
 
-		if err := writeNRPTValues(key, strings.Join(servers, "; "), doms); err != nil {
+		if err := writeNRPTValues(key, strings.Join(servers, ";"), doms); err != nil {
 			return err
 		}
 	}

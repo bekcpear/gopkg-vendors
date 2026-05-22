@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package local contains a Go client for the Tailscale LocalAPI.
@@ -192,8 +192,8 @@ func (e *AccessDeniedError) Unwrap() error { return e.err }
 
 // IsAccessDeniedError reports whether err is or wraps an AccessDeniedError.
 func IsAccessDeniedError(err error) bool {
-	var ae *AccessDeniedError
-	return errors.As(err, &ae)
+	_, ok := errors.AsType[*AccessDeniedError](err)
+	return ok
 }
 
 // PreconditionsFailedError is returned when the server responds
@@ -210,8 +210,8 @@ func (e *PreconditionsFailedError) Unwrap() error { return e.err }
 
 // IsPreconditionsFailedError reports whether err is or wraps an PreconditionsFailedError.
 func IsPreconditionsFailedError(err error) bool {
-	var ae *PreconditionsFailedError
-	return errors.As(err, &ae)
+	_, ok := errors.AsType[*PreconditionsFailedError](err)
+	return ok
 }
 
 // bestError returns either err, or if body contains a valid JSON
@@ -446,6 +446,11 @@ func (lc *Client) EventBusGraph(ctx context.Context) ([]byte, error) {
 	return lc.get200(ctx, "/localapi/v0/debug-bus-graph")
 }
 
+// EventBusQueues returns a JSON snapshot of event bus queue depths per client.
+func (lc *Client) EventBusQueues(ctx context.Context) ([]byte, error) {
+	return lc.get200(ctx, "/localapi/v0/debug-bus-queues")
+}
+
 // StreamBusEvents returns an iterator of Tailscale bus events as they arrive.
 // Each pair is a valid event and a nil error, or a zero event a non-nil error.
 // In case of error, the iterator ends after the pair reporting the error.
@@ -600,6 +605,24 @@ func (lc *Client) DebugResultJSON(ctx context.Context, action string) (any, erro
 		return nil, err
 	}
 	return x, nil
+}
+
+// GetDebugResultJSON invokes a debug action and decodes the JSON response
+// into a value of type T. It avoids the marshal/unmarshal roundtrip that
+// callers of [Client.DebugResultJSON] otherwise need to do to get a typed
+// value.
+//
+// These are development tools and subject to change or removal over time.
+func GetDebugResultJSON[T any](ctx context.Context, lc *Client, action string) (T, error) {
+	var v T
+	body, err := lc.send(ctx, "POST", "/localapi/v0/debug?action="+url.QueryEscape(action), 200, nil)
+	if err != nil {
+		return v, fmt.Errorf("error %w: %s", err, body)
+	}
+	if err := json.Unmarshal(body, &v); err != nil {
+		return v, err
+	}
+	return v, nil
 }
 
 // QueryOptionalFeatures queries the optional features supported by the Tailscale daemon.
@@ -813,25 +836,6 @@ func (lc *Client) CheckUDPGROForwarding(ctx context.Context) error {
 	return nil
 }
 
-// CheckReversePathFiltering asks the local Tailscale daemon whether strict
-// reverse path filtering is enabled, which would break exit node usage on Linux.
-func (lc *Client) CheckReversePathFiltering(ctx context.Context) error {
-	body, err := lc.get200(ctx, "/localapi/v0/check-reverse-path-filtering")
-	if err != nil {
-		return err
-	}
-	var jres struct {
-		Warning string
-	}
-	if err := json.Unmarshal(body, &jres); err != nil {
-		return fmt.Errorf("invalid JSON from check-reverse-path-filtering: %w", err)
-	}
-	if jres.Warning != "" {
-		return errors.New(jres.Warning)
-	}
-	return nil
-}
-
 // SetUDPGROForwarding enables UDP GRO forwarding for the main interface of this
 // node. This can be done to improve performance of tailnet nodes acting as exit
 // nodes or subnet routers.
@@ -986,6 +990,19 @@ func (lc *Client) UserDial(ctx context.Context, network, host string, port uint1
 	if res.StatusCode != http.StatusSwitchingProtocols {
 		body, _ := io.ReadAll(res.Body)
 		res.Body.Close()
+		if res.StatusCode == http.StatusOK && res.Header.Get("Dial-Self") == "true" {
+			// Server told us to dial the address ourselves rather than
+			// proxying through the daemon. This happens for non-Tailscale
+			// addresses where the daemon shouldn't dial as root on the
+			// client's behalf. The server provides the resolved address
+			// to avoid a TOCTOU race with DNS re-resolution.
+			addr := res.Header.Get("Dial-Addr")
+			if addr == "" {
+				return nil, errors.New("server returned Dial-Self without Dial-Addr")
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, network, addr)
+		}
 		return nil, fmt.Errorf("unexpected HTTP response: %s, %s", res.Status, body)
 	}
 	// From here on, the underlying net.Conn is ours to use, but there
@@ -1021,6 +1038,44 @@ func (lc *Client) CurrentDERPMap(ctx context.Context) (*tailcfg.DERPMap, error) 
 		return nil, fmt.Errorf("invalid derp map json: %w", err)
 	}
 	return &derpMap, nil
+}
+
+// CertDomains returns the list of domains for which the local tailscaled can
+// fetch TLS certificates, equivalent to the DNS.CertDomains field of the
+// current netmap. The returned list is sorted in ascending order, and is
+// empty if no netmap has been received yet.
+func (lc *Client) CertDomains(ctx context.Context) ([]string, error) {
+	body, err := lc.get200(ctx, "/localapi/v0/cert-domains")
+	if err != nil {
+		return nil, err
+	}
+	return decodeJSON[[]string](body)
+}
+
+// DNSConfig returns the [tailcfg.DNSConfig] from the current netmap.
+// It returns an error if no netmap has been received yet.
+// It is intended for callers that need fields like ExtraRecords or CertDomains
+// without pulling the rest of the netmap.
+func (lc *Client) DNSConfig(ctx context.Context) (*tailcfg.DNSConfig, error) {
+	body, err := lc.get200(ctx, "/localapi/v0/dns-config")
+	if err != nil {
+		return nil, err
+	}
+	return decodeJSON[*tailcfg.DNSConfig](body)
+}
+
+// PeerByID returns a peer's current full [tailcfg.Node] looked up by its
+// [tailcfg.NodeID], in O(1) time on the daemon side. It returns an error
+// if no peer with that NodeID is in the current netmap.
+//
+// It is intended for callers that need the latest state of a single peer
+// without fetching the entire netmap.
+func (lc *Client) PeerByID(ctx context.Context, id tailcfg.NodeID) (*tailcfg.Node, error) {
+	body, err := lc.get200(ctx, "/localapi/v0/peer-by-id?id="+strconv.FormatInt(int64(id), 10))
+	if err != nil {
+		return nil, err
+	}
+	return decodeJSON[*tailcfg.Node](body)
 }
 
 // PingOpts contains options for the ping request.
@@ -1085,7 +1140,7 @@ func tailscaledConnectHint() string {
 	// ActiveState=inactive
 	// SubState=dead
 	st := map[string]string{}
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		if k, v, ok := strings.Cut(line, "="); ok {
 			st[k] = strings.TrimSpace(v)
 		}
@@ -1435,4 +1490,14 @@ func (lc *Client) GetAppConnectorRouteInfo(ctx context.Context) (appctype.RouteI
 		return appctype.RouteInfo{}, err
 	}
 	return decodeJSON[appctype.RouteInfo](body)
+}
+
+// GetServices returns the Services visible to this node,
+// including their names, IP addresses, and ports, keyed by service name.
+func (lc *Client) GetServices(ctx context.Context) (map[tailcfg.ServiceName]tailcfg.ServiceDetails, error) {
+	body, err := lc.get200(ctx, "/localapi/v0/services")
+	if err != nil {
+		return nil, err
+	}
+	return decodeJSON[map[tailcfg.ServiceName]tailcfg.ServiceDetails](body)
 }

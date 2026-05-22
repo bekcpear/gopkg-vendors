@@ -1,4 +1,4 @@
-# Copyright (c) Tailscale Inc & AUTHORS
+# Copyright (c) Tailscale Inc & contributors
 # SPDX-License-Identifier: BSD-3-Clause
 
 # Note that this Dockerfile is currently NOT used to build any of the published
@@ -36,7 +36,7 @@
 #     $ docker exec tailscaled tailscale status
 
 
-FROM golang:1.25-alpine AS build-env
+FROM golang:1.26-alpine AS build-env
 
 WORKDIR /go/src/tailscale
 

@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !ts_omit_tailnetlock
@@ -27,6 +27,7 @@ import (
 	"tailscale.com/health/healthmsg"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/ipn/store/mem"
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tka"
@@ -38,19 +39,22 @@ import (
 	"tailscale.com/types/tkatype"
 	"tailscale.com/util/mak"
 	"tailscale.com/util/set"
+	"tailscale.com/util/testenv"
 )
 
 // TODO(tom): RPC retry/backoff was broken and has been removed. Fix?
 
 var (
 	errMissingNetmap        = errors.New("missing netmap: verify that you are logged in")
-	errNetworkLockNotActive = errors.New("network-lock is not active")
-
-	tkaCompactionDefaults = tka.CompactionOptions{
-		MinChain: 24,                  // Keep at minimum 24 AUMs since head.
-		MinAge:   14 * 24 * time.Hour, // Keep 2 weeks of AUMs.
-	}
+	errNetworkLockNotActive = errors.New("tailnet-lock is not active")
 )
+
+// IsNetworkLockNotActive reports whether the given error indicates that
+// network-lock is not active. Stop-gap for feature/tailnetlock to check this
+// until all of this is code is moved to the feature.
+func IsNetworkLockNotActive(err error) bool {
+	return errors.Is(err, errNetworkLockNotActive)
+}
 
 type tkaState struct {
 	profile   ipn.ProfileID
@@ -92,16 +96,12 @@ func (b *LocalBackend) initTKALocked() error {
 			return fmt.Errorf("initializing tka: %v", err)
 		}
 
-		if err := authority.Compact(storage, tkaCompactionDefaults); err != nil {
-			b.logf("tka compaction failed: %v", err)
-		}
-
 		b.tka = &tkaState{
 			profile:   cp.ID(),
 			authority: authority,
 			storage:   storage,
 		}
-		b.logf("tka initialized at head %x", authority.Head())
+		b.logf("tka initialized at head %s", authority.Head())
 	}
 
 	return nil
@@ -304,7 +304,11 @@ func (b *LocalBackend) tkaSyncIfNeeded(nm *netmap.NetworkMap, prefs ipn.PrefsVie
 	wantEnabled := nm.TKAEnabled
 
 	if isEnabled || wantEnabled {
-		b.logf("tkaSyncIfNeeded: isEnabled=%t, wantEnabled=%t, head=%v", isEnabled, wantEnabled, nm.TKAHead)
+		nodeHead := "<not-enabled>"
+		if b.tka != nil {
+			nodeHead = b.tka.authority.Head().String()
+		}
+		b.logf("tkaSyncIfNeeded: isEnabled=%t, wantEnabled=%t, nodeHead=%v, netmapHead=%v", isEnabled, wantEnabled, nodeHead, nm.TKAHead)
 	}
 
 	ourNodeKey, ok := prefs.Persist().PublicNodeKeyOK()
@@ -360,7 +364,7 @@ func (b *LocalBackend) tkaSyncIfNeeded(nm *netmap.NetworkMap, prefs ipn.PrefsVie
 		//
 		// We run this on every sync so that clients compact consistently. In many
 		// cases this will be a no-op.
-		if err := b.tka.authority.Compact(b.tka.storage, tkaCompactionDefaults); err != nil {
+		if err := b.tka.authority.Compact(b.tka.storage, tka.CompactionDefaults); err != nil {
 			return fmt.Errorf("tka compact: %w", err)
 		}
 	}
@@ -407,7 +411,7 @@ func (b *LocalBackend) tkaSyncLocked(ourNodeKey key.NodePublic) error {
 	// has updates for us, or we have updates for the control plane.
 	//
 	// TODO(tom): Do we want to keep processing even if the Inform fails? Need
-	// to think through if theres holdback concerns here or not.
+	// to think through if there's holdback concerns here or not.
 	if len(offerResp.MissingAUMs) > 0 {
 		aums := make([]tka.AUM, len(offerResp.MissingAUMs))
 		for i, a := range offerResp.MissingAUMs {
@@ -654,15 +658,10 @@ func (b *LocalBackend) NetworkLockInit(keys []tka.Key, disablementValues [][]byt
 	// the filesystem until we've finished the initialization sequence,
 	// just in case something goes wrong.
 	_, genesisAUM, err := tka.Create(tka.ChonkMem(), tka.State{
-		Keys: keys,
-		// TODO(tom): s/tka.State.DisablementSecrets/tka.State.DisablementValues
-		//   This will center on consistent nomenclature:
-		//    - DisablementSecret: value needed to disable.
-		//    - DisablementValue: the KDF of the disablement secret, a public value.
-		DisablementSecrets: disablementValues,
-
-		StateID1: binary.LittleEndian.Uint64(entropy[:8]),
-		StateID2: binary.LittleEndian.Uint64(entropy[8:]),
+		Keys:              keys,
+		DisablementValues: disablementValues,
+		StateID1:          binary.LittleEndian.Uint64(entropy[:8]),
+		StateID2:          binary.LittleEndian.Uint64(entropy[8:]),
 	}, nlPriv)
 	if err != nil {
 		return fmt.Errorf("tka.Create: %v", err)
@@ -708,6 +707,7 @@ func (b *LocalBackend) NetworkLockAllowed() bool {
 
 // Only use is in tests.
 func (b *LocalBackend) NetworkLockVerifySignatureForTest(nks tkatype.MarshaledSignature, nodeKey key.NodePublic) error {
+	testenv.AssertInTest()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.tka == nil {
@@ -718,6 +718,7 @@ func (b *LocalBackend) NetworkLockVerifySignatureForTest(nks tkatype.MarshaledSi
 
 // Only use is in tests.
 func (b *LocalBackend) NetworkLockKeyTrustedForTest(keyID tkatype.KeyID) bool {
+	testenv.AssertInTest()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.tka == nil {
@@ -806,7 +807,7 @@ func (b *LocalBackend) NetworkLockSign(nodeKey key.NodePublic, rotationPublic []
 func (b *LocalBackend) NetworkLockModify(addKeys, removeKeys []tka.Key) (err error) {
 	defer func() {
 		if err != nil {
-			err = fmt.Errorf("modify network-lock keys: %w", err)
+			err = fmt.Errorf("modify tailnet-lock keys: %w", err)
 		}
 	}()
 
@@ -1126,7 +1127,7 @@ func (b *LocalBackend) NetworkLockWrapPreauthKey(preauthKey string, tkaKey key.N
 		return "", fmt.Errorf("signing failed: %w", err)
 	}
 
-	b.logf("Generated network-lock credential signature using %s", tkaKey.Public().CLIString())
+	b.logf("Generated tailnet-lock credential signature using %s", tkaKey.Public().CLIString())
 	return fmt.Sprintf("%s--TL%s-%s", preauthKey, tkaSuffixEncoder.EncodeToString(sig.Serialize()), tkaSuffixEncoder.EncodeToString(priv)), nil
 }
 
@@ -1486,4 +1487,25 @@ func (b *LocalBackend) tkaReadAffectedSigs(ourNodeKey key.NodePublic, key tkatyp
 	}
 
 	return a, nil
+}
+
+// LocalBackendWithTKAForTest creates a LocalBackend with an initialized TKA
+// state for testing tailnet lock from the feature/tailnetlock package. Will be
+// removed when tailnet lock is fully moved to its own package. Do not use this
+// from any other package.
+func LocalBackendWithTKAForTest(chonk tka.CompactableChonk, tka *tka.Authority) *LocalBackend {
+	testenv.AssertInTest()
+
+	var state *tkaState
+	if tka != nil {
+		state = &tkaState{
+			authority: tka,
+			storage:   chonk,
+		}
+	}
+	return &LocalBackend{
+		store: &mem.Store{},
+		logf:  logger.Discard,
+		tka:   state,
+	}
 }

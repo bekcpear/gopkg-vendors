@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/go-json-experiment/json/internal"
 	"github.com/go-json-experiment/json/internal/jsonflags"
 	"github.com/go-json-experiment/json/internal/jsonopts"
 	"github.com/go-json-experiment/json/internal/jsonwire"
@@ -51,7 +52,7 @@ func isSyntacticError(err error) bool {
 	return ok
 }
 
-// isFatalError reports whether this error must terminate asharling.
+// isFatalError reports whether this error must terminate arshaling.
 // All errors are considered fatal unless operating under
 // [jsonflags.ReportErrorsWithLegacySemantics] in which case only
 // syntactic errors and I/O errors are considered fatal.
@@ -165,7 +166,7 @@ func newUnmarshalErrorAfter(d *jsontext.Decoder, t reflect.Type, err error) erro
 		JSONKind:    jsontext.Value(tokOrVal).Kind()}
 }
 
-// newUnmarshalErrorAfter wraps err in a SemanticError assuming that d
+// newUnmarshalErrorAfterWithValue wraps err in a SemanticError assuming that d
 // is positioned right after the previous token or value, which caused an error.
 // It also stores a copy of the last JSON value if it is a string or number.
 func newUnmarshalErrorAfterWithValue(d *jsontext.Decoder, t reflect.Type, err error) error {
@@ -295,6 +296,13 @@ func collapseSemanticErrors(err error) error {
 			serr2.JSONPointer = serr1.JSONPointer + serr2.JSONPointer
 			*serr1 = *serr2
 		}
+	}
+	return err
+}
+
+func wrapErrUnsupported(err error, what string) error {
+	if errors.Is(err, errors.ErrUnsupported) {
+		return errors.New(what + " may not return errors.ErrUnsupported")
 	}
 	return err
 }
@@ -442,4 +450,21 @@ func toUnexpectedEOF(err error) error {
 		return io.ErrUnexpectedEOF
 	}
 	return err
+}
+
+// newInvalidStringTagError returns an error for a `string` tag on a field with
+// an invalid type. The error should be wrapped with appropriate context after
+// creation.
+func newInvalidStringTagError(field string, legacy bool) error {
+	if legacy {
+		if internal.ExpJSONFormat {
+			return fmt.Errorf("Go struct field %s has invalid `string` tag: field must be a numeric type, string, or bool (or pointer to such), or type with a format tag converting to a numeric type", field)
+		}
+		return fmt.Errorf("Go struct field %s has invalid `string` tag: field must be a numeric type, string, or bool (or pointer to such)", field)
+	}
+
+	if internal.ExpJSONFormat {
+		return fmt.Errorf("Go struct field %s has invalid `string` tag: field must be a numeric type (or pointer to such), or type with a format tag converting to a numeric type", field)
+	}
+	return fmt.Errorf("Go struct field %s has invalid `string` tag: field must be a numeric type (or pointer to such)", field)
 }

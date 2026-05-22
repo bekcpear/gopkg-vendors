@@ -54,7 +54,7 @@ type Env struct {
 
 	// Log, if non-nil, is where diagnostic output is written when an Env
 	// is used as an [io.Writer]. If nil, it defaults to [os.Stderr].
-	Log io.Writer // where to write diagnostic output (nil for os.Stderr)
+	Log io.Writer
 
 	ctx       context.Context
 	cancel    context.CancelCauseFunc
@@ -66,12 +66,12 @@ type Env struct {
 // context, it returns the context of its parent, or if e has no parent it
 // returns a new background context.
 func (e *Env) Context() context.Context {
-	if e.ctx != nil {
-		return e.ctx
-	} else if e.Parent == nil {
-		return context.Background()
+	for cur := e; cur != nil; cur = cur.Parent {
+		if cur.ctx != nil {
+			return cur.ctx
+		}
 	}
-	return e.Parent.Context()
+	return context.Background()
 }
 
 // Cancel cancels the context associated with e with the given cause.
@@ -79,15 +79,16 @@ func (e *Env) Context() context.Context {
 // parent if one exists. If e has no parent and no context, Cancel does nothing
 // without error.
 func (e *Env) Cancel(cause error) {
-	if e.cancel != nil {
-		e.cancel(cause)
-	} else if e.Parent != nil {
-		e.Parent.Cancel(cause)
+	for cur := e; cur != nil; cur = cur.Parent {
+		if cur.cancel != nil {
+			cur.cancel(cause)
+			return
+		}
 	}
 }
 
 // SetContext sets the context of e to ctx and returns e.  If ctx == nil it
-// clears the context of e so that it defaults to its parent (see Context).
+// clears the context of e so that it defaults to its parent (see [Env.Context]).
 func (e *Env) SetContext(ctx context.Context) *Env {
 	if ctx == nil {
 		e.ctx = nil
@@ -152,13 +153,23 @@ func (e *Env) Write(data []byte) (int, error) {
 	return e.output().Write(data)
 }
 
-// parseFlags parses flags from rawArgs using the flag set from env.Command.
+// ParseFlags parses flags from env.Args using the flag set from env.Command.
 // If parsing succeeds, it updates env.Args.
-// If the command specifies custom flags, this is a no-op without error.
-func (e *Env) parseFlags(rawArgs []string) error {
-	if e.Command.CustomFlags {
+// If flags were already parsed, ParseFlags reports nil.
+//
+// Note: This is done automatically if env.Command.CustomFlags is false.
+// It is safe, but unnecessary, to call it explicitly in that case.
+// This method is provided for an Init hook to use when CustomFlags is true.
+func (e *Env) ParseFlags() error {
+	if e.Command.Flags.Parsed() {
 		return nil
 	}
+	return e.parseFlagsInternal(e.Args)
+}
+
+// parseFlagsInternal parses flags from rawArgs using the flag set from env.Command.
+// If parsing succeeds, it updates env.Args.
+func (e *Env) parseFlagsInternal(rawArgs []string) error {
 	e.Command.Flags.Usage = func() {}
 	e.Command.Flags.SetOutput(io.Discard)
 	toParse := rawArgs
@@ -177,6 +188,18 @@ func (e *Env) parseFlags(rawArgs []string) error {
 	}
 	e.Args = e.Command.Flags.Args()
 	return nil
+}
+
+// IsFlagSet reports whether the specified flag is set on e. It can report true
+// only after flags have been parsed.
+func (e *Env) IsFlagSet(name string) bool {
+	var isSet bool
+	e.Command.Flags.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			isSet = true
+		}
+	})
+	return isSet
 }
 
 // C carries the description and invocation function for a command.
@@ -332,7 +355,7 @@ func (p PanicError) Stack() string { return string(p.stack) }
 // Value returns the value raised with the panic captured by p.
 func (p PanicError) Value() any { return p.value }
 
-// RunOrFail behaves as Run, but prints a log message and calls [os.Exit] if
+// RunOrFail behaves as [Run], but prints a log message and calls [os.Exit] if
 // the command reports an error. If the command succeeds, RunOrFail returns.
 //
 // If a command reports a [UsageError] or [ErrRequestHelp], the exit code is 2.
@@ -379,8 +402,10 @@ func Run(env *Env, rawArgs []string) (err error) {
 
 	// Unless this command does custom flag parsing, parse the arguments and
 	// check for errors before passing control to the handler.
-	if err := env.parseFlags(rawArgs); err != nil {
-		return err
+	if !env.Command.CustomFlags {
+		if err := env.parseFlagsInternal(rawArgs); err != nil {
+			return err
+		}
 	}
 
 	if cmd.Init != nil {

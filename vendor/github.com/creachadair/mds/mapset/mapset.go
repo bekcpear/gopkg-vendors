@@ -1,3 +1,5 @@
+// Copyright (C) Michael J. Fromberger. All Rights Reserved.
+
 // Package mapset implements a basic set type using a built-in map.
 //
 // The Set type is a thin wrapper on a built-in Go map, so a Set is not safe
@@ -7,6 +9,7 @@ package mapset
 import (
 	"iter"
 	"maps"
+	"slices"
 )
 
 // A Set represents a set of distinct values. It is implemented via the
@@ -153,12 +156,7 @@ func (s Set[T]) HasAny(ts ...T) bool {
 	if len(s) == 0 {
 		return false
 	}
-	for _, t := range ts {
-		if s.Has(t) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(ts, s.Has)
 }
 
 // IsSubset reports whether s is a subset of t.
@@ -190,7 +188,8 @@ func (s Set[T]) Equals(t Set[T]) bool {
 }
 
 // Append appends the elements of s to the specified slice in arbitrary order,
-// and returns the resulting slice. If cap(vs) ≥ len(s) this will not allocate.
+// and returns the resulting slice. If the remaining capacity of vs is at least
+// len(s), this will not allocate.
 func (s Set[T]) Append(vs []T) []T {
 	if len(s) == 0 {
 		return vs

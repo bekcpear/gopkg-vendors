@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package ipnlocal
@@ -103,7 +103,7 @@ func (s *peerAPIServer) listen(ip netip.Addr, tunIfIndex int) (ln net.Listener, 
 	// deterministic that people will bake this into clients.
 	// We try a few times just in case something's already
 	// listening on that port (on all interfaces, probably).
-	for try := uint8(0); try < 5; try++ {
+	for try := range uint8(5) {
 		a16 := ip.As16()
 		hashData := a16[len(a16)-3:]
 		hashData[0] += try
@@ -192,7 +192,7 @@ func (pln *peerAPIListener) ServeConn(src netip.AddrPort, c net.Conn) {
 		c.Close()
 		return
 	}
-	nm := pln.lb.NetMap()
+	nm := pln.lb.NetMapNoPeers()
 	if nm == nil || !nm.SelfNode.Valid() {
 		logf("peerapi: no netmap")
 		c.Close()

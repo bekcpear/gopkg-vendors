@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build freebsd
@@ -11,7 +11,6 @@ import (
 	"os/exec"
 
 	"golang.org/x/sys/unix"
-	"tailscale.com/types/ptr"
 	"tailscale.com/version/distro"
 )
 
@@ -22,8 +21,8 @@ func init() {
 }
 
 var (
-	lazyVersionMeta = &lazyAtomicValue[versionMeta]{f: ptr.To(freebsdVersionMeta)}
-	lazyOSVersion   = &lazyAtomicValue[string]{f: ptr.To(osVersionFreeBSD)}
+	lazyVersionMeta = &lazyAtomicValue[versionMeta]{f: new(freebsdVersionMeta)}
+	lazyOSVersion   = &lazyAtomicValue[string]{f: new(osVersionFreeBSD)}
 )
 
 func distroNameFreeBSD() string {

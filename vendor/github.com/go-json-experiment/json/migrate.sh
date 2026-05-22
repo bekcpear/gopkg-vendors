@@ -18,6 +18,8 @@ for X in $(git ls-files --cached --others --exclude-standard | grep ".*[.]go$");
     if [ ! -e "$X" ]; then
         continue
     fi
+    sed -i 's/go:build goexperiment.jsonv2 && !goexperiment.jsonformat$/go:build (!goexperiment.jsonv2 || !go1.25) \&\& !goexperiment.jsonformat/' $X
+    sed -i 's/go:build goexperiment.jsonv2 && goexperiment.jsonformat$/go:build (!goexperiment.jsonv2 || !go1.25) \&\& goexperiment.jsonformat/' $X
     sed -i 's/go:build goexperiment.jsonv2$/go:build !goexperiment.jsonv2 || !go1.25/' $X
     sed -i 's|"encoding/json/v2"|"github.com/go-json-experiment/json"|' $X
     sed -i 's|"encoding/json/internal"|"github.com/go-json-experiment/json/internal"|' $X
@@ -32,11 +34,7 @@ for X in $(git ls-files --cached --others --exclude-standard | grep ".*[.]go$");
 done
 sed -i 's/v2[.]struct/json.struct/' $JSONROOT/errors_test.go
 sed -i 's|jsonv1 "github.com/go-json-experiment/json/v1"|jsonv1 "encoding/json"|' $JSONROOT/bench_test.go
-
-# TODO(go1.26): Remove this rewrite once errors.AsType is in the standard library.
-sed -i 's/_, ok := errors\.AsType\[\*SyntacticError\](err)/ok := errors.As(err, new(*SyntacticError))/g' $JSONROOT/jsontext/*.go
-sed -i 's/serr, ok := errors\.AsType\[\*json.SemanticError\](err)/var serr *json.SemanticError; ok := errors.As(err, \&serr)/g' $JSONROOT/example_test.go
-gofmt -w $JSONROOT/example_test.go
+sed -i '/testenv/d' $JSONROOT/jsontext/token_test.go
 
 # Remove documentation that only makes sense within the stdlib.
 sed -i  '/This package .* is experimental/,+4d' $JSONROOT/doc.go

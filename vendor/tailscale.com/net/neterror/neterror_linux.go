@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package neterror
@@ -12,8 +12,7 @@ import (
 
 func init() {
 	shouldDisableUDPGSO = func(err error) bool {
-		var serr *os.SyscallError
-		if errors.As(err, &serr) {
+		if serr, ok := errors.AsType[*os.SyscallError](err); ok {
 			// EIO is returned by udp_send_skb() if the device driver does not
 			// have tx checksumming enabled, which is a hard requirement of
 			// UDP_SEGMENT. See:

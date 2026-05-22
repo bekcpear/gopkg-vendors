@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !linux
@@ -10,7 +10,7 @@ import (
 )
 
 // TryUpgradeToConn is no-op on all platforms except linux.
-func TryUpgradeToConn(pconn nettype.PacketConn, _ string, _ int) nettype.PacketConn {
+func TryUpgradeToConn(pconn nettype.PacketConn, _ string, _ int, _ string) nettype.PacketConn {
 	return pconn
 }
 

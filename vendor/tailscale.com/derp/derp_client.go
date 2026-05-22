@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package derp
@@ -554,7 +554,7 @@ func (c *Client) recvTimeout(timeout time.Duration) (m ReceivedMessage, err erro
 			return sm, nil
 		case FrameKeepAlive:
 			// A one-way keep-alive message that doesn't require an acknowledgement.
-			// This predated framePing/framePong.
+			// This predated FramePing/FramePong.
 			return KeepAliveMessage{}, nil
 		case FramePeerGone:
 			if n < KeyLen {

@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !ts_omit_tailnetlock
@@ -30,9 +30,6 @@ var cborDecOpts = cbor.DecOptions{
 	MaxArrayElements: 4096,
 	MaxMapPairs:      1024,
 }
-
-// Arbitrarily chosen limit on scanning AUM trees.
-const maxScanIterations = 2000
 
 // Authority is a Tailnet Key Authority. This type is the main coupling
 // point to the rest of the tailscale client.

@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package dns
@@ -46,6 +46,11 @@ var (
 // be running.
 const maxActiveQueries = 256
 
+// ResponseMapper is a function that accepts the bytes representing
+// a DNS response and returns bytes representing a DNS response.
+// Used to observe and/or mutate DNS responses managed by this manager.
+type ResponseMapper func([]byte) []byte
+
 // We use file-ignore below instead of ignore because on some platforms,
 // the lint exception is necessary and on others it is not,
 // and plain ignore complains if the exception is unnecessary.
@@ -67,8 +72,9 @@ type Manager struct {
 	knobs    *controlknobs.Knobs // or nil
 	goos     string              // if empty, gets set to runtime.GOOS
 
-	mu     sync.Mutex // guards following
-	config *Config    // Tracks the last viable DNS configuration set by Set.  nil on failures other than compilation failures or if set has never been called.
+	mu                  sync.Mutex // guards following
+	config              *Config    // Tracks the last viable DNS configuration set by Set.  nil on failures other than compilation failures or if set has never been called.
+	queryResponseMapper ResponseMapper
 }
 
 // NewManager created a new manager from the given config.
@@ -291,6 +297,8 @@ func (m *Manager) compileConfig(cfg Config) (rcfg resolver.Config, ocfg OSConfig
 	// authoritative suffixes, even if we don't propagate MagicDNS to
 	// the OS.
 	rcfg.Hosts = cfg.Hosts
+	rcfg.SubdomainHosts = cfg.SubdomainHosts
+	rcfg.AcceptDNS = cfg.AcceptDNS
 	routes := map[dnsname.FQDN][]*dnstype.Resolver{} // assigned conditionally to rcfg.Routes below.
 	var propagateHostsToOS bool
 	for suffix, resolvers := range cfg.Routes {
@@ -388,9 +396,9 @@ func (m *Manager) compileConfig(cfg Config) (rcfg resolver.Config, ocfg OSConfig
 		cfg, err := m.os.GetBaseConfig()
 		if err == nil {
 			baseCfg = &cfg
-		} else if isApple && err == ErrGetBaseConfigNotSupported {
-			// This is currently (2022-10-13) expected on certain iOS and macOS
-			// builds.
+		} else if (isApple || isNoopManager(m.os)) && err == ErrGetBaseConfigNotSupported {
+			// Expected when using noopManager (userspace networking) or on
+			// certain iOS/macOS builds. Continue without base config.
 		} else {
 			m.health.SetUnhealthy(osConfigurationReadWarnable, health.Args{health.ArgError: err.Error()})
 			return resolver.Config{}, OSConfig{}, err
@@ -423,7 +431,14 @@ func (m *Manager) compileConfig(cfg Config) (rcfg resolver.Config, ocfg OSConfig
 			defaultRoutes = append(defaultRoutes, &dnstype.Resolver{Addr: ip.String()})
 		}
 		rcfg.Routes["."] = defaultRoutes
-		ocfg.SearchDomains = append(ocfg.SearchDomains, baseCfg.SearchDomains...)
+		// Append base config search domains, but only if not already present.
+		// This prevents duplicates when GetBaseConfig() reads back domains that
+		// Tailscale itself previously wrote to resolv.conf.
+		for _, domain := range baseCfg.SearchDomains {
+			if !slices.Contains(ocfg.SearchDomains, domain) {
+				ocfg.SearchDomains = append(ocfg.SearchDomains, domain)
+			}
+		}
 	}
 
 	return rcfg, ocfg, nil
@@ -465,7 +480,16 @@ func (m *Manager) Query(ctx context.Context, bs []byte, family string, from neti
 		return nil, errFullQueue
 	}
 	defer atomic.AddInt32(&m.activeQueriesAtomic, -1)
-	return m.resolver.Query(ctx, bs, family, from)
+	outbs, err := m.resolver.Query(ctx, bs, family, from)
+	if err != nil {
+		return outbs, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.queryResponseMapper != nil {
+		outbs = m.queryResponseMapper(outbs)
+	}
+	return outbs, err
 }
 
 const (
@@ -651,3 +675,9 @@ func CleanUp(logf logger.Logf, netMon *netmon.Monitor, bus *eventbus.Bus, health
 }
 
 var metricDNSQueryErrorQueue = clientmetric.NewCounter("dns_query_local_error_queue")
+
+func (m *Manager) SetQueryResponseMapper(fx ResponseMapper) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.queryResponseMapper = fx
+}

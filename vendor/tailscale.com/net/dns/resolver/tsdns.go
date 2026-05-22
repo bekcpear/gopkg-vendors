@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package resolver implements a stub DNS resolver that can also serve
@@ -16,7 +16,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +39,7 @@ import (
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/cloudenv"
 	"tailscale.com/util/dnsname"
+	"tailscale.com/util/set"
 )
 
 const dnsSymbolicFQDN = "magicdns.localhost-tailscale-daemon."
@@ -69,6 +70,9 @@ type packet struct {
 // Else forward the query to the most specific matching entry in Routes.
 // Else return SERVFAIL.
 type Config struct {
+	// True if [Prefs.CorpDNS] is true or --accept-dns=true was specified.
+	// This should only be used for error handling and health reporting.
+	AcceptDNS bool
 	// Routes is a map of DNS name suffix to the resolvers to use for
 	// queries within that suffix.
 	// Queries only match the most specific suffix.
@@ -79,6 +83,12 @@ type Config struct {
 	// LocalDomains is a list of DNS name suffixes that should not be
 	// routed to upstream resolvers.
 	LocalDomains []dnsname.FQDN
+	// SubdomainHosts is a set of FQDNs from Hosts that should also
+	// resolve subdomain queries to the same IPs. If a query like
+	// "sub.node.tailnet.ts.net" doesn't match Hosts directly, and
+	// "node.tailnet.ts.net" is in SubdomainHosts, the query resolves
+	// to the IPs for "node.tailnet.ts.net".
+	SubdomainHosts set.Set[dnsname.FQDN]
 }
 
 // WriteToBufioWriter write a debug version of c for logs to w, omitting
@@ -162,7 +172,7 @@ func WriteRoutes(w *bufio.Writer, routes map[dnsname.FQDN][]*dnstype.Resolver) {
 		}
 		kk = append(kk, k)
 	}
-	sort.Slice(kk, func(i, j int) bool { return kk[i] < kk[j] })
+	slices.Sort(kk)
 	w.WriteByte('{')
 	for i, k := range kk {
 		if i > 0 {
@@ -214,10 +224,11 @@ type Resolver struct {
 	closed chan struct{}
 
 	// mu guards the following fields from being updated while used.
-	mu           syncs.Mutex
-	localDomains []dnsname.FQDN
-	hostToIP     map[dnsname.FQDN][]netip.Addr
-	ipToHost     map[netip.Addr]dnsname.FQDN
+	mu             syncs.Mutex
+	localDomains   []dnsname.FQDN
+	hostToIP       map[dnsname.FQDN][]netip.Addr
+	ipToHost       map[netip.Addr]dnsname.FQDN
+	subdomainHosts set.Set[dnsname.FQDN]
 }
 
 type ForwardLinkSelector interface {
@@ -271,14 +282,27 @@ func (r *Resolver) SetConfig(cfg Config) error {
 		}
 	}
 
-	r.forwarder.setRoutes(cfg.Routes)
+	r.forwarder.setRoutes(cfg.Routes, cfg.AcceptDNS)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.localDomains = cfg.LocalDomains
 	r.hostToIP = cfg.Hosts
 	r.ipToHost = reverse
+	r.subdomainHosts = cfg.SubdomainHosts
 	return nil
+}
+
+// CustomSchemeHandler takes a URI (retrieved from [dnstype.Resolver.Addr]) and
+// returns an updated URI to use for the current query. The result is only valid
+// for right now and may change over time.
+type CustomSchemeHandler func(addr string) (newAddr string, err error)
+
+// RegisterCustomScheme adds a [CustomSchemaHandler] that is called to provide
+// an updated address to the forwarder when a [dnstype.Resolver.Addr] uses that
+// scheme.
+func (r *Resolver) RegisterCustomScheme(scheme string, h CustomSchemeHandler) error {
+	return r.forwarder.RegisterCustomScheme(scheme, h)
 }
 
 // Close shuts down the resolver and ensures poll goroutines have exited.
@@ -328,7 +352,12 @@ func (r *Resolver) Query(ctx context.Context, bs []byte, family string, from net
 		return (<-responses).bs, nil
 	}
 
-	return out, err
+	if err != nil {
+		return out, err
+	}
+
+	out = checkResponseSizeAndSetTC(out, bs, family, r.logf)
+	return out, nil
 }
 
 // GetUpstreamResolvers returns the resolvers that would be used to resolve
@@ -642,9 +671,18 @@ func (r *Resolver) resolveLocal(domain dnsname.FQDN, typ dns.Type) (netip.Addr, 
 	r.mu.Lock()
 	hosts := r.hostToIP
 	localDomains := r.localDomains
+	subdomainHosts := r.subdomainHosts
 	r.mu.Unlock()
 
 	addrs, found := hosts[domain]
+	if !found {
+		for parent := domain.Parent(); parent != ""; parent = parent.Parent() {
+			if subdomainHosts.Contains(parent) {
+				addrs, found = hosts[parent]
+				break
+			}
+		}
+	}
 	if !found {
 		for _, suffix := range localDomains {
 			if suffix.Contains(domain) {
@@ -1376,21 +1414,23 @@ var (
 	metricDNSFwdErrorType = clientmetric.NewCounter("dns_query_fwd_error_type")
 	metricDNSFwdTruncated = clientmetric.NewCounter("dns_query_fwd_truncated")
 
-	metricDNSFwdUDP            = clientmetric.NewCounter("dns_query_fwd_udp")       // on entry
-	metricDNSFwdUDPWrote       = clientmetric.NewCounter("dns_query_fwd_udp_wrote") // sent UDP packet
-	metricDNSFwdUDPErrorWrite  = clientmetric.NewCounter("dns_query_fwd_udp_error_write")
-	metricDNSFwdUDPErrorServer = clientmetric.NewCounter("dns_query_fwd_udp_error_server")
-	metricDNSFwdUDPErrorTxID   = clientmetric.NewCounter("dns_query_fwd_udp_error_txid")
-	metricDNSFwdUDPErrorRead   = clientmetric.NewCounter("dns_query_fwd_udp_error_read")
-	metricDNSFwdUDPSuccess     = clientmetric.NewCounter("dns_query_fwd_udp_success")
+	metricDNSFwdUDP             = clientmetric.NewCounter("dns_query_fwd_udp")       // on entry
+	metricDNSFwdUDPWrote        = clientmetric.NewCounter("dns_query_fwd_udp_wrote") // sent UDP packet
+	metricDNSFwdUDPErrorWrite   = clientmetric.NewCounter("dns_query_fwd_udp_error_write")
+	metricDNSFwdUDPErrorServer  = clientmetric.NewCounter("dns_query_fwd_udp_error_server")
+	metricDNSFwdUDPErrorRefused = clientmetric.NewCounter("dns_query_fwd_udp_error_refused")
+	metricDNSFwdUDPErrorTxID    = clientmetric.NewCounter("dns_query_fwd_udp_error_txid")
+	metricDNSFwdUDPErrorRead    = clientmetric.NewCounter("dns_query_fwd_udp_error_read")
+	metricDNSFwdUDPSuccess      = clientmetric.NewCounter("dns_query_fwd_udp_success")
 
-	metricDNSFwdTCP            = clientmetric.NewCounter("dns_query_fwd_tcp")       // on entry
-	metricDNSFwdTCPWrote       = clientmetric.NewCounter("dns_query_fwd_tcp_wrote") // sent TCP packet
-	metricDNSFwdTCPErrorWrite  = clientmetric.NewCounter("dns_query_fwd_tcp_error_write")
-	metricDNSFwdTCPErrorServer = clientmetric.NewCounter("dns_query_fwd_tcp_error_server")
-	metricDNSFwdTCPErrorTxID   = clientmetric.NewCounter("dns_query_fwd_tcp_error_txid")
-	metricDNSFwdTCPErrorRead   = clientmetric.NewCounter("dns_query_fwd_tcp_error_read")
-	metricDNSFwdTCPSuccess     = clientmetric.NewCounter("dns_query_fwd_tcp_success")
+	metricDNSFwdTCP             = clientmetric.NewCounter("dns_query_fwd_tcp")       // on entry
+	metricDNSFwdTCPWrote        = clientmetric.NewCounter("dns_query_fwd_tcp_wrote") // sent TCP packet
+	metricDNSFwdTCPErrorWrite   = clientmetric.NewCounter("dns_query_fwd_tcp_error_write")
+	metricDNSFwdTCPErrorServer  = clientmetric.NewCounter("dns_query_fwd_tcp_error_server")
+	metricDNSFwdTCPErrorRefused = clientmetric.NewCounter("dns_query_fwd_tcp_error_refused")
+	metricDNSFwdTCPErrorTxID    = clientmetric.NewCounter("dns_query_fwd_tcp_error_txid")
+	metricDNSFwdTCPErrorRead    = clientmetric.NewCounter("dns_query_fwd_tcp_error_read")
+	metricDNSFwdTCPSuccess      = clientmetric.NewCounter("dns_query_fwd_tcp_success")
 
 	metricDNSFwdDoH               = clientmetric.NewCounter("dns_query_fwd_doh")
 	metricDNSFwdDoHErrorStatus    = clientmetric.NewCounter("dns_query_fwd_doh_error_status")

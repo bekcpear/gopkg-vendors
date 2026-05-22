@@ -1264,31 +1264,6 @@ func (s *stdClock) StateLoad(ctx context.Context, stateSourceObject state.Source
 	stateSourceObject.AfterLoad(func() { s.afterLoad(ctx) })
 }
 
-func (st *stdTimer) StateTypeName() string {
-	return "pkg/tcpip.stdTimer"
-}
-
-func (st *stdTimer) StateFields() []string {
-	return []string{
-		"t",
-	}
-}
-
-func (st *stdTimer) beforeSave() {}
-
-// +checklocksignore
-func (st *stdTimer) StateSave(stateSinkObject state.Sink) {
-	st.beforeSave()
-	stateSinkObject.Save(0, &st.t)
-}
-
-func (st *stdTimer) afterLoad(context.Context) {}
-
-// +checklocksignore
-func (st *stdTimer) StateLoad(ctx context.Context, stateSourceObject state.Source) {
-	stateSourceObject.Load(0, &st.t)
-}
-
 func (mt *MonotonicTime) StateTypeName() string {
 	return "pkg/tcpip.MonotonicTime"
 }
@@ -1505,8 +1480,8 @@ func (c *ReceivableControlMessages) beforeSave() {}
 // +checklocksignore
 func (c *ReceivableControlMessages) StateSave(stateSinkObject state.Sink) {
 	c.beforeSave()
-	var TimestampValue int64
-	TimestampValue = c.saveTimestamp()
+	TimestampValue := c.saveTimestamp()
+	_ = (int64)(TimestampValue)
 	stateSinkObject.SaveValue(0, TimestampValue)
 	stateSinkObject.Save(1, &c.HasInq)
 	stateSinkObject.Save(2, &c.Inq)
@@ -1700,6 +1675,34 @@ func (t *TpacketReq) StateLoad(ctx context.Context, stateSourceObject state.Sour
 	stateSourceObject.Load(1, &t.TpBlockNr)
 	stateSourceObject.Load(2, &t.TpFrameSize)
 	stateSourceObject.Load(3, &t.TpFrameNr)
+}
+
+func (t *TpacketStats) StateTypeName() string {
+	return "pkg/tcpip.TpacketStats"
+}
+
+func (t *TpacketStats) StateFields() []string {
+	return []string{
+		"Packets",
+		"Dropped",
+	}
+}
+
+func (t *TpacketStats) beforeSave() {}
+
+// +checklocksignore
+func (t *TpacketStats) StateSave(stateSinkObject state.Sink) {
+	t.beforeSave()
+	stateSinkObject.Save(0, &t.Packets)
+	stateSinkObject.Save(1, &t.Dropped)
+}
+
+func (t *TpacketStats) afterLoad(context.Context) {}
+
+// +checklocksignore
+func (t *TpacketStats) StateLoad(ctx context.Context, stateSourceObject state.Source) {
+	stateSourceObject.Load(0, &t.Packets)
+	stateSourceObject.Load(1, &t.Dropped)
 }
 
 func (l *LingerOption) StateTypeName() string {
@@ -3196,7 +3199,6 @@ func (j *jobInstance) StateTypeName() string {
 
 func (j *jobInstance) StateFields() []string {
 	return []string{
-		"timer",
 		"earlyReturn",
 	}
 }
@@ -3206,16 +3208,14 @@ func (j *jobInstance) beforeSave() {}
 // +checklocksignore
 func (j *jobInstance) StateSave(stateSinkObject state.Sink) {
 	j.beforeSave()
-	stateSinkObject.Save(0, &j.timer)
-	stateSinkObject.Save(1, &j.earlyReturn)
+	stateSinkObject.Save(0, &j.earlyReturn)
 }
 
 func (j *jobInstance) afterLoad(context.Context) {}
 
 // +checklocksignore
 func (j *jobInstance) StateLoad(ctx context.Context, stateSourceObject state.Source) {
-	stateSourceObject.Load(0, &j.timer)
-	stateSourceObject.Load(1, &j.earlyReturn)
+	stateSourceObject.Load(0, &j.earlyReturn)
 }
 
 func (j *Job) StateTypeName() string {
@@ -3300,7 +3300,6 @@ func init() {
 	state.Register((*LocalSockError)(nil))
 	state.Register((*SockError)(nil))
 	state.Register((*stdClock)(nil))
-	state.Register((*stdTimer)(nil))
 	state.Register((*MonotonicTime)(nil))
 	state.Register((*Address)(nil))
 	state.Register((*AddressMask)(nil))
@@ -3313,6 +3312,7 @@ func init() {
 	state.Register((*TCPReceiveBufferSizeRangeOption)(nil))
 	state.Register((*ICMPv6Filter)(nil))
 	state.Register((*TpacketReq)(nil))
+	state.Register((*TpacketStats)(nil))
 	state.Register((*LingerOption)(nil))
 	state.Register((*IPPacketInfo)(nil))
 	state.Register((*IPv6PacketInfo)(nil))

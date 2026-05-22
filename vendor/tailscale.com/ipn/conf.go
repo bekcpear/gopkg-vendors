@@ -1,9 +1,11 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package ipn
 
 import (
+	"errors"
+	"fmt"
 	"net/netip"
 
 	"tailscale.com/tailcfg"
@@ -101,12 +103,21 @@ func (c *ConfigVAlpha) ToPrefs() (MaskedPrefs, error) {
 		mp.ExitNodeAllowLANAccessSet = true
 	}
 	if c.AdvertiseRoutes != nil {
+		var routeErrs []error
+		for _, route := range c.AdvertiseRoutes {
+			if route != route.Masked() {
+				routeErrs = append(routeErrs, fmt.Errorf("route %s has non-address bits set; expected %s", route, route.Masked()))
+			}
+		}
+		if err := errors.Join(routeErrs...); err != nil {
+			return mp, err
+		}
 		mp.AdvertiseRoutes = c.AdvertiseRoutes
 		mp.AdvertiseRoutesSet = true
 	}
 	if c.DisableSNAT != "" {
 		mp.NoSNAT = c.DisableSNAT.EqualBool(true)
-		mp.NoSNAT = true
+		mp.NoSNATSet = true
 	}
 	if c.NoStatefulFiltering != "" {
 		mp.NoStatefulFiltering = c.NoStatefulFiltering

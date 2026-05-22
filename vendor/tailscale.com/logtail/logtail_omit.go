@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build ts_omit_logtail
@@ -19,6 +19,8 @@ type Logger struct{}
 type Buffer any
 
 func Disable() {}
+
+func (*Logger) SetEnabled(enabled bool) {}
 
 func NewLogger(cfg Config, logf tslogger.Logf) *Logger {
 	return &Logger{}

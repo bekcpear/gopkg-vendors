@@ -48,7 +48,7 @@ With -a or --all, also show help for unlisted commands and private flags.`,
 }
 
 // A HelpTopic specifies a name and some help text for use in constructing help
-// topic commands.
+// topic commands. See [HelpCommand].
 type HelpTopic struct {
 	Name string
 	Help string
@@ -228,13 +228,16 @@ func (e *Env) toStdout() *Env {
 // RunHelp is a run function that implements long help.  It displays the
 // help for the enclosing command or subtopics of "help" itself.
 func RunHelp(env *Env) error {
-	// Check whether the arguments describe the parent or one of its subcommands.
-	target := walkArgs(env.Parent.HelpFlags(env.hflag), env.Args)
-	if target == env.Parent {
-		// For the parent, include the help command's own topics.
-		return printLongHelp(target.toStdout(), env.Command.HelpInfo(env.hflag|IncludeCommands).Topics)
-	} else if target != nil {
-		return printLongHelp(target.toStdout(), nil)
+	// Check whether the arguments describe the parent (assuming there is one)
+	// or one of its subcommands.
+	if env.Parent != nil {
+		target := walkArgs(env.Parent.HelpFlags(env.hflag), env.Args)
+		if target == env.Parent {
+			// For the parent, include the help command's own topics.
+			return printLongHelp(target.toStdout(), env.Command.HelpInfo(env.hflag|IncludeCommands).Topics)
+		} else if target != nil {
+			return printLongHelp(target.toStdout(), nil)
+		}
 	}
 
 	// Otherwise, check whether the arguments name a help subcommand.
@@ -321,7 +324,7 @@ func writeFlagHelp(w *bytes.Buffer, fs *flag.FlagSet, wantPrivate bool) {
 // isStringish reports whether v has underlying string type.
 func isStringish(f *flag.Flag) bool {
 	t := reflect.TypeOf(f.Value)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	return t.Kind() == reflect.String

@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package tstun
@@ -23,12 +23,15 @@ import (
 	"github.com/tailscale/wireguard-go/tun"
 	"go4.org/mem"
 	"tailscale.com/disco"
+	"tailscale.com/envknob"
+	"tailscale.com/feature"
 	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/net/packet"
 	"tailscale.com/net/packet/checksum"
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/syncs"
 	"tailscale.com/tstime/mono"
+	"tailscale.com/types/events"
 	"tailscale.com/types/ipproto"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
@@ -108,8 +111,7 @@ type Wrapper struct {
 	// you might need to add an align64 field here.
 	lastActivityAtomic mono.Time // time of last send or receive
 
-	destIPActivity syncs.AtomicValue[map[netip.Addr]func()]
-	discoKey       syncs.AtomicValue[key.DiscoPublic]
+	discoKey syncs.AtomicValue[key.DiscoPublic]
 
 	// timeNow, if non-nil, will be used to obtain the current time.
 	timeNow func() time.Time
@@ -171,6 +173,9 @@ type Wrapper struct {
 	// PreFilterPacketInboundFromWireGuard is the inbound filter function that runs before the main filter
 	// and therefore sees the packets that may be later dropped by it.
 	PreFilterPacketInboundFromWireGuard FilterFunc
+	// PostFilterPacketInboundFromWireGuardAppConnector runs after the filter, but before PostFilterPacketInboundFromWireGuard.
+	// Non-app connector traffic is passed along. Invalid app connector traffic is dropped.
+	PostFilterPacketInboundFromWireGuardAppConnector FilterFunc
 	// PostFilterPacketInboundFromWireGuard is the inbound filter function that runs after the main filter.
 	PostFilterPacketInboundFromWireGuard GROFilterFunc
 	// PreFilterPacketOutboundToWireGuardNetstackIntercept is a filter function that runs before the main filter
@@ -183,6 +188,10 @@ type Wrapper struct {
 	// packets which it handles internally. If both this and PreFilterFromTunToNetstack
 	// filter functions are non-nil, this filter runs second.
 	PreFilterPacketOutboundToWireGuardEngineIntercept FilterFunc
+	// PreFilterPacketOutboundToWireGuardAppConnectorIntercept runs after PreFilterPacketOutboundToWireGuardEngineIntercept
+	// for app connector specific traffic. Non-app connector traffic is passed along. Invalid app connector traffic is
+	// dropped.
+	PreFilterPacketOutboundToWireGuardAppConnectorIntercept FilterFunc
 	// PostFilterPacketOutboundToWireGuard is the outbound filter function that runs after the main filter.
 	PostFilterPacketOutboundToWireGuard FilterFunc
 
@@ -212,7 +221,11 @@ type Wrapper struct {
 	metrics *metrics
 
 	eventClient              *eventbus.Client
-	discoKeyAdvertisementPub *eventbus.Publisher[DiscoKeyAdvertisement]
+	discoKeyAdvertisementPub *eventbus.Publisher[events.DiscoKeyAdvertisement]
+
+	// tunDevStatsCloser closes TUN device stats polling. It may be nil if
+	// [HookPollTUNDevStats] is unset, or the hook func returned an error.
+	tunDevStatsCloser io.Closer
 }
 
 type metrics struct {
@@ -287,8 +300,18 @@ func wrap(logf logger.Logf, tdev tun.Device, isTAP bool, m *usermetric.Registry,
 		metrics:     registerMetrics(m),
 	}
 
+	if buildfeatures.HasTUNDevStats {
+		if f, ok := HookPollTUNDevStats.GetOk(); ok {
+			closer, err := f(tdev)
+			if err != nil {
+				w.logf("error initializing tun dev stats polling: %v", err)
+			}
+			w.tunDevStatsCloser = closer
+		}
+	}
+
 	w.eventClient = bus.Client("net.tstun")
-	w.discoKeyAdvertisementPub = eventbus.Publish[DiscoKeyAdvertisement](w.eventClient)
+	w.discoKeyAdvertisementPub = eventbus.Publish[events.DiscoKeyAdvertisement](w.eventClient)
 
 	w.vectorBuffer = make([][]byte, tdev.BatchSize())
 	for i := range w.vectorBuffer {
@@ -304,6 +327,9 @@ func wrap(logf logger.Logf, tdev tun.Device, isTAP bool, m *usermetric.Registry,
 	return w
 }
 
+// HookPollTUNDevStats is the hook maybe set by feature/tundevstats.
+var HookPollTUNDevStats feature.Hook[func(dev tun.Device) (io.Closer, error)]
+
 // now returns the current time, either by calling t.timeNow if set or time.Now
 // if not.
 func (t *Wrapper) now() time.Time {
@@ -311,16 +337,6 @@ func (t *Wrapper) now() time.Time {
 		return t.timeNow()
 	}
 	return time.Now()
-}
-
-// SetDestIPActivityFuncs sets a map of funcs to run per packet
-// destination (the map keys).
-//
-// The map ownership passes to the Wrapper. It must be non-nil.
-func (t *Wrapper) SetDestIPActivityFuncs(m map[netip.Addr]func()) {
-	if buildfeatures.HasLazyWG {
-		t.destIPActivity.Store(m)
-	}
 }
 
 // SetDiscoKey sets the current discovery key.
@@ -365,6 +381,9 @@ func (t *Wrapper) Close() error {
 		t.outboundMu.Unlock()
 		err = t.tdev.Close()
 		t.eventClient.Close()
+		if t.tunDevStatsCloser != nil {
+			t.tunDevStatsCloser.Close()
+		}
 	})
 	return err
 }
@@ -504,8 +523,9 @@ func (t *Wrapper) injectOutbound(r tunInjectedRead) {
 	if t.outboundClosed {
 		return
 	}
-	t.vectorOutbound <- tunVectorReadResult{
-		injected: r,
+	select {
+	case t.vectorOutbound <- tunVectorReadResult{injected: r}:
+	case <-t.closed:
 	}
 }
 
@@ -516,7 +536,10 @@ func (t *Wrapper) sendVectorOutbound(r tunVectorReadResult) {
 	if t.outboundClosed {
 		return
 	}
-	t.vectorOutbound <- r
+	select {
+	case t.vectorOutbound <- r:
+	case <-t.closed:
+	}
 }
 
 // snat does SNAT on p if the destination address requires a different source address.
@@ -872,6 +895,12 @@ func (t *Wrapper) filterPacketOutboundToWireGuard(p *packet.Parsed, pc *peerConf
 			return res, gro
 		}
 	}
+	if t.PreFilterPacketOutboundToWireGuardAppConnectorIntercept != nil {
+		if res := t.PreFilterPacketOutboundToWireGuardAppConnectorIntercept(p, t); res.IsDrop() {
+			// Handled by userspaceEngine's configured hook for Connectors 2025 app connectors.
+			return res, gro
+		}
+	}
 
 	// If the outbound packet is to a jailed peer, use our jailed peer
 	// packet filter.
@@ -957,13 +986,6 @@ func (t *Wrapper) Read(buffs [][]byte, sizes []int, offset int) (int, error) {
 	for _, data := range res.data {
 		p.Decode(data[res.dataOffset:])
 
-		if buildfeatures.HasLazyWG {
-			if m := t.destIPActivity.Load(); m != nil {
-				if fn := m[p.Dst.Addr()]; fn != nil {
-					fn()
-				}
-			}
-		}
 		if buildfeatures.HasCapture && captHook != nil {
 			captHook(packet.FromLocal, t.now(), p.Buffer(), p.CaptureMeta)
 		}
@@ -1096,14 +1118,6 @@ func (t *Wrapper) injectedRead(res tunInjectedRead, outBuffs [][]byte, sizes []i
 	pc.snat(p)
 	invertGSOChecksum(pkt, gso)
 
-	if buildfeatures.HasLazyWG {
-		if m := t.destIPActivity.Load(); m != nil {
-			if fn := m[p.Dst.Addr()]; fn != nil {
-				fn()
-			}
-		}
-	}
-
 	if res.packet != nil {
 		var gsoOptions tun.GSOOptions
 		gsoOptions, err = stackGSOToTunGSO(pkt, gso)
@@ -1126,13 +1140,6 @@ func (t *Wrapper) injectedRead(res tunInjectedRead, outBuffs [][]byte, sizes []i
 	return n, err
 }
 
-// DiscoKeyAdvertisement is a TSMP message used for distributing disco keys.
-// This struct is used an an event on the [eventbus.Bus].
-type DiscoKeyAdvertisement struct {
-	Src netip.Addr // Src field is populated by the IP header of the packet, not from the payload itself.
-	Key key.DiscoPublic
-}
-
 func (t *Wrapper) filterPacketInboundFromWireGuard(p *packet.Parsed, captHook packet.CaptureCallback, pc *peerConfigTable, gro *gro.GRO) (filter.Response, *gro.GRO) {
 	if captHook != nil {
 		captHook(packet.FromPeer, t.now(), p.Buffer(), p.CaptureMeta)
@@ -1144,10 +1151,12 @@ func (t *Wrapper) filterPacketInboundFromWireGuard(p *packet.Parsed, captHook pa
 			t.injectOutboundPong(p, pingReq)
 			return filter.DropSilently, gro
 		} else if discoKeyAdvert, ok := p.AsTSMPDiscoAdvertisement(); ok {
-			t.discoKeyAdvertisementPub.Publish(DiscoKeyAdvertisement{
-				Src: discoKeyAdvert.Src,
-				Key: discoKeyAdvert.Key,
-			})
+			if buildfeatures.HasCacheNetMap && envknob.BoolDefaultTrue("TS_USE_CACHED_NETMAP") {
+				t.discoKeyAdvertisementPub.Publish(events.DiscoKeyAdvertisement{
+					Src: discoKeyAdvert.Src,
+					Key: discoKeyAdvert.Key,
+				})
+			}
 			return filter.DropSilently, gro
 		} else if data, ok := p.AsTSMPPong(); ok {
 			if f := t.OnTSMPPongReceived; f != nil {
@@ -1232,6 +1241,13 @@ func (t *Wrapper) filterPacketInboundFromWireGuard(p *packet.Parsed, captHook pa
 		}
 
 		return filter.Drop, gro
+	}
+
+	if t.PostFilterPacketInboundFromWireGuardAppConnector != nil {
+		if res := t.PostFilterPacketInboundFromWireGuardAppConnector(p, t); res.IsDrop() {
+			// Handled by userspaceEngine's configured hook for Connectors 2025 app connectors.
+			return res, gro
+		}
 	}
 
 	if t.PostFilterPacketInboundFromWireGuard != nil {
@@ -1383,11 +1399,11 @@ func (t *Wrapper) InjectInboundPacketBuffer(pkt *netstack_PacketBuffer, buffs []
 			return err
 		}
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		buffs[i] = buffs[i][:PacketStartOffset+sizes[i]]
 	}
 	defer func() {
-		for i := 0; i < n; i++ {
+		for i := range n {
 			buffs[i] = buffs[i][:cap(buffs[i])]
 		}
 	}()

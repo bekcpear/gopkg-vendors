@@ -55,7 +55,6 @@ import (
 	"fmt"
 	"os"
 	"reflect"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -123,12 +122,14 @@ func MustCheck(v any) Fields {
 // Compatible types include bool, float64, int, int64, string, [time.Duration],
 // uint, and uint64, as well as any type implementing the [flag.Value] interface
 // or the [encoding.TextMarshaler] and [encoding.TextUnmarshaler] interfaces.
+// If a field implements both [flag.Value] and the text marshaling interfaces,
+// the flag value implementation is used.
 func Check(v any) (Fields, error) {
 	if v == nil {
 		return nil, errors.New("value is nil")
 	}
 	rp := reflect.ValueOf(v)
-	if rp.Kind() != reflect.Ptr {
+	if rp.Kind() != reflect.Pointer {
 		return nil, errors.New("value is not a pointer")
 	}
 	rv := rp.Elem()
@@ -248,7 +249,7 @@ func parseFieldValue(ft reflect.StructField, fv reflect.Value) (*Field, error) {
 	}
 	if dtag, ok := ft.Tag.Lookup("flag-default"); ok {
 		if dstring != "" {
-			return nil, fmt.Errorf("field %q default tag and string are both set", ft.Name)
+			return nil, errors.New("default tag and string are both set")
 		}
 		dstring = dtag
 	}
@@ -352,10 +353,6 @@ func parseFieldValue(ft reflect.StructField, fv reflect.Value) (*Field, error) {
 	return info, nil
 }
 
-// Quoted default: ' ... ', allows "," and single quotes (as ”).
-// Plain default:  ..., no "," or single quotes.
-var defaultRE = regexp.MustCompile(`^('(?:[^']|'')*'|[^,']*),(.*)$`)
-
 func parseFieldTag(s string) (name, dstring, usage string, _ error) {
 	// Simple format: "name,usage"
 	// Default format: "name,default=V,usage"
@@ -365,20 +362,60 @@ func parseFieldTag(s string) (name, dstring, usage string, _ error) {
 		return "", "", "", fmt.Errorf("invalid flag tag format %q", s)
 	}
 
-	if d, ok := strings.CutPrefix(usage, "default="); ok {
-		m := defaultRE.FindStringSubmatch(d)
-		if m == nil {
-			return "", "", "", fmt.Errorf("invalid default format %q", d)
-		}
-		dstring, usage = m[1], m[2]
-		if strings.HasPrefix(dstring, "'") {
-			dstring = strings.ReplaceAll(dstring[1:len(dstring)-1], "''", "'") // remove 'quotations'
-		}
+	dstring, usage, err := splitUsage(usage)
+	if err != nil {
+		return "", "", "", err
 	}
 	if name == "" {
 		return "", "", "", errors.New("empty flag name")
 	}
 	return
+}
+
+// splitUsage splits a flag help string into default and usage substrings.
+// If no default is specified, the usage is the entire text without error.
+// Otherwise, dstring is the default text with quotes removed (if any),
+// and usage is the remainder of the text.
+// The contents of the results are not otherwise validated.
+func splitUsage(s string) (dstring, usage string, _ error) {
+	du, ok := strings.CutPrefix(s, "default=")
+	if !ok {
+		return "", s, nil // no default, just usage
+	}
+
+	p, isQuoted := strings.CutPrefix(du, "'")
+	if !isQuoted {
+		dstring, usage, ok = strings.Cut(du, ",")
+		if !ok {
+			return "", s, errors.New("missing usage string")
+		}
+		return dstring, usage, nil
+	}
+
+	var i int
+	for i < len(p) {
+		if p[i] != '\'' {
+			i++
+			continue
+		}
+		if i+1 == len(p) || p[i+1] != '\'' {
+			// end of the quoted section
+			break
+		}
+		// this is an escaped quote, preserve it
+		i += 2
+	}
+
+	// Reaching here, we expect i to point to the closing quote of the default.
+	// If it does not, it means the quoted section is incomplete.
+	if i >= len(p) || p[i] != '\'' {
+		return "", s, errors.New("unclosed quotes in default value")
+	}
+	// Moreover, the ending quote must be followed by a comma.
+	if i+1 >= len(p) || p[i+1] != ',' {
+		return "", s, errors.New("missing usage string")
+	}
+	return strings.ReplaceAll(p[:i], "''", "'"), p[i+2:], nil
 }
 
 func parseDefault[T any](f *Field, s string, self T, parse func(string) (T, error)) (T, error) {
