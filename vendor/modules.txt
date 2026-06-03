@@ -308,6 +308,9 @@ github.com/axiomhq/hyperloglog
 # github.com/beevik/ntp v0.3.0
 ## explicit
 github.com/beevik/ntp
+# github.com/benbjohnson/immutable v0.4.3
+## explicit; go 1.18
+github.com/benbjohnson/immutable
 # github.com/beorn7/perks v1.0.1
 ## explicit; go 1.11
 github.com/beorn7/perks/quantile
@@ -404,6 +407,71 @@ github.com/charithe/durationcheck
 # github.com/chavacava/garif v0.1.0
 ## explicit; go 1.16
 github.com/chavacava/garif
+# github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
+## explicit; go 1.26
+github.com/chromedp/cdproto
+github.com/chromedp/cdproto/accessibility
+github.com/chromedp/cdproto/animation
+github.com/chromedp/cdproto/audits
+github.com/chromedp/cdproto/autofill
+github.com/chromedp/cdproto/backgroundservice
+github.com/chromedp/cdproto/bluetoothemulation
+github.com/chromedp/cdproto/browser
+github.com/chromedp/cdproto/cachestorage
+github.com/chromedp/cdproto/cast
+github.com/chromedp/cdproto/cdp
+github.com/chromedp/cdproto/css
+github.com/chromedp/cdproto/debugger
+github.com/chromedp/cdproto/deviceaccess
+github.com/chromedp/cdproto/deviceorientation
+github.com/chromedp/cdproto/dom
+github.com/chromedp/cdproto/domdebugger
+github.com/chromedp/cdproto/domsnapshot
+github.com/chromedp/cdproto/domstorage
+github.com/chromedp/cdproto/emulation
+github.com/chromedp/cdproto/eventbreakpoints
+github.com/chromedp/cdproto/extensions
+github.com/chromedp/cdproto/fedcm
+github.com/chromedp/cdproto/fetch
+github.com/chromedp/cdproto/filesystem
+github.com/chromedp/cdproto/headlessexperimental
+github.com/chromedp/cdproto/heapprofiler
+github.com/chromedp/cdproto/indexeddb
+github.com/chromedp/cdproto/input
+github.com/chromedp/cdproto/inspector
+github.com/chromedp/cdproto/io
+github.com/chromedp/cdproto/layertree
+github.com/chromedp/cdproto/log
+github.com/chromedp/cdproto/media
+github.com/chromedp/cdproto/memory
+github.com/chromedp/cdproto/network
+github.com/chromedp/cdproto/overlay
+github.com/chromedp/cdproto/page
+github.com/chromedp/cdproto/performance
+github.com/chromedp/cdproto/performancetimeline
+github.com/chromedp/cdproto/preload
+github.com/chromedp/cdproto/profiler
+github.com/chromedp/cdproto/pwa
+github.com/chromedp/cdproto/runtime
+github.com/chromedp/cdproto/security
+github.com/chromedp/cdproto/serviceworker
+github.com/chromedp/cdproto/smartcardemulation
+github.com/chromedp/cdproto/storage
+github.com/chromedp/cdproto/systeminfo
+github.com/chromedp/cdproto/target
+github.com/chromedp/cdproto/tethering
+github.com/chromedp/cdproto/tracing
+github.com/chromedp/cdproto/webaudio
+github.com/chromedp/cdproto/webauthn
+github.com/chromedp/cdproto/webmcp
+# github.com/chromedp/chromedp v0.15.1
+## explicit; go 1.26
+github.com/chromedp/chromedp
+github.com/chromedp/chromedp/device
+github.com/chromedp/chromedp/kb
+# github.com/chromedp/sysutil v1.1.0
+## explicit; go 1.23
+github.com/chromedp/sysutil
 # github.com/cilium/ebpf v0.16.0
 ## explicit; go 1.21
 github.com/cilium/ebpf
@@ -741,14 +809,15 @@ github.com/go-git/go-git/v5/utils/trace
 # github.com/go-gorp/gorp/v3 v3.1.0
 ## explicit; go 1.18
 github.com/go-gorp/gorp/v3
-# github.com/go-json-experiment/json v0.0.0-20250813024750-ebf49471dced
-## explicit; go 1.24
+# github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433
+## explicit; go 1.26
 github.com/go-json-experiment/json
 github.com/go-json-experiment/json/internal
 github.com/go-json-experiment/json/internal/jsonflags
 github.com/go-json-experiment/json/internal/jsonopts
 github.com/go-json-experiment/json/internal/jsonwire
 github.com/go-json-experiment/json/jsontext
+github.com/go-json-experiment/json/v1
 # github.com/go-logr/logr v1.4.3
 ## explicit; go 1.18
 github.com/go-logr/logr
@@ -802,6 +871,9 @@ github.com/go-viper/mapstructure/v2/internal/errors
 # github.com/go-xmlfmt/xmlfmt v1.1.2
 ## explicit
 github.com/go-xmlfmt/xmlfmt
+# github.com/go4org/hashtriemap v0.0.0-20251130024219-545ba229f689
+## explicit; go 1.25.1
+github.com/go4org/hashtriemap
 # github.com/go4org/plan9netshell v0.0.0-20250324183649-788daa080737
 ## explicit; go 1.23.4
 github.com/go4org/plan9netshell
@@ -818,6 +890,19 @@ github.com/gobwas/glob/syntax/ast
 github.com/gobwas/glob/syntax/lexer
 github.com/gobwas/glob/util/runes
 github.com/gobwas/glob/util/strings
+# github.com/gobwas/httphead v0.1.0
+## explicit; go 1.15
+github.com/gobwas/httphead
+# github.com/gobwas/pool v0.2.1
+## explicit
+github.com/gobwas/pool
+github.com/gobwas/pool/internal/pmath
+github.com/gobwas/pool/pbufio
+github.com/gobwas/pool/pbytes
+# github.com/gobwas/ws v1.4.0
+## explicit; go 1.16
+github.com/gobwas/ws
+github.com/gobwas/ws/wsutil
 # github.com/goccy/go-yaml v1.12.0
 ## explicit; go 1.19
 github.com/goccy/go-yaml
@@ -1401,7 +1486,7 @@ github.com/moby/moby/client/internal
 github.com/moby/moby/client/internal/mod
 github.com/moby/moby/client/internal/timestamp
 github.com/moby/moby/client/pkg/versions
-# github.com/moby/spdystream v0.5.0
+# github.com/moby/spdystream v0.5.1
 ## explicit; go 1.13
 github.com/moby/spdystream
 github.com/moby/spdystream/spdy
@@ -1792,7 +1877,7 @@ github.com/tailscale/web-client-prebuilt
 # github.com/tailscale/wf v0.0.0-20240214030419-6fbb0a674ee6
 ## explicit; go 1.18
 github.com/tailscale/wf
-# github.com/tailscale/wireguard-go v0.0.0-20260427181203-e3ac4a0afb4e
+# github.com/tailscale/wireguard-go v0.0.0-20260527010701-b48af7099cad
 ## explicit; go 1.25.0
 github.com/tailscale/wireguard-go/conn
 github.com/tailscale/wireguard-go/conn/winrio
@@ -1803,6 +1888,9 @@ github.com/tailscale/wireguard-go/ratelimiter
 github.com/tailscale/wireguard-go/replay
 github.com/tailscale/wireguard-go/rwcancel
 github.com/tailscale/wireguard-go/tai64n
+github.com/tailscale/wireguard-go/tsasm/arm/chacha20
+github.com/tailscale/wireguard-go/tsasm/arm/chacha20poly1305
+github.com/tailscale/wireguard-go/tsasm/arm/poly1305
 github.com/tailscale/wireguard-go/tun
 github.com/tailscale/wireguard-go/tun/tuntest
 # github.com/tailscale/xnet v0.0.0-20240729143630-8497ac4dab2e
@@ -1982,7 +2070,7 @@ go4.org/mem
 # go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
 ## explicit; go 1.18
 go4.org/netipx
-# golang.org/x/crypto v0.50.0
+# golang.org/x/crypto v0.52.0
 ## explicit; go 1.25.0
 golang.org/x/crypto/acme
 golang.org/x/crypto/acme/autocert
@@ -2032,8 +2120,8 @@ golang.org/x/exp/slices
 # golang.org/x/exp/typeparams v0.0.0-20240314144324-c7f7c6466f7f
 ## explicit; go 1.18
 golang.org/x/exp/typeparams
-# golang.org/x/image v0.27.0
-## explicit; go 1.23.0
+# golang.org/x/image v0.41.0
+## explicit; go 1.25.0
 golang.org/x/image/bmp
 golang.org/x/image/draw
 golang.org/x/image/font
@@ -2046,7 +2134,7 @@ golang.org/x/mod/internal/lazyregexp
 golang.org/x/mod/modfile
 golang.org/x/mod/module
 golang.org/x/mod/semver
-# golang.org/x/net v0.53.0
+# golang.org/x/net v0.55.0
 ## explicit; go 1.25.0
 golang.org/x/net/bpf
 golang.org/x/net/context
@@ -2081,7 +2169,7 @@ golang.org/x/oauth2/internal
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
 golang.org/x/sync/singleflight
-# golang.org/x/sys v0.43.0
+# golang.org/x/sys v0.45.0
 ## explicit; go 1.25.0
 golang.org/x/sys/cpu
 golang.org/x/sys/execabs
@@ -2098,10 +2186,10 @@ golang.org/x/telemetry/counter
 golang.org/x/telemetry/internal/counter
 golang.org/x/telemetry/internal/mmap
 golang.org/x/telemetry/internal/telemetry
-# golang.org/x/term v0.42.0
+# golang.org/x/term v0.43.0
 ## explicit; go 1.25.0
 golang.org/x/term
-# golang.org/x/text v0.36.0
+# golang.org/x/text v0.37.0
 ## explicit; go 1.25.0
 golang.org/x/text/encoding
 golang.org/x/text/encoding/internal
