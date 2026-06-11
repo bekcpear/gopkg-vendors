@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/axiomhq/hyperloglog"
+	"github.com/go4org/hashtriemap"
 	"go4.org/mem"
 	"golang.org/x/sync/errgroup"
 	xrate "golang.org/x/time/rate"
@@ -190,8 +191,16 @@ type Server struct {
 	mu       syncs.Mutex // guards the following fields
 	closed   bool
 	netConns map[derp.Conn]chan struct{} // chan is closed when conn closes
-	clients  map[key.NodePublic]*clientSet
-	watchers set.Set[*sclient] // mesh peers
+	// clients holds the set of clients connected locally to this server,
+	// keyed by their public key. Writes happen under Server.mu so they
+	// stay consistent with clientsMesh, watchers, dup tracking, and the
+	// numLocalClientKeys counter. Reads on the packet send hot path
+	// are performed lock-free; see lookupDest.
+	clients hashtriemap.HashTrieMap[key.NodePublic, *clientSet]
+	// numLocalClientKeys is the number of distinct keys in clients.
+	// HashTrieMap has no Len, so the count is tracked here.
+	numLocalClientKeys int
+	watchers           set.Set[*sclient] // mesh peers
 	// clientsMesh tracks all clients in the cluster, both locally
 	// and to mesh peers.  If the value is nil, that means the
 	// peer is only local (and thus in the clients Map, but not
@@ -364,7 +373,6 @@ func New(privateKey key.NodePrivate, logf logger.Logf) *Server {
 		logf:                logf,
 		limitedLogf:         logger.RateLimitedFn(logf, 30*time.Second, 5, 100),
 		packetsRecvByKind:   metrics.LabelMap{Label: "kind"},
-		clients:             map[key.NodePublic]*clientSet{},
 		clientsMesh:         map[key.NodePublic]PacketForwarder{},
 		netConns:            map[derp.Conn]chan struct{}{},
 		memSys0:             ms.Sys,
@@ -569,7 +577,7 @@ func (s *Server) UpdateRateLimits(rc RateConfig) (applied RateConfig) {
 		rc.PerClientRateBurstBytes = max(rc.PerClientRateBurstBytes, minRateLimitTokenBucketSize)
 	}
 	s.rateConfig = rc
-	for _, cs := range s.clients {
+	for _, cs := range s.clients.All() {
 		cs.ForeachClient(func(c *sclient) {
 			c.setRateLimit(rc.PerClientRateLimitBytesPerSec, rc.PerClientRateBurstBytes)
 		})
@@ -626,7 +634,7 @@ func (s *Server) isClosed() bool {
 func (s *Server) IsClientConnectedForTest(k key.NodePublic) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	x, ok := s.clients[k]
+	x, ok := s.clients.Load(k)
 	if !ok {
 		return false
 	}
@@ -741,11 +749,12 @@ func (s *Server) registerClient(c *sclient) {
 
 	c.setRateLimit(s.rateConfig.PerClientRateLimitBytesPerSec, s.rateConfig.PerClientRateBurstBytes)
 
-	cs, ok := s.clients[c.key]
+	cs, ok := s.clients.Load(c.key)
 	if !ok {
 		c.debugLogf("register single client")
 		cs = &clientSet{}
-		s.clients[c.key] = cs
+		s.clients.Store(c.key, cs)
+		s.numLocalClientKeys++
 	}
 	was := cs.activeClient.Load()
 	if was == nil {
@@ -811,7 +820,7 @@ func (s *Server) unregisterClient(c *sclient) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	set, ok := s.clients[c.key]
+	set, ok := s.clients.Load(c.key)
 	if !ok {
 		c.logf("[unexpected]; clients map is empty")
 		return
@@ -831,7 +840,9 @@ func (s *Server) unregisterClient(c *sclient) {
 		}
 		c.debugLogf("removed connection")
 		set.activeClient.Store(nil)
-		delete(s.clients, c.key)
+		if s.clients.CompareAndDelete(c.key, set) {
+			s.numLocalClientKeys--
+		}
 		if v, ok := s.clientsMesh[c.key]; ok && v == nil {
 			delete(s.clientsMesh, c.key)
 			s.notePeerGoneFromRegionLocked(c.key)
@@ -962,7 +973,7 @@ func (s *Server) addWatcher(c *sclient) {
 	defer s.mu.Unlock()
 
 	// Queue messages for each already-connected client.
-	for peer, clientSet := range s.clients {
+	for peer, clientSet := range s.clients.All() {
 		ac := clientSet.activeClient.Load()
 		if ac == nil {
 			continue
@@ -1200,7 +1211,7 @@ func (c *sclient) handleFrameClosePeer(ft derp.FrameType, fl uint32) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if set, ok := s.clients[targetKey]; ok {
+	if set, ok := s.clients.Load(targetKey); ok {
 		if set.Len() == 1 {
 			c.logf("frameClosePeer closing peer %x", targetKey)
 		} else {
@@ -1230,15 +1241,10 @@ func (c *sclient) handleFrameForwardPacket(_ derp.FrameType, fl uint32) error {
 	}
 	s.packetsForwardedIn.Add(1)
 
-	var dstLen int
-	var dst *sclient
-
-	s.mu.Lock()
-	if set, ok := s.clients[dstKey]; ok {
-		dstLen = set.Len()
-		dst = set.activeClient.Load()
-	}
-	s.mu.Unlock()
+	// Use the same lock-free fast path as the local send path. The mesh
+	// forwarder return is intentionally discarded: we never re-forward an
+	// already-forwarded packet.
+	dst, _, dstLen := c.lookupDest(dstKey)
 
 	if dst == nil {
 		reason := dropReasonUnknownDestOnFwd
@@ -1260,6 +1266,40 @@ func (c *sclient) handleFrameForwardPacket(_ derp.FrameType, fl uint32) error {
 	})
 }
 
+// lookupDest returns the local client, mesh forwarder, or duplicate-client
+// count for dst. dstLen is only meaningful when the returned local client is
+// nil; when a local client is returned, dstLen is just non-zero.
+//
+// The fast path reads Server.clients lock-free: if a *clientSet is present
+// for dst and has an active client, we return that without taking Server.mu.
+// Misses, inactive clientSets, duplicate-client accounting, and mesh
+// forwarder lookups fall through to a slow path under Server.mu. At most
+// one local client and PacketForwarder can be non-nil: local clients win
+// over mesh forwarding, and mesh forwarding is considered only when there
+// is no local clientSet.
+func (c *sclient) lookupDest(dst key.NodePublic) (_ *sclient, fwd PacketForwarder, dstLen int) {
+	s := c.s
+	if set, ok := s.clients.Load(dst); ok {
+		if dst := set.activeClient.Load(); dst != nil {
+			return dst, nil, 1
+		}
+	}
+	// Slow path: no active local client. Take Server.mu to read the
+	// duplicate-client count and clientsMesh consistently.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if set, ok := s.clients.Load(dst); ok {
+		if dst := set.activeClient.Load(); dst != nil {
+			return dst, nil, 1
+		}
+		dstLen = set.Len()
+	}
+	if dstLen < 1 {
+		fwd = s.clientsMesh[dst]
+	}
+	return nil, fwd, dstLen
+}
+
 // handleFrameSendPacket reads a "send packet" frame from the client.
 func (c *sclient) handleFrameSendPacket(_ derp.FrameType, fl uint32) error {
 	s := c.s
@@ -1269,19 +1309,7 @@ func (c *sclient) handleFrameSendPacket(_ derp.FrameType, fl uint32) error {
 		return fmt.Errorf("client %v: recvPacket: %v", c.key, err)
 	}
 
-	var fwd PacketForwarder
-	var dstLen int
-	var dst *sclient
-
-	s.mu.Lock()
-	if set, ok := s.clients[dstKey]; ok {
-		dstLen = set.Len()
-		dst = set.activeClient.Load()
-	}
-	if dst == nil && dstLen < 1 {
-		fwd = s.clientsMesh[dstKey]
-	}
-	s.mu.Unlock()
+	dst, fwd, dstLen := c.lookupDest(dstKey)
 
 	if dst == nil {
 		if fwd != nil {
@@ -1613,7 +1641,7 @@ func (s *Server) noteClientActivity(c *sclient) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cs, ok := s.clients[c.key]
+	cs, ok := s.clients.Load(c.key)
 	if !ok {
 		return
 	}
@@ -2279,7 +2307,7 @@ func (s *Server) RemovePacketForwarder(dst key.NodePublic, fwd PacketForwarder) 
 		return
 	}
 
-	if _, isLocal := s.clients[dst]; isLocal {
+	if _, isLocal := s.clients.Load(dst); isLocal {
 		s.clientsMesh[dst] = nil
 	} else {
 		delete(s.clientsMesh, dst)
@@ -2378,8 +2406,8 @@ func (s *Server) ExpVar(rateLimitEnabled bool) expvar.Var {
 	m.Set("gauge_current_home_connections", &s.curHomeClients)
 	m.Set("gauge_current_notideal_connections", &s.curClientsNotIdeal)
 	m.Set("gauge_clients_total", s.expVarFunc(func() any { return len(s.clientsMesh) }))
-	m.Set("gauge_clients_local", s.expVarFunc(func() any { return len(s.clients) }))
-	m.Set("gauge_clients_remote", s.expVarFunc(func() any { return len(s.clientsMesh) - len(s.clients) }))
+	m.Set("gauge_clients_local", s.expVarFunc(func() any { return s.numLocalClientKeys }))
+	m.Set("gauge_clients_remote", s.expVarFunc(func() any { return len(s.clientsMesh) - s.numLocalClientKeys }))
 	m.Set("gauge_current_dup_client_keys", &s.dupClientKeys)
 	m.Set("gauge_current_dup_client_conns", &s.dupClientConns)
 	m.Set("counter_total_dup_client_conns", &s.dupClientConnTotal)
@@ -2436,7 +2464,7 @@ func (s *Server) ConsistencyCheck() error {
 	var nilMeshNotInClient int
 	for k, f := range s.clientsMesh {
 		if f == nil {
-			if _, ok := s.clients[k]; !ok {
+			if _, ok := s.clients.Load(k); !ok {
 				nilMeshNotInClient++
 			}
 		}
@@ -2446,7 +2474,7 @@ func (s *Server) ConsistencyCheck() error {
 	}
 
 	var clientNotInMesh int
-	for k := range s.clients {
+	for k := range s.clients.All() {
 		if _, ok := s.clientsMesh[k]; !ok {
 			clientNotInMesh++
 		}
@@ -2455,10 +2483,10 @@ func (s *Server) ConsistencyCheck() error {
 		errs = append(errs, fmt.Sprintf("%d s.clients keys not in s.clientsMesh", clientNotInMesh))
 	}
 
-	if s.curClients.Value() != int64(len(s.clients)) {
+	if s.curClients.Value() != int64(s.numLocalClientKeys) {
 		errs = append(errs, fmt.Sprintf("expvar connections = %d != clients map says of %d",
 			s.curClients.Value(),
-			len(s.clients)))
+			s.numLocalClientKeys))
 	}
 
 	if s.verifyClientsLocalTailscaled {
@@ -2554,7 +2582,7 @@ func (s *Server) ServeDebugTraffic(w http.ResponseWriter, r *http.Request) {
 			if prev.Sent < next.Sent || prev.Recv < next.Recv {
 				if pkey, ok := s.keyOfAddr[k]; ok {
 					next.Key = pkey
-					if cs, ok := s.clients[pkey]; ok {
+					if cs, ok := s.clients.Load(pkey); ok {
 						if c := cs.activeClient.Load(); c != nil {
 							next.UniqueSenders = c.EstimatedUniqueSenders()
 						}

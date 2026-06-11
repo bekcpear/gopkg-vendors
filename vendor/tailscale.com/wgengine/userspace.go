@@ -47,7 +47,6 @@ import (
 	"tailscale.com/types/logger"
 	"tailscale.com/types/netmap"
 	"tailscale.com/types/views"
-	"tailscale.com/util/backoff"
 	"tailscale.com/util/checkchange"
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/eventbus"
@@ -130,6 +129,14 @@ type userspaceEngine struct {
 	lastIsSubnetRouter bool              // was the node a primary subnet router in the last run.
 	reconfigureVPN     func() error      // or nil
 	conn25PacketHooks  Conn25PacketHooks // or nil
+
+	// lastAppliedDisableTUNUDPGRO and lastAppliedDisableTUNTCPGRO cache the
+	// controlknobs values that were last applied to the TUN device. They are
+	// read and updated under e.mu and only consulted when buildfeatures.HasGRO
+	// is true. Note: wireguard-go's GRO disablement is one-way (sticky), so
+	// transitions from disabled back to enabled require a client restart.
+	lastAppliedDisableTUNUDPGRO bool
+	lastAppliedDisableTUNTCPGRO bool
 
 	mu             sync.Mutex         // guards following; see lock order comment below
 	netMap         *netmap.NetworkMap // or nil
@@ -565,7 +572,15 @@ func NewUserspaceEngine(logf logger.Logf, conf Config) (_ Engine, reterr error) 
 	if err := e.router.Up(); err != nil {
 		return nil, fmt.Errorf("router.Up: %w", err)
 	}
-	tsTUNDev.SetLinkFeaturesPostUp()
+	tsTUNDev.SetLinkFeaturesPostUp(e.controlKnobs)
+	if buildfeatures.HasGRO && runtime.GOOS == "linux" && e.controlKnobs != nil {
+		// Seed the cached "last applied" TUN GRO knob values so the first
+		// netmap update doesn't spuriously call ApplyGROKnobs:
+		// SetLinkFeaturesPostUp above already applied these same values. We
+		// only do this on Linux because ApplyGROKnobs is a no-op elsewhere.
+		e.lastAppliedDisableTUNUDPGRO = e.controlKnobs.DisableTUNUDPGRO.Load()
+		e.lastAppliedDisableTUNTCPGRO = e.controlKnobs.DisableTUNTCPGRO.Load()
+	}
 
 	// It's a little pointless to apply no-op settings here (they
 	// should already be empty?), but it at least exercises the
@@ -615,6 +630,9 @@ func NewUserspaceEngine(logf logger.Logf, conf Config) (_ Engine, reterr error) 
 	})
 	var tsmpRequestGroup singleflight.Group[netip.Addr, struct{}]
 	eventbus.SubscribeFunc(ec, func(req magicsock.NewDiscoKeyAvailable) {
+		if !req.NodeFirstAddr.IsValid() {
+			return
+		}
 		go tsmpRequestGroup.Do(req.NodeFirstAddr, func() (struct{}, error) {
 			e.sendTSMPDiscoAdvertisement(req.NodeFirstAddr)
 			e.logf("wgengine: sending TSMP disco key advertisement to %v", req.NodeFirstAddr)
@@ -749,29 +767,17 @@ func hasOverlap(aips, rips views.Slice[netip.Prefix]) bool {
 }
 
 // ResetAndStop resets the engine to a clean state (like calling Reconfig
-// with all pointers to zero values) and waits for it to be fully stopped,
-// with no live peers or DERPs.
+// with all pointers to zero values) and returns the resulting status.
 //
 // Unlike Reconfig, it does not return ErrNoChanges.
 //
-// If the engine stops, returns the status. NB that this status will not be sent
-// to the registered status callback, it is on the caller to ensure this status
-// is handled appropriately.
+// The returned status will not be sent to the registered status callback;
+// it is on the caller to ensure this status is handled appropriately.
 func (e *userspaceEngine) ResetAndStop() (*Status, error) {
 	if err := e.Reconfig(&wgcfg.Config{}, &router.Config{}, &dns.Config{}); err != nil && !errors.Is(err, ErrNoChanges) {
 		return nil, err
 	}
-	bo := backoff.NewBackoff("UserspaceEngineResetAndStop", e.logf, 1*time.Second)
-	for {
-		st, err := e.getStatus()
-		if err != nil {
-			return nil, err
-		}
-		if len(st.Peers) == 0 && st.DERPs == 0 {
-			return st, nil
-		}
-		bo.BackOff(context.Background(), fmt.Errorf("waiting for engine to stop: peers=%d derps=%d", len(st.Peers), st.DERPs))
-	}
+	return e.getStatus()
 }
 
 func (e *userspaceEngine) PatchDiscoKey(pub key.NodePublic, disco key.DiscoPublic) {
@@ -1288,7 +1294,26 @@ func (e *userspaceEngine) linkChange(delta *netmon.ChangeDelta) {
 func (e *userspaceEngine) SetNetworkMap(nm *netmap.NetworkMap) {
 	e.mu.Lock()
 	e.netMap = nm
+	tunGROKnobsChanged := false
+	var curUDP, curTCP bool
+	if buildfeatures.HasGRO && runtime.GOOS == "linux" && e.controlKnobs != nil {
+		curUDP = e.controlKnobs.DisableTUNUDPGRO.Load()
+		curTCP = e.controlKnobs.DisableTUNTCPGRO.Load()
+		// Only act on transitions toward "disabled"; wireguard-go's GRO
+		// disablement is sticky and cannot be reversed without restart.
+		if (curUDP && !e.lastAppliedDisableTUNUDPGRO) ||
+			(curTCP && !e.lastAppliedDisableTUNTCPGRO) {
+			tunGROKnobsChanged = true
+		}
+		e.lastAppliedDisableTUNUDPGRO = curUDP
+		e.lastAppliedDisableTUNTCPGRO = curTCP
+	}
 	e.mu.Unlock()
+	if buildfeatures.HasGRO && tunGROKnobsChanged {
+		e.logf("wgengine: TUN GRO knobs changed (DisableTUNUDPGRO=%v DisableTUNTCPGRO=%v); applying",
+			curUDP, curTCP)
+		e.tundev.ApplyGROKnobs(e.controlKnobs)
+	}
 	if e.networkLogger.Running() {
 		e.networkLogger.ReconfigNetworkMap(nm)
 	}
@@ -1516,6 +1541,17 @@ func (e *userspaceEngine) PeerForIP(ip netip.Addr) (ret PeerForIP, ok bool) {
 	e.mu.Lock()
 	nm := e.netMap
 	e.mu.Unlock()
+
+	if !ip.IsValid() {
+		// Treat invalid IPs as just a mutex probe to detect deadlocks.
+		// TODO(bradfitz): extend the Engine interface to have an explicit method for
+		// this purpose, instead of overloading PeerForIP with this special case.
+		// But I'd rather do that at the beginning of a dev cycle.
+		e.wgLock.Lock()
+		defer e.wgLock.Unlock()
+		return ret, false
+	}
+
 	if nm == nil {
 		return ret, false
 	}

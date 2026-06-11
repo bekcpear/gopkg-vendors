@@ -77,13 +77,6 @@ func Partition[T any](vs []T, keep func(T) bool) []T {
 	return vs[:i:i]
 }
 
-// Zero sets all the elements of vs to their zero value.
-//
-// Deprecated: Use the built-in clear function instead.
-//
-//go:fix inline
-func Zero[T any, Slice ~[]T](vs Slice) { clear(vs) }
-
 // MapKeys extracts a slice of the keys from a map.  The resulting slice is in
 // arbitrary order.
 func MapKeys[T comparable, U any](m map[T]U) []T {
@@ -119,18 +112,6 @@ func At[T any, Slice ~[]T](ss Slice, i int) T {
 		panic("index out of range")
 	}
 	return ss[b]
-}
-
-// PtrAt returns a pointer to the element of ss at offset i.  Negative offsets
-// count backward from the end of the slice.  If i is out of range, PtrAt
-// returns nil.
-//
-// Deprecated: Use the address-of operator directly.
-func PtrAt[T any, Slice ~[]T](ss Slice, i int) *T {
-	if pos, ok := indexCheck(i, len(ss)); ok {
-		return &ss[pos]
-	}
-	return nil
 }
 
 // MatchingKeys returns an iterator over the keys k of m for which f(m[k]) is
@@ -288,6 +269,16 @@ func Select[T any, Slice ~[]T](vs Slice, f func(T) bool) iter.Seq[T] {
 	}
 }
 
+// Find reports whether there is any v in vs for which f(v) returns true, and
+// if so returns the first one.
+func Find[T any, Slice ~[]T](vs Slice, f func(T) bool) (T, bool) {
+	if i := slices.IndexFunc(vs, f); i >= 0 {
+		return vs[i], true
+	}
+	var zero T
+	return zero, false
+}
+
 // Map maps the elements of the input slice through f.  If vs == nil, it
 // returns nil; otherwise it returns a non-nil slice of the same length as vs,
 // whose ith value is f(vs[i]).
@@ -300,4 +291,15 @@ func Map[T, U any, Slice ~[]T](vs Slice, f func(T) U) []U {
 		out[i] = f(in)
 	}
 	return out
+}
+
+// CountFunc reports the number of elements of vs for which f reports true.
+func CountFunc[T any, Slice ~[]T](vs Slice, f func(T) bool) int {
+	var n int
+	for _, v := range vs {
+		if f(v) {
+			n++
+		}
+	}
+	return n
 }

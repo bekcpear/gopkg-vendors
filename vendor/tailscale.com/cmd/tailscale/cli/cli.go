@@ -93,8 +93,8 @@ var localClient = local.Client{
 	Socket: paths.DefaultTailscaledSocket(),
 }
 
-// Run runs the CLI. The args do not include the binary name.
-func Run(args []string) (err error) {
+// RunWithContext runs the CLI. The args do not include the binary name.
+func RunWithContext(ctx context.Context, args []string) (err error) {
 	if runtime.GOOS == "linux" && os.Getenv("GOKRAZY_FIRST_START") == "1" && distro.Get() == distro.Gokrazy && os.Getppid() == 1 && len(args) == 0 {
 		// We're running on gokrazy and the user did not specify 'up'.
 		// Don't run the tailscale CLI and spam logs with usage; just exit.
@@ -164,7 +164,7 @@ func Run(args []string) (err error) {
 		return
 	}
 
-	err = rootCmd.Run(context.Background())
+	err = rootCmd.Run(ctx)
 	if local.IsAccessDeniedError(err) && os.Getuid() != 0 && runtime.GOOS != "windows" {
 		return fmt.Errorf("%v\n\nUse 'sudo tailscale %s'.\nTo not require root, use 'sudo tailscale set --operator=$USER' once.", err, strings.Join(args, " "))
 	}
@@ -172,6 +172,11 @@ func Run(args []string) (err error) {
 		return nil
 	}
 	return err
+}
+
+// Run is equivalent to calling [RunWithContext] with the background context.
+func Run(args []string) (err error) {
+	return RunWithContext(context.Background(), args)
 }
 
 type onceFlagValue struct {
@@ -234,9 +239,10 @@ func noDupFlagify(c *ffcli.Command, tb testenv.TB) {
 var (
 	fileCmd,
 	sysPolicyCmd,
+	maybeRoutecheckCmd,
 	maybeWebCmd,
 	maybeDriveCmd,
-	maybeNetlockCmd,
+	maybeTailnetLockCmd,
 	maybeFunnelCmd,
 	maybeServeCmd,
 	maybeCertCmd,
@@ -269,12 +275,14 @@ change in the future.
 			upCmd,
 			downCmd,
 			setCmd,
+			getCmd,
 			loginCmd,
 			logoutCmd,
 			switchCmd,
 			configureCmd(),
 			nilOrCall(sysPolicyCmd),
 			netcheckCmd,
+			nilOrCall(maybeRoutecheckCmd),
 			ipCmd,
 			dnsCmd,
 			statusCmd,
@@ -289,11 +297,12 @@ change in the future.
 			nilOrCall(fileCmd),
 			bugReportCmd,
 			nilOrCall(maybeCertCmd),
-			nilOrCall(maybeNetlockCmd),
+			nilOrCall(maybeTailnetLockCmd),
 			licensesCmd,
 			exitNodeCmd(),
 			nilOrCall(maybeUpdateCmd),
 			whoisCmd,
+			whoamiCmd,
 			debugCmd(),
 			nilOrCall(maybeDriveCmd),
 			idTokenCmd,
