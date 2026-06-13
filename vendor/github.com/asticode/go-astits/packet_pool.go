@@ -52,6 +52,9 @@ func (b *packetAccumulator) add(p *Packet) (ps []*Packet) {
 		isPSIComplete(mps) {
 		ps = mps
 		mps = nil
+	} else if isPESPayload(mps[0].Payload) && isPESComplete(mps) { // Check if PES payload is complete
+		ps = mps
+		mps = nil
 	}
 
 	b.q = mps
@@ -118,9 +121,31 @@ func (b *packetPool) dumpUnlocked() (ps []*Packet) {
 
 // hasDiscontinuity checks whether a packet is discontinuous with a set of packets
 func hasDiscontinuity(ps []*Packet, p *Packet) bool {
+	if p.Header.PID == PIDNull {
+		return false
+	}
+
+	isDiscontinuityIndicator := p.Header.HasAdaptationField && p.AdaptationField.DiscontinuityIndicator
+	if isDiscontinuityIndicator {
+		return false
+	}
+
 	l := len(ps)
-	return (p.Header.HasAdaptationField && p.AdaptationField.DiscontinuityIndicator) || (l > 0 && ((p.Header.HasPayload && p.Header.ContinuityCounter != (ps[l-1].Header.ContinuityCounter+1)%16) ||
-		(!p.Header.HasPayload && p.Header.ContinuityCounter != ps[l-1].Header.ContinuityCounter)))
+	if l == 0 {
+		return false
+	}
+
+	var expectedContinuityCounter uint8
+	if p.Header.HasPayload {
+		expectedContinuityCounter = (ps[l-1].Header.ContinuityCounter + 1) & 0x0f
+	} else {
+		expectedContinuityCounter = ps[l-1].Header.ContinuityCounter
+	}
+	if expectedContinuityCounter == p.Header.ContinuityCounter {
+		return false
+	}
+
+	return true
 }
 
 // isSameAsPrevious checks whether a packet is the same as the last packet of a set of packets
