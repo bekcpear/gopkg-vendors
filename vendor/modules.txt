@@ -1,7 +1,7 @@
 # github.com/STARRY-S/zip v0.2.3
 ## explicit; go 1.23
 github.com/STARRY-S/zip
-# github.com/andybalholm/brotli v1.2.1
+# github.com/andybalholm/brotli v1.2.2
 ## explicit; go 1.22
 github.com/andybalholm/brotli
 github.com/andybalholm/brotli/flate
@@ -17,7 +17,7 @@ github.com/asdine/storm/v3/q
 # github.com/asticode/go-astikit v0.59.0
 ## explicit; go 1.18
 github.com/asticode/go-astikit
-# github.com/asticode/go-astisub v0.40.0
+# github.com/asticode/go-astisub v0.41.0
 ## explicit; go 1.13
 github.com/asticode/go-astisub
 # github.com/asticode/go-astits v1.15.0
@@ -106,7 +106,7 @@ github.com/go-viper/mapstructure/v2/internal/errors
 ## explicit; go 1.21
 github.com/golang-jwt/jwt/v5
 github.com/golang-jwt/jwt/v5/request
-# github.com/golang/geo v0.0.0-20260612074446-f1a45663b0f3
+# github.com/golang/geo v0.0.0-20260625163123-7c0e84413537
 ## explicit; go 1.23.0
 github.com/golang/geo/r1
 github.com/golang/geo/r2
@@ -129,10 +129,10 @@ github.com/hashicorp/golang-lru/v2/simplelru
 # github.com/inconshreveable/mousetrap v1.1.0
 ## explicit; go 1.18
 github.com/inconshreveable/mousetrap
-# github.com/jellydator/ttlcache/v3 v3.4.0
+# github.com/jellydator/ttlcache/v3 v3.4.1
 ## explicit; go 1.23.0
 github.com/jellydator/ttlcache/v3
-# github.com/klauspost/compress v1.18.6
+# github.com/klauspost/compress v1.19.0
 ## explicit; go 1.24
 github.com/klauspost/compress
 github.com/klauspost/compress/flate
@@ -171,13 +171,13 @@ github.com/minio/minlz/internal/race
 # github.com/mitchellh/go-homedir v1.1.0
 ## explicit
 github.com/mitchellh/go-homedir
-# github.com/nwaples/rardecode/v2 v2.2.3
+# github.com/nwaples/rardecode/v2 v2.2.5
 ## explicit; go 1.21
 github.com/nwaples/rardecode/v2
-# github.com/pelletier/go-toml/v2 v2.3.1
+# github.com/pelletier/go-toml/v2 v2.4.2
 ## explicit; go 1.21.0
 github.com/pelletier/go-toml/v2
-github.com/pelletier/go-toml/v2/internal/characters
+github.com/pelletier/go-toml/v2/internal/parserbridge
 github.com/pelletier/go-toml/v2/internal/tracker
 github.com/pelletier/go-toml/v2/unstable
 # github.com/pierrec/lz4/v4 v4.1.27
@@ -193,7 +193,7 @@ github.com/pmezard/go-difflib/difflib
 # github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55
 ## explicit; go 1.14
 github.com/power-devops/perfstat
-# github.com/redis/go-redis/v9 v9.20.1
+# github.com/redis/go-redis/v9 v9.21.0
 ## explicit; go 1.24
 github.com/redis/go-redis/v9
 github.com/redis/go-redis/v9/auth
@@ -224,7 +224,7 @@ github.com/samber/lo/internal/constraints
 github.com/samber/lo/internal/xrand
 github.com/samber/lo/internal/xtime
 github.com/samber/lo/mutable
-# github.com/shirou/gopsutil/v4 v4.26.5
+# github.com/shirou/gopsutil/v4 v4.26.6
 ## explicit; go 1.24.0
 github.com/shirou/gopsutil/v4/common
 github.com/shirou/gopsutil/v4/disk
@@ -280,8 +280,8 @@ github.com/ulikunitz/xz/lzma
 # github.com/yusufpapurcu/wmi v1.2.4
 ## explicit; go 1.16
 github.com/yusufpapurcu/wmi
-# go.etcd.io/bbolt v1.4.3
-## explicit; go 1.23
+# go.etcd.io/bbolt v1.5.0
+## explicit; go 1.25.0
 go.etcd.io/bbolt
 go.etcd.io/bbolt/errors
 go.etcd.io/bbolt/internal/common
@@ -299,10 +299,11 @@ go4.org/readerutil
 ## explicit; go 1.25.0
 golang.org/x/crypto/bcrypt
 golang.org/x/crypto/blowfish
-# golang.org/x/image v0.42.0
+# golang.org/x/image v0.43.0
 ## explicit; go 1.25.0
 golang.org/x/image/bmp
 golang.org/x/image/ccitt
+golang.org/x/image/internal/safemath
 golang.org/x/image/tiff
 golang.org/x/image/tiff/lzw
 # golang.org/x/net v0.56.0
