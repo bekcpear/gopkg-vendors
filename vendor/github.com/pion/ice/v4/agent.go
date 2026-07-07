@@ -1574,15 +1574,20 @@ func (a *Agent) sendBindingSuccess(m *stun.Message, local, remote Candidate) {
 		return
 	}
 
-	if out, err := stun.Build(m, stun.BindingSuccess,
+	attributes := []stun.Setter{
+		m,
+		stun.BindingSuccess,
 		&stun.XORMappedAddress{
 			IP:   ip.AsSlice(),
 			Port: port,
 		},
+	}
+	attributes = append(attributes,
 		stun.NewShortTermIntegrity(a.localPwd),
-		stun.Fingerprint,
-	); err != nil {
-		a.log.Warnf("Failed to handle inbound ICE from: %s to: %s error: %s", local, remote, err)
+		stun.Fingerprint)
+
+	if out, err := stun.Build(attributes...); err != nil {
+		a.log.Errorf("failed to build binding success: %w", err)
 	} else {
 		if pair := a.findPair(local, remote); pair != nil {
 			pair.UpdateResponseSent()
@@ -2037,8 +2042,6 @@ func (a *Agent) sendNominationRequest(pair *CandidatePair, nominationValue uint3
 		UseCandidate(),
 		AttrControlling(a.tieBreaker),
 		PriorityAttr(pair.Local.Priority()),
-		stun.NewShortTermIntegrity(a.remotePwd),
-		stun.Fingerprint,
 	}
 
 	// Add nomination attribute if renomination is enabled and value > 0
@@ -2050,6 +2053,11 @@ func (a *Agent) sendNominationRequest(pair *CandidatePair, nominationValue uint3
 		a.log.Tracef("Sending renomination request from %s to %s with nomination value %d",
 			pair.Local, pair.Remote, nominationValue)
 	}
+
+	attributes = append(attributes,
+		stun.NewShortTermIntegrity(a.remotePwd),
+		stun.Fingerprint,
+	)
 
 	msg, err := stun.Build(append([]stun.Setter{stun.BindingRequest}, attributes...)...)
 	if err != nil {

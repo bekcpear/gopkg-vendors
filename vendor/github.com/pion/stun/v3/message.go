@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/pion/logging"
 )
 
 const (
@@ -44,6 +46,9 @@ func IsMessage(b []byte) bool {
 	return len(b) >= messageHeaderSize && bin.Uint32(b[4:8]) == magicCookie
 }
 
+// MessageOption is a function that sets a Message option.
+type MessageOption func(*Message)
+
 // New returns *Message with pre-allocated Raw.
 func New() *Message {
 	const defaultRawCapacity = 120
@@ -51,6 +56,16 @@ func New() *Message {
 	return &Message{
 		Raw: make([]byte, messageHeaderSize, defaultRawCapacity),
 	}
+}
+
+// NewWithOptions returns *Message with pre-allocated Raw, applying the provided options.
+func NewWithOptions(options ...MessageOption) *Message {
+	m := New()
+	for _, option := range options {
+		option(m)
+	}
+
+	return m
 }
 
 // ErrDecodeToNil occurs on Decode(data, nil) call.
@@ -78,6 +93,22 @@ type Message struct {
 	TransactionID [TransactionIDSize]byte
 	Attributes    Attributes
 	Raw           []byte
+	logger        logging.LeveledLogger
+	strict        bool
+}
+
+// withMessageLogger sets the logger for the Message.
+func withMessageLogger(logger logging.LeveledLogger) MessageOption {
+	return func(m *Message) {
+		m.logger = logger
+	}
+}
+
+// WithStrict enables stricter RFC 5389 and RFC 8489 enforcement.
+func WithStrict(strict bool) MessageOption {
+	return func(m *Message) {
+		m.strict = strict
+	}
 }
 
 // MarshalBinary implements the encoding.BinaryMarshaler interface.
@@ -359,15 +390,25 @@ func (m *Message) ReadFrom(r io.Reader) (int64, error) {
 	}
 	m.Raw = tBuf[:n]
 
-	return int64(n), m.Decode()
+	if err = m.Decode(); err != nil {
+		return int64(n), err
+	}
+	if m.strict && m.Type.Value() == 0 {
+		return int64(n), ErrInvalidType
+	}
+
+	return int64(n), nil
 }
 
 // ErrUnexpectedHeaderEOF means that there were not enough bytes in
 // m.Raw to read header.
 var ErrUnexpectedHeaderEOF = errors.New("unexpected EOF: not enough bytes to read header")
 
+// ErrInvalidType means that the message type is 0 (reserved).
+var ErrInvalidType = errors.New("STUN message type 0 is reserved")
+
 // Decode decodes m.Raw into m.
-func (m *Message) Decode() error {
+func (m *Message) Decode() error { //nolint:cyclop
 	// decoding message header
 	buf := m.Raw
 	if len(buf) < messageHeaderSize {
@@ -399,6 +440,8 @@ func (m *Message) Decode() error {
 		offset = 0
 		b      = buf[messageHeaderSize:fullSize]
 	)
+	seenMI := false
+	seenMI256 := false
 	for offset < size {
 		// checking that we have enough bytes to read header
 		if len(b) < attributeHeaderSize {
@@ -425,7 +468,35 @@ func (m *Message) Decode() error {
 		offset += aBuffL
 		b = b[aBuffL:]
 
+		// RFC 8489:
+		// - after MESSAGE-INTEGRITY, only MESSAGE-INTEGRITY-SHA256 and
+		//   FINGERPRINT may follow.
+		// - after MESSAGE-INTEGRITY-SHA256, if MESSAGE-INTEGRITY was absent,
+		//   only FINGERPRINT may follow.
+		isMI := attr.Type == AttrMessageIntegrity
+		isMI256 := attr.Type == AttrMessageIntegritySHA256
+		isFingerprint := attr.Type == AttrFingerprint
+		afterMI := seenMI && !isMI256 && !isFingerprint
+		afterMI256Only := !seenMI && seenMI256 && !isFingerprint
+		afterIntegrity := afterMI || afterMI256Only
+
+		if afterIntegrity && (m.logger != nil) {
+			action := "retained"
+			if m.strict {
+				action = "dropped"
+			}
+			m.logger.Warnf("attribute %s found after integrity attribute (%s)", attr.Type.String(), action)
+		}
+		if m.strict && afterIntegrity {
+			continue
+		}
 		m.Attributes = append(m.Attributes, attr)
+		if isMI {
+			seenMI = true
+		}
+		if isMI256 {
+			seenMI256 = true
+		}
 	}
 
 	return nil
