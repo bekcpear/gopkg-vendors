@@ -69,6 +69,11 @@ func (pack *Pack) logicWrite(dnsCheck chan error) error {
 			log.Printf("")
 		}
 
+	case pack.Output != nil && pack.Output.Type == OutputTypeGaf && pack.Output.Path != "":
+		if err := pack.overwriteGaf(root, pack.sbom); err != nil {
+			return err
+		}
+
 	default:
 		if cfg.InternalCompatibilityFlags.OverwriteBoot != "" {
 			mbrfn := cfg.InternalCompatibilityFlags.OverwriteMBR

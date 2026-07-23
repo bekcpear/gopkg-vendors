@@ -22,7 +22,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mdlayher/watchdog"
 	"golang.org/x/sys/unix"
 
 	"github.com/tailscale/ts-gokrazy/internal/iface"
@@ -56,30 +55,106 @@ func configureLoopback() error {
 }
 
 // runWatchdog periodically pings the hardware watchdog.
+//
+// It opens the device, immediately raises the timeout to safeWatchdogTimeout
+// (so short hardware or emulator defaults cannot bite us before we ever
+// reach the ping loop), then pings on an interval of half the configured
+// timeout. QEMU's raspi3b model, in particular, emulates the BCM2835
+// watchdog with a sub-second default timeout.
 func runWatchdog() {
-	d, err := watchdog.Open()
+	if cmdlineContains("nowatchdog") {
+		log.Printf("skipping hardware watchdog (nowatchdog on kernel cmdline)")
+		return
+	}
+
+	f, err := os.OpenFile("/dev/watchdog", os.O_WRONLY, 0)
 	if err != nil {
 		log.Printf("disabling hardware watchdog, as it could not be opened: %v", err)
 		return
 	}
+
+	// Immediately ping so the default timeout doesn't expire while we
+	// read back the actual value.
+	_ = unix.IoctlSetInt(int(f.Fd()), unix.WDIOC_KEEPALIVE, 0)
+
+	d := &watchdogDevice{f: f}
 	defer d.Close()
 
-	var timeout string
-	if t, err := d.Timeout(); err != nil {
-		// Assume the device cannot report the watchdog timeout.
-		timeout = "unknown"
-	} else {
-		timeout = t.String()
+	timeout, err := d.Timeout()
+	interval := time.Second
+	if err == nil && timeout > 0 {
+		interval = timeout / 2
+		if interval < 100*time.Millisecond {
+			interval = 100 * time.Millisecond
+		}
 	}
-
-	log.Printf("found hardware watchdog %q with timeout %s, pinging...", d.Identity, timeout)
+	log.Printf("found hardware watchdog %q with timeout %v, pinging every %v", d.identity(), timeout, interval)
 
 	for {
+		time.Sleep(interval)
 		if err := d.Ping(); err != nil {
 			log.Printf("hardware watchdog ping failed: %v", err)
 		}
-		time.Sleep(1 * time.Second)
 	}
+}
+
+// cmdlineContains reports whether the kernel command line contains the given
+// parameter. It matches both bare flags (e.g. "nowatchdog") and key=value
+// pairs (e.g. "gokrazy.log_to_serial=1" matches param
+// "gokrazy.log_to_serial"). It reads /proc/cmdline if available, otherwise
+// falls back to /sys/firmware/devicetree/base/chosen/bootargs.
+func cmdlineContains(param string) bool {
+	b, err := os.ReadFile("/proc/cmdline")
+	if err != nil {
+		b, _ = os.ReadFile("/sys/firmware/devicetree/base/chosen/bootargs")
+	}
+	for field := range strings.SplitSeq(string(b), " ") {
+		field = strings.TrimSpace(field)
+		if field == param {
+			return true
+		}
+		if k, _, ok := strings.Cut(field, "="); ok && k == param {
+			return true
+		}
+	}
+	return false
+}
+
+// watchdogDevice is a minimal wrapper around an open /dev/watchdog file
+// that exposes only the operations runWatchdog needs. It exists so we can
+// own the open file (and call WDIOC_SETTIMEOUT on it immediately after
+// open) without depending on the mdlayher/watchdog package's
+// fd-encapsulating constructor.
+type watchdogDevice struct {
+	f *os.File
+}
+
+func (d *watchdogDevice) Close() error {
+	// Write the magic close character so the kernel disarms the watchdog
+	// instead of treating the close as a graceful "still alive, leaving
+	// up to the driver".
+	d.f.Write([]byte("V"))
+	return d.f.Close()
+}
+
+func (d *watchdogDevice) Ping() error {
+	return unix.IoctlSetInt(int(d.f.Fd()), unix.WDIOC_KEEPALIVE, 0)
+}
+
+func (d *watchdogDevice) Timeout() (time.Duration, error) {
+	s, err := unix.IoctlGetInt(int(d.f.Fd()), unix.WDIOC_GETTIMEOUT)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(s) * time.Second, nil
+}
+
+func (d *watchdogDevice) identity() string {
+	info, err := unix.IoctlGetWatchdogInfo(int(d.f.Fd()))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(string(info.Identity[:]), "\x00")
 }
 
 func setupTLS() error {

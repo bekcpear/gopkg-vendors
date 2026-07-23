@@ -35,7 +35,8 @@ type Session interface {
 	// user for this session, in the form "key=value".
 	Environ() []string
 
-	// Exit sends an exit status and then closes the session.
+	// Exit sends an exit status. The caller is responsible for calling
+	// Close separately after any remaining I/O is complete.
 	Exit(code int) error
 
 	// Command returns a shell parsed slice of arguments that were provided by the
@@ -187,7 +188,12 @@ func (sess *session) Exit(code int) error {
 	if err != nil {
 		return err
 	}
-	return sess.Close()
+	// Per RFC 4254 Section 6.10, the channel needs to be closed with
+	// SSH_MSG_CHANNEL_CLOSE after the exit-status message. By not closing
+	// here, we allow the caller to complete remaining I/O (e.g. flushing
+	// output and sending EOF via CloseWrite) before closing the channel.
+	// https://datatracker.ietf.org/doc/html/rfc4254#section-6.10
+	return nil
 }
 
 func (sess *session) User() string {
@@ -272,6 +278,7 @@ func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
 			go func() {
 				sess.handler(sess)
 				sess.Exit(0)
+				sess.Close()
 			}()
 		case "subsystem":
 			if sess.handled {
@@ -306,6 +313,7 @@ func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
 			go func() {
 				handler(sess)
 				sess.Exit(0)
+				sess.Close()
 			}()
 		case "env":
 			if sess.handled {

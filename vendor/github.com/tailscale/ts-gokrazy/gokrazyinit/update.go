@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,10 +22,10 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/google/renameio/v2"
 	"github.com/tailscale/ts-gokrazy/internal/deviceconfig"
 	"github.com/tailscale/ts-gokrazy/internal/fat"
 	"github.com/tailscale/ts-gokrazy/internal/rootdev"
-	"github.com/google/renameio/v2"
 )
 
 var rootRe = regexp.MustCompile(`root=[^ ]+`)
@@ -331,8 +332,19 @@ func initUpdate() error {
 		}
 	})
 	http.HandleFunc("/reboot", func(w http.ResponseWriter, r *http.Request) {
+		opts := rebootOpts{
+			tryKexec: r.FormValue("kexec") != "off",
+		}
+		if v := r.FormValue("kexec_merge_cmdline"); v != "" {
+			var err error
+			opts.kexecMergeCurrentCmdline, err = strconv.ParseBool(v)
+			if err != nil {
+				http.Error(w, "invalid kexec_merge_cmdline value", http.StatusBadRequest)
+				return
+			}
+		}
 		powerHandler(w, r, "reboot", "Rebooting", func() error {
-			return reboot(r.FormValue("kexec") != "off")
+			return reboot(opts)
 		})
 	})
 	http.HandleFunc("/poweroff", func(w http.ResponseWriter, r *http.Request) {

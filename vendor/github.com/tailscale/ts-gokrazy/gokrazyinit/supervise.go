@@ -391,8 +391,12 @@ func initRemoteSyslog() {
 
 func newLogWriter(tag string) lineswriter {
 	lb := newLineRingBuffer(100)
+	var w lineswriter = lb
+	if logToSerial.Get() {
+		w = &serialTeeWriter{lineswriter: lb, tag: tag}
+	}
 	if syslogRaddr == "" {
-		return lb
+		return w
 	}
 	wr := &remoteSyslogWriter{
 		raddr: syslogRaddr,
@@ -401,6 +405,55 @@ func newLogWriter(tag string) lineswriter {
 	}
 	go wr.establish()
 	return wr
+}
+
+// logToSerial is lazily initialized from the kernel cmdline on first use.
+var logToSerial = &lazyBoolFromCmdline{param: "gokrazy.log_to_serial"}
+
+type lazyBoolFromCmdline struct {
+	param string
+	once  sync.Once
+	val   bool
+}
+
+func (l *lazyBoolFromCmdline) Get() bool {
+	l.once.Do(func() {
+		l.val = cmdlineContains(l.param)
+	})
+	return l.val
+}
+
+var serialConsole struct {
+	once sync.Once
+	w    io.Writer
+}
+
+func getSerialConsole() io.Writer {
+	serialConsole.once.Do(func() {
+		f, err := os.OpenFile("/dev/console", os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			// Fall back to stdout, which on gokrazy init is inherited from
+			// the kernel and points at the serial console.
+			serialConsole.w = os.Stdout
+		} else {
+			serialConsole.w = f
+		}
+	})
+	return serialConsole.w
+}
+
+// serialTeeWriter wraps a lineswriter and also writes each Write call to
+// /dev/console prefixed with the service tag, so service output appears on
+// the serial console when gokrazy.log_to_serial=1 is on the kernel cmdline.
+type serialTeeWriter struct {
+	lineswriter
+	tag string
+}
+
+func (s *serialTeeWriter) Write(p []byte) (int, error) {
+	w := getSerialConsole()
+	fmt.Fprintf(w, "%s: %s", s.tag, p)
+	return s.lineswriter.Write(p)
 }
 
 func isDontSupervise(err error) bool {

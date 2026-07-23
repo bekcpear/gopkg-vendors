@@ -50,12 +50,13 @@ func loadConfig() (*config.Struct, string, error) {
 
 func overwriteCmd() *cobra.Command {
 	var (
-		overwritePath    string
-		overwriteBoot    string
-		overwriteRoot    string
-		overwriteMBR     string
-		targetBytes      int
-		sudo             string
+		overwritePath string
+		overwriteGAF  string
+		overwriteBoot string
+		overwriteRoot string
+		overwriteMBR  string
+		targetBytes   int
+		sudo          string
 	)
 
 	cmd := &cobra.Command{
@@ -67,8 +68,11 @@ func overwriteCmd() *cobra.Command {
 				return err
 			}
 
-			if overwritePath == "" {
-				return fmt.Errorf("--full flag (path to device or file) is required")
+			if overwritePath != "" && overwriteGAF != "" {
+				return fmt.Errorf("cannot specify both --full and --gaf")
+			}
+			if overwritePath == "" && overwriteGAF == "" {
+				return fmt.Errorf("one of --full or --gaf is required")
 			}
 
 			cfg.InternalCompatibilityFlags.Overwrite = overwritePath
@@ -81,11 +85,18 @@ func overwriteCmd() *cobra.Command {
 			}
 
 			pack := packer.NewPack(cfg, moduleRoot)
+			if overwriteGAF != "" {
+				pack.Output = &packer.Output{
+					Type: packer.OutputTypeGaf,
+					Path: overwriteGAF,
+				}
+			}
 			return pack.RunOverwrite(context.Background())
 		},
 	}
 
 	cmd.Flags().StringVar(&overwritePath, "full", "", "path to SD card device or image file to overwrite")
+	cmd.Flags().StringVar(&overwriteGAF, "gaf", "", "path to write a .gaf (gokrazy archive format) file")
 	cmd.Flags().StringVar(&overwriteBoot, "boot", "", "path to overwrite just the boot partition")
 	cmd.Flags().StringVar(&overwriteRoot, "root", "", "path to overwrite just the root partition")
 	cmd.Flags().StringVar(&overwriteMBR, "mbr", "", "path to overwrite just the MBR")

@@ -66,7 +66,12 @@ func mountCompat() error {
 		return fmt.Errorf("tmpfs on /etc: %v", err)
 	}
 
-	if err := os.Symlink("/proc/net/pnp", "/etc/resolv.conf"); err != nil {
+	// Point /etc/resolv.conf at /tmp/resolv.conf, which is where gokrazy's
+	// userspace DHCP client writes nameserver entries after obtaining a
+	// lease. (The previous symlink to /proc/net/pnp only works with
+	// kernel-level ip=dhcp; with userspace DHCP it stays empty and Go's
+	// net package falls back to [::1]:53 which has nothing listening.)
+	if err := os.Symlink("/tmp/resolv.conf", "/etc/resolv.conf"); err != nil {
 		return fmt.Errorf("etc: %v", err)
 	}
 

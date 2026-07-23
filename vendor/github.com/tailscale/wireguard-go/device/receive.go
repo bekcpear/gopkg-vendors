@@ -377,9 +377,6 @@ func (device *Device) RoutineHandshake(id int) {
 			peer.timersAnyAuthenticatedPacketTraversal()
 			peer.timersAnyAuthenticatedPacketReceived()
 
-			// update endpoint
-			peer.SetEndpointFromPacket(elem.endpoint)
-
 			device.log.Verbosef("%v - Received handshake initiation", peer)
 			peer.rxBytes.Add(uint64(len(elem.packet)))
 
@@ -404,9 +401,6 @@ func (device *Device) RoutineHandshake(id int) {
 				goto skip
 			}
 
-			// update endpoint
-			peer.SetEndpointFromPacket(elem.endpoint)
-
 			device.log.Verbosef("%v - Received handshake response", peer)
 			peer.rxBytes.Add(uint64(len(elem.packet)))
 
@@ -426,6 +420,7 @@ func (device *Device) RoutineHandshake(id int) {
 
 			peer.timersSessionDerived()
 			peer.timersHandshakeComplete()
+			peer.SendPriorityMessage()
 			peer.SendKeepalive()
 		}
 	skip:
@@ -492,8 +487,8 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 
 		validTailPacket = i
 		if peer.ReceivedWithKeypair(elem.keypair) {
-			peer.SetEndpointFromPacket(elem.endpoint)
 			peer.timersHandshakeComplete()
+			peer.SendPriorityMessage()
 			peer.SendStagedPackets()
 		}
 		if ep, ok := elem.endpoint.(conn.PeerAwareEndpoint); ok {
@@ -553,7 +548,6 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 
 	peer.rxBytes.Add(rxBytesLen)
 	if validTailPacket >= 0 {
-		peer.SetEndpointFromPacket(elems[validTailPacket].endpoint)
 		peer.keepKeyFreshReceiving()
 		peer.timersAnyAuthenticatedPacketTraversal()
 		peer.timersAnyAuthenticatedPacketReceived()

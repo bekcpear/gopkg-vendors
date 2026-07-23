@@ -30,7 +30,7 @@ func listenForSignals(sighup func()) {
 
 				switch sig {
 				case unix.SIGTERM:
-					reboot(true)
+					reboot(rebootOpts{tryKexec: true})
 
 				case unix.SIGUSR1:
 					log.Println("Halting")
