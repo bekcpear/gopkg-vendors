@@ -17,7 +17,7 @@ github.com/asdine/storm/v3/q
 # github.com/asticode/go-astikit v0.59.0
 ## explicit; go 1.18
 github.com/asticode/go-astikit
-# github.com/asticode/go-astisub v0.41.0
+# github.com/asticode/go-astisub v0.42.0
 ## explicit; go 1.13
 github.com/asticode/go-astisub
 # github.com/asticode/go-astits v1.15.0
@@ -26,7 +26,7 @@ github.com/asticode/go-astits
 # github.com/bodgit/plumbing v1.3.0
 ## explicit; go 1.13
 github.com/bodgit/plumbing
-# github.com/bodgit/sevenzip v1.6.4
+# github.com/bodgit/sevenzip v1.6.5
 ## explicit; go 1.25.0
 github.com/bodgit/sevenzip
 github.com/bodgit/sevenzip/internal/aes7z
@@ -77,7 +77,7 @@ github.com/dsoprea/go-logging
 # github.com/dsoprea/go-utility/v2 v2.0.0-20221003172846-a3e1774ef349
 ## explicit; go 1.12
 github.com/dsoprea/go-utility/v2/filesystem
-# github.com/ebitengine/purego v0.10.1
+# github.com/ebitengine/purego v0.10.2
 ## explicit; go 1.18
 github.com/ebitengine/purego
 github.com/ebitengine/purego/internal/cgo
@@ -106,7 +106,7 @@ github.com/go-viper/mapstructure/v2/internal/errors
 ## explicit; go 1.21
 github.com/golang-jwt/jwt/v5
 github.com/golang-jwt/jwt/v5/request
-# github.com/golang/geo v0.0.0-20260625163123-7c0e84413537
+# github.com/golang/geo v0.0.0-20260713102120-857a528af641
 ## explicit; go 1.23.0
 github.com/golang/geo/r1
 github.com/golang/geo/r2
@@ -132,7 +132,7 @@ github.com/inconshreveable/mousetrap
 # github.com/jellydator/ttlcache/v3 v3.4.1
 ## explicit; go 1.23.0
 github.com/jellydator/ttlcache/v3
-# github.com/klauspost/compress v1.19.0
+# github.com/klauspost/compress v1.19.1
 ## explicit; go 1.24
 github.com/klauspost/compress
 github.com/klauspost/compress/flate
@@ -164,8 +164,8 @@ github.com/mholt/archives
 # github.com/mikelolasagasti/xz v1.0.1
 ## explicit; go 1.15
 github.com/mikelolasagasti/xz
-# github.com/minio/minlz v1.1.1
-## explicit; go 1.21
+# github.com/minio/minlz v1.2.0
+## explicit; go 1.24
 github.com/minio/minlz
 github.com/minio/minlz/internal/race
 # github.com/mitchellh/go-homedir v1.1.0
@@ -174,7 +174,7 @@ github.com/mitchellh/go-homedir
 # github.com/nwaples/rardecode/v2 v2.2.5
 ## explicit; go 1.21
 github.com/nwaples/rardecode/v2
-# github.com/pelletier/go-toml/v2 v2.4.2
+# github.com/pelletier/go-toml/v2 v2.4.3
 ## explicit; go 1.21.0
 github.com/pelletier/go-toml/v2
 github.com/pelletier/go-toml/v2/internal/parserbridge
@@ -271,8 +271,8 @@ github.com/subosito/gotenv
 # github.com/tomasen/realip v0.0.0-20180522021738-f0c99a92ddce
 ## explicit
 github.com/tomasen/realip
-# github.com/ulikunitz/xz v0.5.15
-## explicit; go 1.12
+# github.com/ulikunitz/xz v0.5.16
+## explicit; go 1.20
 github.com/ulikunitz/xz
 github.com/ulikunitz/xz/internal/hash
 github.com/ulikunitz/xz/internal/xlog
@@ -295,31 +295,31 @@ go.yaml.in/yaml/v3
 # go4.org v0.0.0-20260112195520-a5071408f32f
 ## explicit; go 1.24.0
 go4.org/readerutil
-# golang.org/x/crypto v0.53.0
+# golang.org/x/crypto v0.54.0
 ## explicit; go 1.25.0
 golang.org/x/crypto/bcrypt
 golang.org/x/crypto/blowfish
-# golang.org/x/image v0.43.0
+# golang.org/x/image v0.44.0
 ## explicit; go 1.25.0
 golang.org/x/image/bmp
 golang.org/x/image/ccitt
 golang.org/x/image/internal/safemath
 golang.org/x/image/tiff
 golang.org/x/image/tiff/lzw
-# golang.org/x/net v0.56.0
+# golang.org/x/net v0.57.0
 ## explicit; go 1.25.0
 golang.org/x/net/context
 golang.org/x/net/html
 golang.org/x/net/html/atom
-# golang.org/x/sync v0.21.0
+# golang.org/x/sync v0.22.0
 ## explicit; go 1.25.0
 golang.org/x/sync/singleflight
-# golang.org/x/sys v0.46.0
+# golang.org/x/sys v0.47.0
 ## explicit; go 1.25.0
 golang.org/x/sys/unix
 golang.org/x/sys/windows
 golang.org/x/sys/windows/registry
-# golang.org/x/text v0.38.0
+# golang.org/x/text v0.40.0
 ## explicit; go 1.25.0
 golang.org/x/text/cases
 golang.org/x/text/encoding
