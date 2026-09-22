@@ -1,5 +1,5 @@
 diff --git a/go.mod b/go.mod
-index ccca34b..9143e8d 100644
+index ccca34b..ba5c7dc 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -30,7 +30,7 @@ require (
@@ -7,12 +7,12 @@ index ccca34b..9143e8d 100644
  	github.com/pion/webrtc/v4 v4.2.16
  	github.com/pires/go-proxyproto v0.15.0
 -	github.com/quic-go/quic-go v0.61.0
-+	github.com/quic-go/quic-go v0.62.0
++	github.com/quic-go/quic-go v0.63.0
  	github.com/refraction-networking/utls v1.8.2
  	github.com/seiflotfy/cuckoofilter v0.0.0-20220411075957-e3b120b3f5fb
  	github.com/stretchr/testify v1.12.1
 diff --git a/go.sum b/go.sum
-index 8dc0c25..5c6dd79 100644
+index 8dc0c25..db1b70d 100644
 --- a/go.sum
 +++ b/go.sum
 @@ -467,8 +467,8 @@ github.com/quic-go/go-ossfuzz-seeds v0.1.0 h1:APacT+iIaNF6fd8AGEiN3bT/Jtkd2jz4v4
@@ -21,8 +21,8 @@ index 8dc0c25..5c6dd79 100644
  github.com/quic-go/qpack v0.6.0/go.mod h1:lUpLKChi8njB4ty2bFLX2x4gzDqXwUpaO1DP9qMDZII=
 -github.com/quic-go/quic-go v0.61.0 h1:ui88A53s8MSVYLC56en0KQ17HARk+9986Dn0SBfKNvA=
 -github.com/quic-go/quic-go v0.61.0/go.mod h1:9So2anK4Tp22URSQq00k+Vo2PNkle96ycDPDHL4s9vs=
-+github.com/quic-go/quic-go v0.62.0 h1:ZHDjCk5OacATwGvs8PWE97CTvX7AqZiVoW7++ZOXTf8=
-+github.com/quic-go/quic-go v0.62.0/go.mod h1:RAro2j2yN9a9EiPACLHT9IB2NXCvGQmmo/alT0yYI0w=
++github.com/quic-go/quic-go v0.63.0 h1:LIFGHI4PFUhhw2dDD1ARHdCff143ffMHwZtbnbuJ78A=
++github.com/quic-go/quic-go v0.63.0/go.mod h1:RAro2j2yN9a9EiPACLHT9IB2NXCvGQmmo/alT0yYI0w=
  github.com/rcrowley/go-metrics v0.0.0-20181016184325-3113b8401b8a/go.mod h1:bCqnVzQkZxMG4s8nGwiZ5l3QUCyqpo9Y+/ZMZ9VjZe4=
  github.com/refraction-networking/utls v1.8.2 h1:j4Q1gJj0xngdeH+Ox/qND11aEfhpgoEvV+S9iJ2IdQo=
  github.com/refraction-networking/utls v1.8.2/go.mod h1:jkSOEkLqn+S/jtpEHPOsVv/4V4EVnelwbMQl4vCWXAM=
