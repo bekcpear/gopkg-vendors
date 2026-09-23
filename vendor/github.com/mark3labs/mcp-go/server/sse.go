@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"path"
 	"strings"
@@ -21,6 +20,8 @@ import (
 
 // sseSession represents an active SSE connection.
 type sseSession struct {
+	clientInfoStore // provides Get/SetClientInfo and Get/SetClientCapabilities via method promotion
+
 	done                chan struct{}
 	doneOnce            sync.Once
 	eventQueue          chan string // Channel for queuing events
@@ -29,11 +30,9 @@ type sseSession struct {
 	notificationChannel chan mcp.JSONRPCNotification
 	initialized         atomic.Bool
 	loggingLevel        atomic.Value
-	tools               sync.Map     // stores session-specific tools
-	resources           sync.Map     // stores session-specific resources
-	resourceTemplates   sync.Map     // stores session-specific resource templates
-	clientInfo          atomic.Value // stores session-specific client info
-	clientCapabilities  atomic.Value // stores session-specific client capabilities
+	tools               sync.Map // stores session-specific tools
+	resources           sync.Map // stores session-specific resources
+	resourceTemplates   sync.Map // stores session-specific resource templates
 }
 
 // closeDone safely closes the session's done channel exactly once,
@@ -154,32 +153,6 @@ func (s *sseSession) SetSessionTools(tools map[string]ServerTool) {
 	}
 }
 
-func (s *sseSession) GetClientInfo() mcp.Implementation {
-	if value := s.clientInfo.Load(); value != nil {
-		if clientInfo, ok := value.(mcp.Implementation); ok {
-			return clientInfo
-		}
-	}
-	return mcp.Implementation{}
-}
-
-func (s *sseSession) SetClientInfo(clientInfo mcp.Implementation) {
-	s.clientInfo.Store(clientInfo)
-}
-
-func (s *sseSession) SetClientCapabilities(clientCapabilities mcp.ClientCapabilities) {
-	s.clientCapabilities.Store(clientCapabilities)
-}
-
-func (s *sseSession) GetClientCapabilities() mcp.ClientCapabilities {
-	if value := s.clientCapabilities.Load(); value != nil {
-		if clientCapabilities, ok := value.(mcp.ClientCapabilities); ok {
-			return clientCapabilities
-		}
-	}
-	return mcp.ClientCapabilities{}
-}
-
 var (
 	_ ClientSession                = (*sseSession)(nil)
 	_ SessionWithTools             = (*sseSession)(nil)
@@ -219,6 +192,11 @@ type SSEServer struct {
 	// the SSE server emit CORS headers and handle preflight requests. See
 	// WithSSECORS.
 	corsConfig *CORSConfig
+
+	// disableLocalhostProtection, when true, turns off the automatic DNS
+	// rebinding protection applied to requests arriving over loopback
+	// connections. See WithSSEDisableLocalhostProtection.
+	disableLocalhostProtection bool
 
 	mu sync.RWMutex
 }
@@ -383,6 +361,30 @@ func WithSSECORS(opts ...CORSOption) SSEOption {
 	}
 }
 
+// WithSSEDisableLocalhostProtection disables the automatic DNS rebinding
+// protection of the SSE server.
+//
+// By default, requests arriving over a loopback connection (127.0.0.1,
+// [::1]) whose Host header is not a localhost value are rejected with 403
+// Forbidden. This protects local MCP servers against DNS rebinding attacks,
+// where a malicious website rebinds its own domain to 127.0.0.1 to make a
+// victim's browser issue requests against a local server. The protection
+// applies regardless of whether the server listens on localhost specifically
+// or on 0.0.0.0, and never affects requests arriving via non-loopback
+// addresses.
+//
+// Disable it only if you understand the security implications, for example
+// when a reverse proxy on the same host forwards requests via localhost
+// while preserving the original Host header. In that case, prefer
+// configuring the proxy to rewrite the Host header to localhost instead.
+//
+// See https://modelcontextprotocol.io/specification/2025-11-25/basic/security_best_practices#local-mcp-server-compromise
+func WithSSEDisableLocalhostProtection(disable bool) SSEOption {
+	return func(s *SSEServer) {
+		s.disableLocalhostProtection = disable
+	}
+}
+
 // WithSSEContextFunc sets a function that will be called to customise the context
 // to the server using the incoming request.
 func WithSSEContextFunc(fn SSEContextFunc) SSEOption {
@@ -420,15 +422,6 @@ func NewSSEServer(server *MCPServer, opts ...SSEOption) *SSEServer {
 	}
 
 	return s
-}
-
-// NewTestServer creates a test server for testing purposes
-func NewTestServer(server *MCPServer, opts ...SSEOption) *httptest.Server {
-	sseServer := NewSSEServer(server, opts...)
-
-	testServer := httptest.NewServer(sseServer)
-	sseServer.baseURL = testServer.URL
-	return testServer
 }
 
 // Start begins serving SSE connections on the specified address.
@@ -572,7 +565,7 @@ func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 						JSONRPC: "2.0",
 						ID:      mcp.NewRequestId(session.requestID.Add(1)),
 						Request: mcp.Request{
-							Method: "ping",
+							Method: string(mcp.MethodPing),
 						},
 					}
 					messageBytes, _ := json.Marshal(message)
@@ -679,6 +672,21 @@ func (s *SSEServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 	go func(ctx context.Context) {
 		defer cancel()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic recovered in SSE message handler for session %s: %v", sessionID, r)
+				// Send error response so the client doesn't hang waiting.
+				errResp := createErrorResponse(nil, mcp.INTERNAL_ERROR, fmt.Sprintf("internal panic: %v", r))
+				if eventData, err := json.Marshal(errResp); err == nil {
+					message := fmt.Sprintf("event: message\ndata: %s\n\n", eventData)
+					select {
+					case session.eventQueue <- message:
+					case <-session.done:
+					default:
+					}
+				}
+			}
+		}()
 		// Use the context that will be canceled when session is done
 		// Process message through MCPServer
 		response := s.server.HandleMessage(ctx, rawMessage)
@@ -714,17 +722,13 @@ func (s *SSEServer) writeJSONRPCError(
 	code int,
 	message string,
 ) {
-	response := createErrorResponse(id, code, message)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(
-			w,
-			fmt.Sprintf("Failed to encode response: %v", err),
-			http.StatusInternalServerError,
-		)
-		return
-	}
+	writeJSONRPCError(w, id, code, message, func(err error) {
+		// The 400 status and partial JSON body have already been written
+		// by writeJSONRPCError, so we cannot escalate to a different HTTP
+		// status here without producing a malformed response. Log instead,
+		// matching the streamable HTTP transport's behavior.
+		log.Printf("Failed to encode response: %v", err)
+	})
 }
 
 // SendEventToSession sends an event to a specific SSE session identified by sessionID.
@@ -866,10 +870,14 @@ func (s *SSEServer) MessageHandler() http.Handler {
 	return s.withCORS(http.HandlerFunc(s.handleMessage))
 }
 
-// withCORS wraps next with CORS preflight and header handling using the
-// SSE server's configured CORSConfig. It is a no-op when CORS is disabled.
+// withCORS wraps next with DNS rebinding protection plus CORS preflight and
+// header handling using the SSE server's configured CORSConfig. The CORS
+// portion is a no-op when CORS is disabled.
 func (s *SSEServer) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.disableLocalhostProtection && rejectDNSRebinding(w, r) {
+			return
+		}
 		if s.corsConfig.enabled() {
 			if s.corsConfig.handlePreflight(w, r) {
 				return
@@ -886,7 +894,14 @@ func (s *SSEServer) withCORS(next http.Handler) http.Handler {
 // answered directly and simple cross-origin responses are decorated with the
 // configured Access-Control-* headers before being dispatched to the SSE or
 // message handlers.
+//
+// Requests arriving over a loopback connection with a non-localhost Host
+// header are rejected with 403 Forbidden to protect against DNS rebinding
+// attacks, unless WithSSEDisableLocalhostProtection is set.
 func (s *SSEServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.disableLocalhostProtection && rejectDNSRebinding(w, r) {
+		return
+	}
 	if s.corsConfig.enabled() {
 		if s.corsConfig.handlePreflight(w, r) {
 			return

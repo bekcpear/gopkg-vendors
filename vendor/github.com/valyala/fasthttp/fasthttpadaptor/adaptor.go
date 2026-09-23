@@ -151,7 +151,7 @@ func NewFastHTTPHandler(h http.Handler) fasthttp.RequestHandler {
 				}
 
 				// Stream subsequent writes from the pipe until EOF.
-				buf := bufferPool.Get().(*[]byte)
+				buf := bufferPool.Get().(*[]byte) //nolint:forcetypeassert
 				defer bufferPool.Put(buf)
 
 				for {
@@ -174,6 +174,7 @@ func NewFastHTTPHandler(h http.Handler) fasthttp.RequestHandler {
 			close(w.streamReady)
 
 		case modeHijacked:
+			releaseWriter(w)
 			return
 
 		case modePanicked:
@@ -260,10 +261,16 @@ func (w *writer) Write(p []byte) (int, error) {
 	}
 
 	w.mu.Lock()
+	select {
+	case <-w.streamReady:
+		w.mu.Unlock()
+		return w.pw.Write(p)
+	default:
+	}
 	defer w.mu.Unlock()
 
 	if w.responseBody == nil {
-		w.bufPool = bufferPool.Get().(*[]byte)
+		w.bufPool = bufferPool.Get().(*[]byte) //nolint:forcetypeassert
 		w.responseBody = (*w.bufPool)[:0]
 	}
 	w.responseBody = append(w.responseBody, p...)
@@ -340,6 +347,11 @@ func (w *writer) Close() error {
 func (w *writer) status() int {
 	code := int(w.statusCode.Load())
 	if code == 0 {
+		// No WriteHeader was called; check if ctx already has a status code set
+		// by a caller before NewFastHTTPHandler ran.
+		if ctxCode := w.ctx.Response.StatusCode(); ctxCode != 0 {
+			return ctxCode
+		}
 		return http.StatusOK
 	}
 	return code

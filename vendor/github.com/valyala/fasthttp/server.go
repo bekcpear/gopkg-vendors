@@ -22,7 +22,7 @@ var errNoCertOrKeyProvided = errors.New("cert or key has not provided")
 // ErrAlreadyServing is deprecated.
 //
 // Deprecated: ErrAlreadyServing is never returned from Serve. See issue #633.
-var ErrAlreadyServing = errors.New("Server is already serving connections")
+var ErrAlreadyServing = errors.New("fasthttp: server is already serving connections")
 
 // ServeConn serves HTTP requests from the given connection
 // using the given handler.
@@ -39,7 +39,7 @@ func ServeConn(c net.Conn, handler RequestHandler) error {
 	if v == nil {
 		v = &Server{}
 	}
-	s := v.(*Server)
+	s := v.(*Server) //nolint:forcetypeassert
 	s.Handler = handler
 	err := s.ServeConn(c)
 	s.Handler = nil
@@ -247,6 +247,10 @@ type Server struct {
 	idleConns map[net.Conn]*atomic.Int64
 	done      chan struct{}
 
+	// Whether done was already closed. A ShutdownWithContext that gives up on
+	// its context leaves it closed but in place, and it must not be closed twice.
+	doneClosed bool
+
 	// Server name for sending in response headers.
 	//
 	// Default server name is used if left blank.
@@ -330,6 +334,8 @@ type Server struct {
 	// The server rejects requests with bodies exceeding this limit.
 	//
 	// Request body size is limited by DefaultMaxRequestBodySize by default.
+	// A value less than or equal to zero selects DefaultMaxRequestBodySize; it
+	// does not disable the limit.
 	MaxRequestBodySize int
 
 	// SleepWhenConcurrencyLimitsExceeded is a duration to be slept of if
@@ -461,6 +467,10 @@ type Server struct {
 	// StreamRequestBody enables request body streaming,
 	// and calls the handler sooner when given body is
 	// larger than the current limit.
+	//
+	// Process large bodies through RequestBodyStream to keep memory usage
+	// bounded. Calling PostBody or Request.Body reads the entire remaining body
+	// into memory.
 	StreamRequestBody bool
 }
 
@@ -836,7 +846,7 @@ func (ctx *RequestCtx) RemoveUserValueBytes(key []byte) {
 	ctx.Request.RemoveUserValueBytes(key)
 }
 
-type connTLSer interface {
+type tlsConn interface {
 	Handshake() error
 	ConnectionState() tls.ConnectionState
 }
@@ -845,7 +855,7 @@ type connTLSer interface {
 //
 // tls.Conn is an encrypted connection (aka SSL, HTTPS).
 func (ctx *RequestCtx) IsTLS() bool {
-	// cast to (connTLSer) instead of (*tls.Conn), since it catches
+	// cast to (tlsConn) instead of (*tls.Conn), since it catches
 	// cases with overridden tls.Conn such as:
 	//
 	// type customConn struct {
@@ -856,11 +866,11 @@ func (ctx *RequestCtx) IsTLS() bool {
 
 	// perIPConn wraps the net.Conn in the Conn field
 	if pic, ok := ctx.c.(*perIPConn); ok {
-		_, ok := pic.Conn.(connTLSer)
+		_, ok := pic.Conn.(tlsConn)
 		return ok
 	}
 
-	_, ok := ctx.c.(connTLSer)
+	_, ok := ctx.c.(tlsConn)
 	return ok
 }
 
@@ -871,11 +881,11 @@ func (ctx *RequestCtx) IsTLS() bool {
 // The returned state may be used for verifying TLS version, client certificates,
 // etc.
 func (ctx *RequestCtx) TLSConnectionState() *tls.ConnectionState {
-	tlsConn, ok := ctx.c.(connTLSer)
+	tc, ok := ctx.c.(tlsConn)
 	if !ok {
 		return nil
 	}
-	state := tlsConn.ConnectionState()
+	state := tc.ConnectionState()
 	return &state
 }
 
@@ -1145,7 +1155,7 @@ func (ctx *RequestCtx) FormFile(key string) (*multipart.FileHeader, error) {
 		return nil, err
 	}
 	if mf.File == nil {
-		return nil, err
+		return nil, ErrMissingFile
 	}
 	fhh := mf.File[key]
 	if fhh == nil {
@@ -1156,7 +1166,7 @@ func (ctx *RequestCtx) FormFile(key string) (*multipart.FileHeader, error) {
 
 // ErrMissingFile may be returned from FormFile when the is no uploaded file
 // associated with the given multipart form key.
-var ErrMissingFile = errors.New("there is no uploaded file associated with the given key")
+var ErrMissingFile = errors.New("fasthttp: there is no uploaded file associated with the given key")
 
 // SaveMultipartFile saves multipart file fh under the given filename path.
 //
@@ -1190,6 +1200,7 @@ func SaveMultipartFile(fh *multipart.FileHeader, path string) (err error) {
 		if f, err = fh.Open(); err != nil {
 			return err
 		}
+		defer os.Remove(ff.Name())
 	}
 
 	defer func() {
@@ -1323,6 +1334,11 @@ func (ctx *RequestCtx) IsTrace() bool {
 // IsPatch returns true if request method is PATCH.
 func (ctx *RequestCtx) IsPatch() bool {
 	return ctx.Request.Header.IsPatch()
+}
+
+// IsQuery returns true if request method is QUERY.
+func (ctx *RequestCtx) IsQuery() bool {
+	return ctx.Request.Header.IsQuery()
 }
 
 // Method return request method.
@@ -1614,6 +1630,9 @@ func (ctx *RequestCtx) PostBody() []byte {
 //
 // If bodySize < 0, then bodyStream is read until io.EOF.
 //
+// See BodyWriterTo for controlling whether fasthttp may use WriteTo instead of
+// Read when consuming bodyStream.
+//
 // See also SetBodyStreamWriter.
 func (ctx *RequestCtx) SetBodyStream(bodyStream io.Reader, bodySize int) {
 	ctx.Response.SetBodyStream(bodyStream, bodySize)
@@ -1722,7 +1741,7 @@ func (s *Server) NextProto(key string, nph ServeHandler) {
 }
 
 func (s *Server) getNextProto(c net.Conn) (string, error) {
-	if tlsConn, ok := c.(connTLSer); ok {
+	if tc, ok := c.(tlsConn); ok {
 		if s.ReadTimeout > 0 {
 			if err := c.SetReadDeadline(time.Now().Add(s.ReadTimeout)); err != nil {
 				return "", err
@@ -1735,9 +1754,9 @@ func (s *Server) getNextProto(c net.Conn) (string, error) {
 			}
 		}
 
-		err := tlsConn.Handshake()
+		err := tc.Handshake()
 		if err == nil {
-			return tlsConn.ConnectionState().NegotiatedProtocol, nil
+			return tc.ConnectionState().NegotiatedProtocol, nil
 		}
 	}
 	return "", nil
@@ -1771,6 +1790,9 @@ func (s *Server) ListenAndServeUNIX(addr string, mode os.FileMode) error {
 		return err
 	}
 	if err = os.Chmod(addr, mode); err != nil {
+		// Close the listener so the unix socket file descriptor is not
+		// leaked when chmod fails before Serve takes ownership of it.
+		_ = ln.Close()
 		return fmt.Errorf("cannot chmod %#o for %q: %w", mode, addr, err)
 	}
 	return s.Serve(ln)
@@ -1792,7 +1814,14 @@ func (s *Server) ListenAndServeTLS(addr, certFile, keyFile string) error {
 	if err != nil {
 		return err
 	}
-	return s.ServeTLS(ln, certFile, keyFile)
+	// ServeTLS only takes ownership of ln on the serving path; close it
+	// here when it returns an error (e.g. cert loading) so the listener
+	// is not leaked.
+	if err := s.ServeTLS(ln, certFile, keyFile); err != nil {
+		_ = ln.Close()
+		return err
+	}
+	return nil
 }
 
 // ListenAndServeTLSEmbed serves HTTPS requests from the given TCP4 addr.
@@ -1811,7 +1840,14 @@ func (s *Server) ListenAndServeTLSEmbed(addr string, certData, keyData []byte) e
 	if err != nil {
 		return err
 	}
-	return s.ServeTLSEmbed(ln, certData, keyData)
+	// ServeTLSEmbed only takes ownership of ln on the serving path; close
+	// it here when it returns an error (e.g. cert loading) so the listener
+	// is not leaked.
+	if err := s.ServeTLSEmbed(ln, certData, keyData); err != nil {
+		_ = ln.Close()
+		return err
+	}
+	return nil
 }
 
 // ServeTLS serves HTTPS requests from the given listener.
@@ -1825,16 +1861,19 @@ func (s *Server) ServeTLS(ln net.Listener, certFile, keyFile string) error {
 	s.configTLS()
 	configHasCert := len(s.TLSConfig.Certificates) > 0 || s.TLSConfig.GetCertificate != nil
 	if !configHasCert || certFile != "" || keyFile != "" {
-		if err := s.AppendCert(certFile, keyFile); err != nil {
+		cert, err := loadX509KeyPair(certFile, keyFile)
+		if err != nil {
 			s.mu.Unlock()
 			return err
 		}
+		s.appendCertLocked(&cert)
 	}
+	tlsConfig := s.TLSConfig.Clone()
 
 	s.mu.Unlock()
 
 	return s.Serve(
-		tls.NewListener(ln, s.TLSConfig.Clone()),
+		tls.NewListener(ln, tlsConfig),
 	)
 }
 
@@ -1849,16 +1888,19 @@ func (s *Server) ServeTLSEmbed(ln net.Listener, certData, keyData []byte) error 
 	s.configTLS()
 	configHasCert := len(s.TLSConfig.Certificates) > 0 || s.TLSConfig.GetCertificate != nil
 	if !configHasCert || len(certData) != 0 || len(keyData) != 0 {
-		if err := s.AppendCertEmbed(certData, keyData); err != nil {
+		cert, err := x509KeyPair(certData, keyData)
+		if err != nil {
 			s.mu.Unlock()
 			return err
 		}
+		s.appendCertLocked(&cert)
 	}
+	tlsConfig := s.TLSConfig.Clone()
 
 	s.mu.Unlock()
 
 	return s.Serve(
-		tls.NewListener(ln, s.TLSConfig.Clone()),
+		tls.NewListener(ln, tlsConfig),
 	)
 }
 
@@ -1867,37 +1909,60 @@ func (s *Server) ServeTLSEmbed(ln net.Listener, certData, keyData []byte) error 
 // This function allows programmer to handle multiple domains
 // in one server structure. See examples/multidomain.
 func (s *Server) AppendCert(certFile, keyFile string) error {
-	if certFile == "" && keyFile == "" {
-		return errNoCertOrKeyProvided
-	}
-
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	cert, err := loadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		return fmt.Errorf("cannot load TLS key pair from certFile=%q and keyFile=%q: %w", certFile, keyFile, err)
+		return err
 	}
 
-	s.configTLS()
-	s.TLSConfig.Certificates = append(s.TLSConfig.Certificates, cert)
+	s.mu.Lock()
+	s.appendCertLocked(&cert)
+	s.mu.Unlock()
 
 	return nil
 }
 
+func loadX509KeyPair(certFile, keyFile string) (tls.Certificate, error) {
+	if certFile == "" && keyFile == "" {
+		return tls.Certificate{}, errNoCertOrKeyProvided
+	}
+
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("cannot load tls key pair from cert file=%q and key file=%q: %w", certFile, keyFile, err)
+	}
+	return cert, nil
+}
+
 // AppendCertEmbed does the same as AppendCert but using in-memory data.
 func (s *Server) AppendCertEmbed(certData, keyData []byte) error {
+	cert, err := x509KeyPair(certData, keyData)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.appendCertLocked(&cert)
+	s.mu.Unlock()
+
+	return nil
+}
+
+func x509KeyPair(certData, keyData []byte) (tls.Certificate, error) {
 	if len(certData) == 0 && len(keyData) == 0 {
-		return errNoCertOrKeyProvided
+		return tls.Certificate{}, errNoCertOrKeyProvided
 	}
 
 	cert, err := tls.X509KeyPair(certData, keyData)
 	if err != nil {
-		return fmt.Errorf("cannot load TLS key pair from the provided certData(%d) and keyData(%d): %w",
+		return tls.Certificate{}, fmt.Errorf("cannot load tls key pair from the provided cert data(%d) and key data(%d): %w",
 			len(certData), len(keyData), err)
 	}
+	return cert, nil
+}
 
+func (s *Server) appendCertLocked(cert *tls.Certificate) {
 	s.configTLS()
-	s.TLSConfig.Certificates = append(s.TLSConfig.Certificates, cert)
-
-	return nil
+	s.TLSConfig.Certificates = append(s.TLSConfig.Certificates, *cert)
 }
 
 func (s *Server) configTLS() {
@@ -2021,8 +2086,9 @@ func (s *Server) ShutdownWithContext(ctx context.Context) (err error) {
 
 	lnerr := s.closeListenersLocked()
 
-	if s.done != nil {
+	if s.done != nil && !s.doneClosed {
 		close(s.done)
+		s.doneClosed = true
 	}
 
 	// Closing the listener will make Serve() call Stop on the worker pool.
@@ -2037,6 +2103,7 @@ func (s *Server) ShutdownWithContext(ctx context.Context) (err error) {
 		if open := s.open.Load(); open == 0 {
 			// There may be a pending request to call ctx.Done(). Therefore, we only set it to nil when open == 0.
 			s.done = nil
+			s.doneClosed = false
 			return lnerr
 		}
 		// This is not an optimal solution but using a sync.WaitGroup
@@ -2051,7 +2118,7 @@ func (s *Server) ShutdownWithContext(ctx context.Context) (err error) {
 	}
 }
 
-type connKeepAliveer interface {
+type keepAliveConn interface {
 	SetKeepAlive(keepalive bool) error
 	SetKeepAlivePeriod(d time.Duration) error
 	io.Closer
@@ -2073,7 +2140,7 @@ func acceptConn(s *Server, ln net.Listener, lastPerIPErrorTime *time.Time) (net.
 			return nil, io.EOF
 		}
 
-		if tc, ok := c.(connKeepAliveer); ok && s.TCPKeepalive {
+		if tc, ok := c.(keepAliveConn); ok && s.TCPKeepalive {
 			if err := tc.SetKeepAlive(s.TCPKeepalive); err != nil {
 				_ = tc.Close()
 				return nil, err
@@ -2129,11 +2196,12 @@ func (s *Server) logger() Logger {
 var (
 	// ErrPerIPConnLimit may be returned from ServeConn if the number of connections
 	// per ip exceeds Server.MaxConnsPerIP.
-	ErrPerIPConnLimit = errors.New("too many connections per ip")
+	ErrPerIPConnLimit = errors.New("fasthttp: too many connections per ip")
 
 	// ErrConcurrencyLimit may be returned from ServeConn if the number
 	// of concurrently served connections exceeds Server.Concurrency.
-	ErrConcurrencyLimit = errors.New("cannot serve the connection because Server.Concurrency concurrent connections are served")
+	ErrConcurrencyLimit = errors.New("fasthttp: cannot serve the connection because server.concurrency " +
+		"concurrent connections are served")
 )
 
 // ServeConn serves HTTP requests from the given connection.
@@ -2154,19 +2222,16 @@ func (s *Server) ServeConn(c net.Conn) error {
 		c = pic
 	}
 
-	n := int(s.concurrency.Add(1)) // #nosec G115
-	if n > s.getConcurrency() {
-		s.concurrency.Add(^uint32(0))
+	if !s.tryAcquireConcurrency() {
 		s.writeFastError(c, StatusServiceUnavailable, "The connection cannot be served because Server.Concurrency limit exceeded")
 		c.Close()
 		return ErrConcurrencyLimit
 	}
+	defer s.releaseConcurrency()
 
 	s.open.Add(1)
 
-	err := s.serveConn(c)
-
-	s.concurrency.Add(^uint32(0))
+	err := s.serveConnCounted(c, false)
 
 	if err != errHijacked {
 		errc := c.Close()
@@ -2179,6 +2244,19 @@ func (s *Server) ServeConn(c net.Conn) error {
 		s.setState(c, StateHijacked)
 	}
 	return err
+}
+
+func (s *Server) tryAcquireConcurrency() bool {
+	n := int(s.concurrency.Add(1)) // #nosec G115
+	if n <= s.getConcurrency() {
+		return true
+	}
+	s.releaseConcurrency()
+	return false
+}
+
+func (s *Server) releaseConcurrency() {
+	s.concurrency.Add(^uint32(0))
 }
 
 var errHijacked = errors.New("connection has been hijacked")
@@ -2240,14 +2318,22 @@ func (s *Server) idleTimeout() time.Duration {
 	return s.ReadTimeout
 }
 
-func (s *Server) serveConnCleanup() {
+func (s *Server) serveConnCleanup(countConcurrency bool) {
 	s.open.Add(-1)
-	s.concurrency.Add(^uint32(0))
+	if countConcurrency {
+		s.releaseConcurrency()
+	}
 }
 
 func (s *Server) serveConn(c net.Conn) error {
-	defer s.serveConnCleanup()
-	s.concurrency.Add(1)
+	return s.serveConnCounted(c, true)
+}
+
+func (s *Server) serveConnCounted(c net.Conn, countConcurrency bool) error {
+	defer s.serveConnCleanup(countConcurrency)
+	if countConcurrency {
+		s.concurrency.Add(1)
+	}
 
 	proto, err := s.getNextProto(c)
 	if err != nil {
@@ -2265,6 +2351,8 @@ func (s *Server) serveConn(c net.Conn) error {
 		return handler(c)
 	}
 
+	connTime := time.Now()
+
 	s.idleConnsMu.Lock()
 	if s.idleConns == nil {
 		s.idleConns = make(map[net.Conn]*atomic.Int64)
@@ -2275,20 +2363,19 @@ func (s *Server) serveConn(c net.Conn) error {
 		if v == nil {
 			v = &atomic.Int64{}
 		}
-		idleConnTime = v.(*atomic.Int64)
+		idleConnTime = v.(*atomic.Int64) //nolint:forcetypeassert
 		s.idleConns[c] = idleConnTime
 	}
 
 	// Count the connection as Idle after 5 seconds.
 	// Same as net/http.Server:
 	// https://github.com/golang/go/blob/85d7bab91d9a3ed1f76842e4328973ea75efef54/src/net/http/server.go#L2834-L2836
-	idleConnTime.Store(time.Now().Add(time.Second * 5).Unix())
+	idleConnTime.Store(connTime.Add(time.Second * 5).Unix())
 	s.idleConnsMu.Unlock()
 
 	serverName := s.getServerName()
 	connRequestNum := uint64(0)
 	connID := nextConnID()
-	connTime := time.Now()
 	maxRequestBodySize := s.MaxRequestBodySize
 	if maxRequestBodySize <= 0 {
 		maxRequestBodySize = DefaultMaxRequestBodySize
@@ -2365,9 +2452,8 @@ func (s *Server) serveConn(c net.Conn) error {
 		ctx.Response.secureErrorLogMessage = s.SecureErrorLogMessage
 
 		if err == nil {
-			s.setState(c, StateActive)
-
 			idleConnTime.Store(0)
+			s.setState(c, StateActive)
 
 			if s.ReadTimeout > 0 {
 				if err = c.SetReadDeadline(time.Now().Add(s.ReadTimeout)); err != nil {
@@ -2659,6 +2745,7 @@ func (s *Server) serveConn(c net.Conn) error {
 			ctx.Request.bodyStream = nil
 		}
 
+		idleConnTime.Store(ctx.time.Unix())
 		s.setState(c, StateIdle)
 		ctx.Request.Reset()
 		ctx.Response.Reset()
@@ -2667,8 +2754,6 @@ func (s *Server) serveConn(c net.Conn) error {
 			err = nil
 			break
 		}
-
-		idleConnTime.Store(time.Now().Unix())
 	}
 
 	if br != nil {
@@ -2724,7 +2809,7 @@ func (s *Server) acquireHijackConn(r io.Reader, c net.Conn) *hijackConn {
 		}
 		return hjc
 	}
-	hjc := v.(*hijackConn)
+	hjc := v.(*hijackConn) //nolint:forcetypeassert
 	hjc.Conn = c
 	hjc.r = r
 	return hjc
@@ -2826,7 +2911,7 @@ func acquireReader(ctx *RequestCtx) *bufio.Reader {
 		}
 		return bufio.NewReaderSize(ctx.c, n)
 	}
-	r := v.(*bufio.Reader)
+	r := v.(*bufio.Reader) //nolint:forcetypeassert
 	r.Reset(ctx.c)
 	return r
 }
@@ -2844,7 +2929,7 @@ func acquireWriter(ctx *RequestCtx) *bufio.Writer {
 		}
 		return bufio.NewWriterSize(ctx.c, n)
 	}
-	w := v.(*bufio.Writer)
+	w := v.(*bufio.Writer) //nolint:forcetypeassert
 	w.Reset(ctx.c)
 	return w
 }
@@ -2863,7 +2948,7 @@ func (s *Server) acquireCtx(c net.Conn) (ctx *RequestCtx) {
 		ctx.Response.keepBodyBuffer = keepBodyBuffer
 		ctx.s = s
 	} else {
-		ctx = v.(*RequestCtx)
+		ctx = v.(*RequestCtx) //nolint:forcetypeassert
 	}
 	if s.FormValueFunc != nil {
 		ctx.formValueFunc = s.FormValueFunc
@@ -3027,7 +3112,7 @@ func (s *Server) writeFastError(w io.Writer, statusCode int, msg string) {
 	date := ""
 	if !s.NoDefaultDate {
 		serverDateOnce.Do(updateServerDate)
-		date = fmt.Sprintf("Date: %s\r\n", serverDate.Load())
+		date = fmt.Sprintf("Date: %s\r\n", *serverDate.Load())
 	}
 
 	fmt.Fprintf(w, "Connection: close\r\n"+
@@ -3082,8 +3167,9 @@ func (s *Server) closeIdleConns() {
 		t := ict.Load()
 		if t != 0 && now-t >= 0 {
 			_ = c.Close()
+			// Don't recycle ict: the connection's own goroutine still holds it
+			// and stores into it, so only that goroutine may return it.
 			delete(s.idleConns, c)
-			idleConnTimePool.Put(ict)
 		}
 	}
 	s.idleConnsMu.Unlock()

@@ -12,7 +12,6 @@ linters:
     - exhaustive
     - exhaustruct
     - forbidigo
-    - forcetypeassert
     - funcorder
     - funlen
     - gochecknoglobals
@@ -47,7 +46,6 @@ linters:
   settings:
     gocritic:
       disabled-checks:
-        - deferInLoop
         - importShadow
         - sloppyReassign
         - unnamedResult
@@ -96,6 +94,12 @@ formatters:
     - gofmt
     - gofumpt
     - goimports
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/molecule-man/go-brrr)
   exclusions:
     generated: lax
     paths:
