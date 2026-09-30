@@ -114,7 +114,7 @@ const (
 
 	// Identifiers
 	TIdentifier     // Contents are in lexer.Identifier (string)
-	TEscapedKeyword // A keyword that has been escaped as an identifer
+	TEscapedKeyword // A keyword that has been escaped as an identifier
 
 	// Reserved words
 	TBreak
@@ -794,12 +794,6 @@ func (lexer *Lexer) NextJSXElementChild() {
 			if needsFixing {
 				// Slow path
 				lexer.decodedStringLiteralOrNil = fixWhitespaceAndDecodeJSXEntities(text)
-
-				// Skip this token if it turned out to be empty after trimming
-				if len(lexer.decodedStringLiteralOrNil) == 0 {
-					lexer.HasNewlineBefore = true
-					continue
-				}
 			} else {
 				// Fast path
 				n := len(text)
@@ -1719,7 +1713,7 @@ func (lexer *Lexer) scanIdentifierWithEscapes(kind identifierKind) (MaybeSubstri
 	//   // This is an error (equivalent to "var foo;" except for this rule)
 	//   \u0076\u0061\u0072 foo;
 	//
-	//   // This is an fine (equivalent to "foo.var;")
+	//   // This is a fine (equivalent to "foo.var;")
 	//   foo.\u0076\u0061\u0072;
 	//
 	if Keywords[text] != 0 {

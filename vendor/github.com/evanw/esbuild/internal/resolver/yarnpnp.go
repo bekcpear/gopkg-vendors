@@ -4,6 +4,7 @@ package resolver
 
 import (
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 	"syscall"
@@ -204,7 +205,7 @@ func (r resolverQuery) resolveToUnqualified(specifier string, parentURL string, 
 			}
 
 			// If parentLocator isn't in manifest.fallbackExclusionList, then
-			if set, _ := manifest.fallbackExclusionList[parentLocator.ident]; !set[parentLocator.reference] {
+			if set := manifest.fallbackExclusionList[parentLocator.ident]; !set[parentLocator.reference] {
 				// Let fallback be RESOLVE_VIA_FALLBACK(manifest, ident)
 				fallback, _ := r.resolveViaFallback(manifest, ident)
 
@@ -278,7 +279,25 @@ func (r resolverQuery) resolveToUnqualified(specifier string, parentURL string, 
 	}
 
 	// Return path.resolve(manifest.dirPath, dependencyPkg.packageLocation, modulePath)
-	pkgDirPath := r.fs.Join(manifest.absDirPath, dependencyPkg.packageLocation)
+	absDirPath := manifest.absDirPath
+	isWindows := !strings.HasPrefix(absDirPath, "/")
+	if isWindows {
+		// Yarn converts Windows-style paths with volume labels into Unix-style
+		// paths with a "/" prefix for the purpose of joining them together here.
+		// So "C:\foo\bar.txt" becomes "/C:/foo/bar.txt". This is very important
+		// because Yarn also stores a single global cache on the "C:" drive, many
+		// developers do their work on the "D:" drive, and Yarn uses "../C:" to
+		// traverse between the "D:" drive and the "C:" drive. Windows doesn't
+		// allow you to do that ("D:\.." is just "D:\") so without temporarily
+		// swapping to Unix-style paths here, esbuild would otherwise fail in this
+		// case while Yarn itself would succeed.
+		absDirPath = "/" + strings.ReplaceAll(absDirPath, "\\", "/")
+	}
+	pkgDirPath := path.Join(absDirPath, dependencyPkg.packageLocation)
+	if isWindows && strings.HasPrefix(pkgDirPath, "/") {
+		// Convert the Unix-style path back into a Windows-style path afterwards
+		pkgDirPath = strings.ReplaceAll(pkgDirPath[1:], "\\", "//")
+	}
 	if r.debugLogs != nil {
 		r.debugLogs.addNote(fmt.Sprintf("  Resolved %q via Yarn PnP to %q with subpath %q", specifier, pkgDirPath, modulePath))
 	}
@@ -302,9 +321,7 @@ func (r resolverQuery) findLocator(manifest *pnpData, moduleUrl string) (pnpIden
 	}
 
 	// The relative path must not start with ./; trim it if needed
-	if strings.HasPrefix(relativeUrl, "./") {
-		relativeUrl = relativeUrl[2:]
-	}
+	relativeUrl = strings.TrimPrefix(relativeUrl, "./")
 
 	// If relativeUrl matches manifest.ignorePatternData, then
 	if manifest.ignorePatternData != nil && manifest.ignorePatternData.MatchString(relativeUrl) {
@@ -370,7 +387,7 @@ func (r resolverQuery) resolveViaFallback(manifest *pnpData, ident string) (pnpI
 	// Let referenceOrAlias be the entry from manifest.fallbackPool referenced by ident
 	referenceOrAlias, ok = manifest.fallbackPool[ident]
 
-	// Return it immediatly, whether it's defined or not
+	// Return it immediately, whether it's defined or not
 	if r.debugLogs != nil {
 		if ok {
 			r.debugLogs.addNote(fmt.Sprintf("    Found fallback for %q in \"fallbackPool\": [%s, %s]", ident,
@@ -616,9 +633,9 @@ func (r resolverQuery) extractYarnPnPDataFromJSON(pnpDataPath string, mode pnpDa
 	}
 	if err != nil {
 		if mode == pnpReportErrorsAboutMissingFiles || err != syscall.ENOENT {
-			r.log.AddError(nil, logger.Range{},
-				fmt.Sprintf("Cannot read file %q: %s",
-					PrettyPath(r.fs, logger.Path{Text: pnpDataPath, Namespace: "file"}), err.Error()))
+			prettyPaths := MakePrettyPaths(r.fs, logger.Path{Text: pnpDataPath, Namespace: "file"})
+			r.log.AddError(nil, logger.Range{}, fmt.Sprintf("Cannot read file %q: %s",
+				prettyPaths.Select(r.options.LogPathStyle), err.Error()))
 		}
 		return
 	}
@@ -627,9 +644,9 @@ func (r resolverQuery) extractYarnPnPDataFromJSON(pnpDataPath string, mode pnpDa
 	}
 	keyPath := logger.Path{Text: pnpDataPath, Namespace: "file"}
 	source = logger.Source{
-		KeyPath:    keyPath,
-		PrettyPath: PrettyPath(r.fs, keyPath),
-		Contents:   contents,
+		KeyPath:     keyPath,
+		PrettyPaths: MakePrettyPaths(r.fs, keyPath),
+		Contents:    contents,
 	}
 	result, _ = r.caches.JSONCache.Parse(r.log, source, js_parser.JSONOptions{})
 	return
@@ -642,9 +659,9 @@ func (r resolverQuery) tryToExtractYarnPnPDataFromJS(pnpDataPath string, mode pn
 	}
 	if err != nil {
 		if mode == pnpReportErrorsAboutMissingFiles || err != syscall.ENOENT {
-			r.log.AddError(nil, logger.Range{},
-				fmt.Sprintf("Cannot read file %q: %s",
-					PrettyPath(r.fs, logger.Path{Text: pnpDataPath, Namespace: "file"}), err.Error()))
+			prettyPaths := MakePrettyPaths(r.fs, logger.Path{Text: pnpDataPath, Namespace: "file"})
+			r.log.AddError(nil, logger.Range{}, fmt.Sprintf("Cannot read file %q: %s",
+				prettyPaths.Select(r.options.LogPathStyle), err.Error()))
 		}
 		return
 	}
@@ -654,9 +671,9 @@ func (r resolverQuery) tryToExtractYarnPnPDataFromJS(pnpDataPath string, mode pn
 
 	keyPath := logger.Path{Text: pnpDataPath, Namespace: "file"}
 	source = logger.Source{
-		KeyPath:    keyPath,
-		PrettyPath: PrettyPath(r.fs, keyPath),
-		Contents:   contents,
+		KeyPath:     keyPath,
+		PrettyPaths: MakePrettyPaths(r.fs, keyPath),
+		Contents:    contents,
 	}
 	ast, _ := r.caches.JSCache.Parse(r.log, source, js_parser.OptionsForYarnPnP())
 

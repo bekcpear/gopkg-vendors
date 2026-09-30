@@ -8,15 +8,19 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"dario.cat/mergo"
 	"github.com/AlekSi/pointer"
 	"github.com/Masterminds/semver/v3"
 	"github.com/goreleaser/chglog"
 	"github.com/goreleaser/nfpm/v2/files"
-	"gopkg.in/yaml.v3"
+	"github.com/goreleaser/nfpm/v2/internal/modtime"
+	"go.yaml.in/yaml/v3"
 )
 
 // nolint: gochecknoglobals
@@ -57,6 +61,22 @@ func Get(format string) (Packager, error) {
 	return p, nil
 }
 
+// Enumerate lists the available packagers
+func Enumerate() []string {
+	lock.Lock()
+	defer lock.Unlock()
+
+	list := make([]string, 0, len(packagers))
+	for key := range packagers {
+		if key != "" {
+			list = append(list, key)
+		}
+	}
+
+	sort.Strings(list)
+	return list
+}
+
 // Parse decodes YAML data from an io.Reader into a configuration struct.
 func Parse(in io.Reader) (config Config, err error) {
 	return ParseWithEnvMapping(in, os.Getenv)
@@ -67,7 +87,7 @@ func ParseWithEnvMapping(in io.Reader, mapping func(string) string) (config Conf
 	dec := yaml.NewDecoder(in)
 	dec.KnownFields(true)
 	if err = dec.Decode(&config); err != nil {
-		return
+		return config, err
 	}
 	config.envMappingFunc = mapping
 	if config.envMappingFunc == nil {
@@ -92,7 +112,7 @@ func ParseFileWithEnvMapping(path string, mapping func(string) string) (config C
 	var file *os.File
 	file, err = os.Open(path) //nolint:gosec
 	if err != nil {
-		return
+		return config, err
 	}
 	defer file.Close() // nolint: errcheck,gosec
 	return ParseWithEnvMapping(file, mapping)
@@ -112,7 +132,7 @@ type PackagerWithExtension interface {
 // Config contains the top level configuration for packages.
 type Config struct {
 	Info           `yaml:",inline" json:",inline"`
-	Overrides      map[string]*Overridables `yaml:"overrides,omitempty" json:"overrides,omitempty" jsonschema:"title=overrides,description=override some fields when packaging with a specific packager,enum=apk,enum=deb,enum=rpm"`
+	Overrides      map[string]*Overridables `yaml:"overrides,omitempty" json:"overrides,omitempty" jsonschema:"title=overrides,description=override some fields when packaging with a specific packager"`
 	envMappingFunc func(string) string
 }
 
@@ -121,7 +141,7 @@ type Config struct {
 func (c *Config) Get(format string) (info *Info, err error) {
 	info = &Info{}
 	// make a deep copy of info
-	if err = mergo.Merge(info, c.Info); err != nil {
+	if err = mergo.Merge(info, c.Info, mergo.WithOverride); err != nil {
 		return nil, fmt.Errorf("failed to merge config into info: %w", err)
 	}
 	override, ok := c.Overrides[format]
@@ -163,7 +183,7 @@ func (c *Config) expandEnvVarsStringSlice(items []string) []string {
 	}
 	for i := 0; i < len(items); i++ {
 		if items[i] == "" {
-			items = append(items[:i], items[i+1:]...)
+			items = slices.Delete(items, i, i+1)
 			i-- // Since we just deleted items[i], we must redo that index
 		}
 	}
@@ -171,95 +191,130 @@ func (c *Config) expandEnvVarsStringSlice(items []string) []string {
 	return items
 }
 
+func (c *Config) expandEnvVarsContents(contents files.Contents) files.Contents {
+	for i := range contents {
+		f := contents[i]
+		if !f.Expand {
+			continue
+		}
+		f.Destination = strings.TrimSpace(os.Expand(f.Destination, c.envMappingFunc))
+		f.Source = strings.TrimSpace(os.Expand(f.Source, c.envMappingFunc))
+	}
+	return contents
+}
+
 func (c *Config) expandEnvVars() {
 	// Version related fields
-	c.Info.Release = os.Expand(c.Info.Release, c.envMappingFunc)
-	c.Info.Version = os.Expand(c.Info.Version, c.envMappingFunc)
-	c.Info.Prerelease = os.Expand(c.Info.Prerelease, c.envMappingFunc)
-	c.Info.Platform = os.Expand(c.Info.Platform, c.envMappingFunc)
-	c.Info.Arch = os.Expand(c.Info.Arch, c.envMappingFunc)
+	c.Release = os.Expand(c.Release, c.envMappingFunc)
+	c.Version = os.Expand(c.Version, c.envMappingFunc)
+	c.Prerelease = os.Expand(c.Prerelease, c.envMappingFunc)
+	c.Platform = os.Expand(c.Platform, c.envMappingFunc)
+	c.Arch = os.Expand(c.Arch, c.envMappingFunc)
 	for or := range c.Overrides {
+		if c.Overrides[or] == nil {
+			continue
+		}
 		c.Overrides[or].Conflicts = c.expandEnvVarsStringSlice(c.Overrides[or].Conflicts)
 		c.Overrides[or].Depends = c.expandEnvVarsStringSlice(c.Overrides[or].Depends)
 		c.Overrides[or].Replaces = c.expandEnvVarsStringSlice(c.Overrides[or].Replaces)
 		c.Overrides[or].Recommends = c.expandEnvVarsStringSlice(c.Overrides[or].Recommends)
 		c.Overrides[or].Provides = c.expandEnvVarsStringSlice(c.Overrides[or].Provides)
 		c.Overrides[or].Suggests = c.expandEnvVarsStringSlice(c.Overrides[or].Suggests)
+		c.Overrides[or].RPM.Requires.Post = c.expandEnvVarsStringSlice(c.Overrides[or].RPM.Requires.Post)
+		c.Overrides[or].Contents = c.expandEnvVarsContents(c.Overrides[or].Contents)
 	}
-	c.Info.Conflicts = c.expandEnvVarsStringSlice(c.Info.Conflicts)
-	c.Info.Depends = c.expandEnvVarsStringSlice(c.Info.Depends)
-	c.Info.Replaces = c.expandEnvVarsStringSlice(c.Info.Replaces)
-	c.Info.Recommends = c.expandEnvVarsStringSlice(c.Info.Recommends)
-	c.Info.Provides = c.expandEnvVarsStringSlice(c.Info.Provides)
-	c.Info.Suggests = c.expandEnvVarsStringSlice(c.Info.Suggests)
+	c.Conflicts = c.expandEnvVarsStringSlice(c.Conflicts)
+	c.Depends = c.expandEnvVarsStringSlice(c.Depends)
+	c.Replaces = c.expandEnvVarsStringSlice(c.Replaces)
+	c.Recommends = c.expandEnvVarsStringSlice(c.Recommends)
+	c.Provides = c.expandEnvVarsStringSlice(c.Provides)
+	c.Suggests = c.expandEnvVarsStringSlice(c.Suggests)
+	c.RPM.Requires.Post = c.expandEnvVarsStringSlice(c.RPM.Requires.Post)
+	c.Contents = c.expandEnvVarsContents(c.Contents)
 
 	// Basic metadata fields
-	c.Info.Name = os.Expand(c.Info.Name, c.envMappingFunc)
-	c.Info.Homepage = os.Expand(c.Info.Homepage, c.envMappingFunc)
-	c.Info.Maintainer = os.Expand(c.Info.Maintainer, c.envMappingFunc)
-	c.Info.Vendor = os.Expand(c.Info.Vendor, c.envMappingFunc)
+	c.Name = os.Expand(c.Name, c.envMappingFunc)
+	c.Homepage = os.Expand(c.Homepage, c.envMappingFunc)
+	c.Maintainer = os.Expand(c.Maintainer, c.envMappingFunc)
+	c.Vendor = os.Expand(c.Vendor, c.envMappingFunc)
+	c.Description = os.Expand(c.Description, c.envMappingFunc)
 
 	// Package signing related fields
-	c.Info.Deb.Signature.KeyFile = os.Expand(c.Deb.Signature.KeyFile, c.envMappingFunc)
-	c.Info.RPM.Signature.KeyFile = os.Expand(c.RPM.Signature.KeyFile, c.envMappingFunc)
-	c.Info.APK.Signature.KeyFile = os.Expand(c.APK.Signature.KeyFile, c.envMappingFunc)
-	c.Info.Deb.Signature.KeyID = pointer.ToString(os.Expand(pointer.GetString(c.Deb.Signature.KeyID), c.envMappingFunc))
-	c.Info.RPM.Signature.KeyID = pointer.ToString(os.Expand(pointer.GetString(c.RPM.Signature.KeyID), c.envMappingFunc))
-	c.Info.APK.Signature.KeyID = pointer.ToString(os.Expand(pointer.GetString(c.APK.Signature.KeyID), c.envMappingFunc))
+	c.Deb.Signature.KeyFile = os.Expand(c.Deb.Signature.KeyFile, c.envMappingFunc)
+	c.RPM.Signature.KeyFile = os.Expand(c.RPM.Signature.KeyFile, c.envMappingFunc)
+	c.APK.Signature.KeyFile = os.Expand(c.APK.Signature.KeyFile, c.envMappingFunc)
+	c.Deb.Signature.KeyID = pointer.ToString(os.Expand(pointer.GetString(c.Deb.Signature.KeyID), c.envMappingFunc))
+	c.RPM.Signature.KeyID = pointer.ToString(os.Expand(pointer.GetString(c.RPM.Signature.KeyID), c.envMappingFunc))
+	c.APK.Signature.KeyID = pointer.ToString(os.Expand(pointer.GetString(c.APK.Signature.KeyID), c.envMappingFunc))
 
 	// Package signing passphrase
 	generalPassphrase := os.Expand("$NFPM_PASSPHRASE", c.envMappingFunc)
-	c.Info.Deb.Signature.KeyPassphrase = generalPassphrase
-	c.Info.RPM.Signature.KeyPassphrase = generalPassphrase
-	c.Info.APK.Signature.KeyPassphrase = generalPassphrase
+	c.Deb.Signature.KeyPassphrase = generalPassphrase
+	c.RPM.Signature.KeyPassphrase = generalPassphrase
+	c.APK.Signature.KeyPassphrase = generalPassphrase
 
 	debPassphrase := os.Expand("$NFPM_DEB_PASSPHRASE", c.envMappingFunc)
 	if debPassphrase != "" {
-		c.Info.Deb.Signature.KeyPassphrase = debPassphrase
+		c.Deb.Signature.KeyPassphrase = debPassphrase
 	}
 
 	rpmPassphrase := os.Expand("$NFPM_RPM_PASSPHRASE", c.envMappingFunc)
 	if rpmPassphrase != "" {
-		c.Info.RPM.Signature.KeyPassphrase = rpmPassphrase
+		c.RPM.Signature.KeyPassphrase = rpmPassphrase
 	}
 
 	apkPassphrase := os.Expand("$NFPM_APK_PASSPHRASE", c.envMappingFunc)
 	if apkPassphrase != "" {
-		c.Info.APK.Signature.KeyPassphrase = apkPassphrase
+		c.APK.Signature.KeyPassphrase = apkPassphrase
 	}
 
 	// RPM specific
-	c.Info.RPM.Packager = os.Expand(c.RPM.Packager, c.envMappingFunc)
+	c.RPM.Packager = os.Expand(c.RPM.Packager, c.envMappingFunc)
 
 	// Deb specific
-	for k, v := range c.Info.Deb.Fields {
-		c.Info.Deb.Fields[k] = os.Expand(v, c.envMappingFunc)
+	for k, v := range c.Deb.Fields {
+		c.Deb.Fields[k] = os.Expand(v, c.envMappingFunc)
 	}
-	c.Info.Deb.Predepends = c.expandEnvVarsStringSlice(c.Info.Deb.Predepends)
+	c.Deb.Predepends = c.expandEnvVarsStringSlice(c.Deb.Predepends)
+
+	// IPK specific
+	for k, v := range c.IPK.Fields {
+		c.IPK.Fields[k] = os.Expand(v, c.envMappingFunc)
+	}
+	c.IPK.Predepends = c.expandEnvVarsStringSlice(c.IPK.Predepends)
+
+	// MSIX specific
+	c.MSIX.Signature.PFXFile = os.Expand(c.MSIX.Signature.PFXFile, c.envMappingFunc)
+	c.MSIX.Publisher = os.Expand(c.MSIX.Publisher, c.envMappingFunc)
+	msixPassphrase := os.Expand("$NFPM_MSIX_PASSPHRASE", c.envMappingFunc)
+	if msixPassphrase != "" {
+		c.MSIX.Signature.KeyPassphrase = msixPassphrase
+	}
 }
 
 // Info contains information about a single package.
 type Info struct {
 	Overridables    `yaml:",inline" json:",inline"`
-	Name            string `yaml:"name" json:"name" jsonschema:"title=package name"`
-	Arch            string `yaml:"arch" json:"arch" jsonschema:"title=target architecture,example=amd64"`
-	Platform        string `yaml:"platform,omitempty" json:"platform,omitempty" jsonschema:"title=target platform,example=linux,default=linux"`
-	Epoch           string `yaml:"epoch,omitempty" json:"epoch,omitempty" jsonschema:"title=version epoch,example=2,default=extracted from version"`
-	Version         string `yaml:"version" json:"version" jsonschema:"title=version,example=v1.0.2,example=2.0.1"`
-	VersionSchema   string `yaml:"version_schema,omitempty" json:"version_schema,omitempty" jsonschema:"title=version schema,enum=semver,enum=none,default=semver"`
-	Release         string `yaml:"release,omitempty" json:"release,omitempty" jsonschema:"title=version release,example=1"`
-	Prerelease      string `yaml:"prerelease,omitempty" json:"prerelease,omitempty" jsonschema:"title=version prerelease,default=extracted from version"`
-	VersionMetadata string `yaml:"version_metadata,omitempty" json:"version_metadata,omitempty" jsonschema:"title=version metadata,example=git"`
-	Section         string `yaml:"section,omitempty" json:"section,omitempty" jsonschema:"title=package section,example=default"`
-	Priority        string `yaml:"priority,omitempty" json:"priority,omitempty" jsonschema:"title=package priority,example=extra"`
-	Maintainer      string `yaml:"maintainer,omitempty" json:"maintainer,omitempty" jsonschema:"title=package maintainer,example=me@example.com"`
-	Description     string `yaml:"description,omitempty" json:"description,omitempty" jsonschema:"title=package description"`
-	Vendor          string `yaml:"vendor,omitempty" json:"vendor,omitempty" jsonschema:"title=package vendor,example=MyCorp"`
-	Homepage        string `yaml:"homepage,omitempty" json:"homepage,omitempty" jsonschema:"title=package homepage,example=https://example.com"`
-	License         string `yaml:"license,omitempty" json:"license,omitempty" jsonschema:"title=package license,example=MIT"`
-	Changelog       string `yaml:"changelog,omitempty" json:"changelog,omitempty" jsonschema:"title=package changelog,example=changelog.yaml,description=see https://github.com/goreleaser/chglog for more details"`
-	DisableGlobbing bool   `yaml:"disable_globbing,omitempty" json:"disable_globbing,omitempty" jsonschema:"title=whether to disable file globbing,default=false"`
-	Target          string `yaml:"-" json:"-"`
+	Name            string    `yaml:"name" json:"name" jsonschema:"title=package name"`
+	Arch            string    `yaml:"arch" json:"arch" jsonschema:"title=target architecture,example=amd64"`
+	Platform        string    `yaml:"platform,omitempty" json:"platform,omitempty" jsonschema:"title=target platform,example=linux,default=linux"`
+	Epoch           string    `yaml:"epoch,omitempty" json:"epoch,omitempty" jsonschema:"title=version epoch,example=2,default=extracted from version"`
+	Version         string    `yaml:"version" json:"version" jsonschema:"title=version,example=v1.0.2,example=2.0.1"`
+	VersionSchema   string    `yaml:"version_schema,omitempty" json:"version_schema,omitempty" jsonschema:"title=version schema,enum=semver,enum=none,default=semver"`
+	Release         string    `yaml:"release,omitempty" json:"release,omitempty" jsonschema:"title=version release,example=1"`
+	Prerelease      string    `yaml:"prerelease,omitempty" json:"prerelease,omitempty" jsonschema:"title=version prerelease,default=extracted from version"`
+	VersionMetadata string    `yaml:"version_metadata,omitempty" json:"version_metadata,omitempty" jsonschema:"title=version metadata,example=git"`
+	Section         string    `yaml:"section,omitempty" json:"section,omitempty" jsonschema:"title=package section,example=default"`
+	Priority        string    `yaml:"priority,omitempty" json:"priority,omitempty" jsonschema:"title=package priority,example=extra"`
+	Maintainer      string    `yaml:"maintainer,omitempty" json:"maintainer,omitempty" jsonschema:"title=package maintainer,example=me@example.com"`
+	Description     string    `yaml:"description,omitempty" json:"description,omitempty" jsonschema:"title=package description"`
+	Vendor          string    `yaml:"vendor,omitempty" json:"vendor,omitempty" jsonschema:"title=package vendor,example=MyCorp"`
+	Homepage        string    `yaml:"homepage,omitempty" json:"homepage,omitempty" jsonschema:"title=package homepage,example=https://example.com"`
+	License         string    `yaml:"license,omitempty" json:"license,omitempty" jsonschema:"title=package license,example=MIT"`
+	Changelog       string    `yaml:"changelog,omitempty" json:"changelog,omitempty" jsonschema:"title=package changelog,example=changelog.yaml,description=see https://github.com/goreleaser/chglog for more details"`
+	DisableGlobbing bool      `yaml:"disable_globbing,omitempty" json:"disable_globbing,omitempty" jsonschema:"title=whether to disable file globbing,default=false"`
+	MTime           time.Time `yaml:"mtime,omitempty" json:"mtime,omitempty" jsonschema:"title=time to set into the files generated by nFPM"`
+	Target          string    `yaml:"-" json:"-"`
 }
 
 func (i *Info) Validate() error {
@@ -309,12 +364,14 @@ type Overridables struct {
 	Suggests   []string       `yaml:"suggests,omitempty" json:"suggests,omitempty" jsonschema:"title=suggests directive,example=nfpm"`
 	Conflicts  []string       `yaml:"conflicts,omitempty" json:"conflicts,omitempty" jsonschema:"title=conflicts directive,example=nfpm"`
 	Contents   files.Contents `yaml:"contents,omitempty" json:"contents,omitempty" jsonschema:"title=files to add to the package"`
-	Umask      os.FileMode    `yaml:"umask,omitempty" json:"umask,omitempty" jsonschema:"title=umask for file contents,example=002"`
+	Umask      os.FileMode    `yaml:"umask,omitempty" json:"umask,omitempty" jsonschema:"title=umask for file contents,example=112"`
 	Scripts    Scripts        `yaml:"scripts,omitempty" json:"scripts,omitempty" jsonschema:"title=scripts to execute"`
 	RPM        RPM            `yaml:"rpm,omitempty" json:"rpm,omitempty" jsonschema:"title=rpm-specific settings"`
 	Deb        Deb            `yaml:"deb,omitempty" json:"deb,omitempty" jsonschema:"title=deb-specific settings"`
 	APK        APK            `yaml:"apk,omitempty" json:"apk,omitempty" jsonschema:"title=apk-specific settings"`
 	ArchLinux  ArchLinux      `yaml:"archlinux,omitempty" json:"archlinux,omitempty" jsonschema:"title=archlinux-specific settings"`
+	IPK        IPK            `yaml:"ipk,omitempty" json:"ipk,omitempty" jsonschema:"title=ipk-specific settings"`
+	MSIX       MSIX           `yaml:"msix,omitempty" json:"msix,omitempty" jsonschema:"title=msix-specific settings"`
 }
 
 type ArchLinux struct {
@@ -332,10 +389,12 @@ type ArchLinuxScripts struct {
 // RPM is custom configs that are only available on RPM packages.
 type RPM struct {
 	Arch        string       `yaml:"arch,omitempty" json:"arch,omitempty" jsonschema:"title=architecture in rpm nomenclature"`
+	BuildHost   string       `yaml:"buildhost,omitempty" json:"buildhost,omitempty" jsonschema:"title=host name of the build environment, default=os.Hostname()"`
 	Scripts     RPMScripts   `yaml:"scripts,omitempty" json:"scripts,omitempty" jsonschema:"title=rpm-specific scripts"`
+	Requires    RPMRequires  `yaml:"requires,omitempty" json:"requires,omitempty" jsonschema:"title=rpm-specific requires"`
 	Group       string       `yaml:"group,omitempty" json:"group,omitempty" jsonschema:"title=package group,example=Unspecified"`
 	Summary     string       `yaml:"summary,omitempty" json:"summary,omitempty" jsonschema:"title=package summary"`
-	Compression string       `yaml:"compression,omitempty" json:"compression,omitempty" jsonschema:"title=compression algorithm to be used,enum=gzip,enum=lzma,enum=xz,default=gzip:-1"`
+	Compression string       `yaml:"compression,omitempty" json:"compression,omitempty" jsonschema:"title=compression algorithm to be used,enum=gzip,enum=lzma,enum=xz,enum=zstd,default=gzip:-1"`
 	Signature   RPMSignature `yaml:"signature,omitempty" json:"signature,omitempty" jsonschema:"title=rpm signature"`
 	Packager    string       `yaml:"packager,omitempty" json:"packager,omitempty" jsonschema:"title=organization that actually packaged the software"`
 	Prefixes    []string     `yaml:"prefixes,omitempty" json:"prefixes,omitempty" jsonschema:"title=Prefixes for relocatable packages"`
@@ -345,6 +404,12 @@ type RPM struct {
 type RPMScripts struct {
 	PreTrans  string `yaml:"pretrans,omitempty" json:"pretrans,omitempty" jsonschema:"title=pretrans script"`
 	PostTrans string `yaml:"posttrans,omitempty" json:"posttrans,omitempty" jsonschema:"title=posttrans script"`
+	Verify    string `yaml:"verify,omitempty" json:"verify,omitempty" jsonschema:"title=verify script"`
+}
+
+// RPMRequires represents qualified RPM Requires dependencies.
+type RPMRequires struct {
+	Post []string `yaml:"post,omitempty" json:"post,omitempty" jsonschema:"title=post requires directive,example=nfpm"`
 }
 
 type PackageSignature struct {
@@ -385,19 +450,20 @@ type APKScripts struct {
 // Deb is custom configs that are only available on deb packages.
 type Deb struct {
 	Arch        string            `yaml:"arch,omitempty" json:"arch,omitempty" jsonschema:"title=architecture in deb nomenclature"`
+	ArchVariant string            `yaml:"arch_variant,omitempty" json:"arch_variant,omitempty" jsonschema:"title=target architecture variant in deb nomenclature,example=amd64v3"`
 	Scripts     DebScripts        `yaml:"scripts,omitempty" json:"scripts,omitempty" jsonschema:"title=scripts"`
 	Triggers    DebTriggers       `yaml:"triggers,omitempty" json:"triggers,omitempty" jsonschema:"title=triggers"`
 	Breaks      []string          `yaml:"breaks,omitempty" json:"breaks,omitempty" jsonschema:"title=breaks"`
 	Signature   DebSignature      `yaml:"signature,omitempty" json:"signature,omitempty" jsonschema:"title=signature"`
-	Compression string            `yaml:"compression,omitempty" json:"compression,omitempty" jsonschema:"title=compression algorithm to be used,enum=gzip,enum=xz,enum=none,default=gzip"`
+	Compression string            `yaml:"compression,omitempty" json:"compression,omitempty" jsonschema:"title=compression algorithm to be used,enum=gzip,enum=xz,enum=zstd,enum=none,default=gzip:-1"`
 	Fields      map[string]string `yaml:"fields,omitempty" json:"fields,omitempty" jsonschema:"title=fields"`
 	Predepends  []string          `yaml:"predepends,omitempty" json:"predepends,omitempty" jsonschema:"title=predepends directive,example=nfpm"`
 }
 
 type DebSignature struct {
 	PackageSignature `yaml:",inline" json:",inline"`
-	// debsign, or dpkg-sig (defaults to debsign)
-	Method string `yaml:"method,omitempty" json:"method,omitempty" jsonschema:"title=method role,enum=debsign,enum=dpkg-sig,default=debsign"`
+	// Only debsign still supported
+	Method string `yaml:"method,omitempty" json:"method,omitempty" jsonschema:"title=method role,enum=dpkg-sig,enum=debsign,default=debsign"`
 	// origin, maint or archive (defaults to origin)
 	Type   string `yaml:"type,omitempty" json:"type,omitempty" jsonschema:"title=signer role,enum=origin,enum=maint,enum=archive,default=origin"`
 	Signer string `yaml:"signer,omitempty" json:"signer,omitempty" jsonschema:"title=signer"`
@@ -420,6 +486,91 @@ type DebScripts struct {
 	Rules     string `yaml:"rules,omitempty" json:"rules,omitempty" jsonschema:"title=rules"`
 	Templates string `yaml:"templates,omitempty" json:"templates,omitempty" jsonschema:"title=templates"`
 	Config    string `yaml:"config,omitempty" json:"config,omitempty" jsonschema:"title=config"`
+}
+
+// IPK is custom configs that are only available on deb packages.
+type IPK struct {
+	ABIVersion    string            `yaml:"abi_version,omitempty" json:"abi_version,omitempty" jsonschema:"title=abi version"`
+	Alternatives  []IPKAlternative  `yaml:"alternatives,omitempty" json:"alternatives,omitempty" jsonschema:"title=alternatives"`
+	Arch          string            `yaml:"arch,omitempty" json:"arch,omitempty" jsonschema:"title=architecture in deb nomenclature"`
+	AutoInstalled bool              `yaml:"auto_installed,omitempty" json:"auto_installed,omitempty" jsonschema:"title=auto installed,default=false"`
+	Essential     bool              `yaml:"essential,omitempty" json:"essential,omitempty" jsonschema:"title=whether package is essential,default=false"`
+	Fields        map[string]string `yaml:"fields,omitempty" json:"fields,omitempty" jsonschema:"title=fields"`
+	Predepends    []string          `yaml:"predepends,omitempty" json:"predepends,omitempty" jsonschema:"title=predepends directive,example=nfpm"`
+	Tags          []string          `yaml:"tags,omitempty" json:"tags,omitempty" jsonschema:"title=tags"`
+}
+
+// IPKAlternative represents an alternative for an IPK package.
+type IPKAlternative struct {
+	Priority int    `yaml:"priority,omitempty" json:"priority,omitempty" jsonschema:"title=priority"`
+	Target   string `yaml:"target,omitempty" json:"target,omitempty" jsonschema:"title=target"`
+	LinkName string `yaml:"link_name,omitempty" json:"link_name,omitempty" jsonschema:"title=link name"`
+}
+
+// MSIX contains configs that are only available on MSIX packages.
+type MSIX struct {
+	Arch         string            `yaml:"arch,omitempty" json:"arch,omitempty" jsonschema:"title=architecture in msix nomenclature"`
+	Publisher    string            `yaml:"publisher" json:"publisher" jsonschema:"title=publisher identity,example=CN=MyCompany\\, O=MyCompany\\, C=US"`
+	Identity     MSIXIdentity      `yaml:"identity,omitempty" json:"identity,omitempty" jsonschema:"title=package identity"`
+	Properties   MSIXProperties    `yaml:"properties,omitempty" json:"properties,omitempty" jsonschema:"title=package properties"`
+	Applications []MSIXApplication `yaml:"applications" json:"applications" jsonschema:"title=applications in the package"`
+	Dependencies MSIXDependencies  `yaml:"dependencies,omitempty" json:"dependencies,omitempty" jsonschema:"title=target device families"`
+	Capabilities MSIXCapabilities  `yaml:"capabilities,omitempty" json:"capabilities,omitempty" jsonschema:"title=package capabilities"`
+	Signature    MSIXSignature     `yaml:"signature,omitempty" json:"signature,omitempty" jsonschema:"title=msix signature"`
+}
+
+// MSIXIdentity contains identity fields for MSIX packages.
+type MSIXIdentity struct {
+	ResourceID string `yaml:"resource_id,omitempty" json:"resource_id,omitempty" jsonschema:"title=resource identifier"`
+}
+
+// MSIXProperties contains display properties for MSIX packages.
+type MSIXProperties struct {
+	DisplayName          string `yaml:"display_name,omitempty" json:"display_name,omitempty" jsonschema:"title=display name"`
+	PublisherDisplayName string `yaml:"publisher_display_name,omitempty" json:"publisher_display_name,omitempty" jsonschema:"title=publisher display name"`
+	Logo                 string `yaml:"logo,omitempty" json:"logo,omitempty" jsonschema:"title=package logo path"`
+}
+
+// MSIXApplication describes an application entry in an MSIX package.
+type MSIXApplication struct {
+	ID             string             `yaml:"id" json:"id" jsonschema:"title=application ID"`
+	Executable     string             `yaml:"executable" json:"executable" jsonschema:"title=executable path in package"`
+	EntryPoint     string             `yaml:"entry_point,omitempty" json:"entry_point,omitempty" jsonschema:"title=entry point,default=Windows.FullTrustApplication"`
+	VisualElements MSIXVisualElements `yaml:"visual_elements,omitempty" json:"visual_elements,omitempty" jsonschema:"title=visual elements"`
+}
+
+// MSIXVisualElements contains visual presentation settings for an MSIX application.
+type MSIXVisualElements struct {
+	DisplayName       string `yaml:"display_name,omitempty" json:"display_name,omitempty"`
+	Description       string `yaml:"description,omitempty" json:"description,omitempty"`
+	BackgroundColor   string `yaml:"background_color,omitempty" json:"background_color,omitempty" jsonschema:"default=transparent"`
+	Square150x150Logo string `yaml:"square150x150_logo,omitempty" json:"square150x150_logo,omitempty"`
+	Square44x44Logo   string `yaml:"square44x44_logo,omitempty" json:"square44x44_logo,omitempty"`
+}
+
+// MSIXDependencies contains dependency information for MSIX packages.
+type MSIXDependencies struct {
+	TargetDeviceFamilies []MSIXTargetDeviceFamily `yaml:"target_device_families,omitempty" json:"target_device_families,omitempty"`
+}
+
+// MSIXTargetDeviceFamily describes a target device family for an MSIX package.
+type MSIXTargetDeviceFamily struct {
+	Name             string `yaml:"name" json:"name" jsonschema:"title=device family name,example=Windows.Desktop"`
+	MinVersion       string `yaml:"min_version" json:"min_version" jsonschema:"title=minimum OS version,example=10.0.17763.0"`
+	MaxVersionTested string `yaml:"max_version_tested" json:"max_version_tested" jsonschema:"title=max tested version,example=10.0.22621.0"`
+}
+
+// MSIXCapabilities contains capability declarations for MSIX packages.
+type MSIXCapabilities struct {
+	Capabilities       []string `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
+	DeviceCapabilities []string `yaml:"device_capabilities,omitempty" json:"device_capabilities,omitempty"`
+	Restricted         []string `yaml:"restricted,omitempty" json:"restricted,omitempty"`
+}
+
+// MSIXSignature contains signing configuration for MSIX packages.
+type MSIXSignature struct {
+	PFXFile       string `yaml:"pfx_file,omitempty" json:"pfx_file,omitempty" jsonschema:"title=PFX certificate file"`
+	KeyPassphrase string `yaml:"-" json:"-"` // populated from NFPM_MSIX_PASSPHRASE env var
 }
 
 // Scripts contains information about maintainer scripts for packages.
@@ -449,14 +600,21 @@ func PrepareForPackager(info *Info, packager string) (err error) {
 	if info.Arch == "" &&
 		((packager == "deb" && info.Deb.Arch == "") ||
 			(packager == "rpm" && info.RPM.Arch == "") ||
-			(packager == "apk" && info.APK.Arch == "")) {
+			(packager == "apk" && info.APK.Arch == "") ||
+			(packager == "msix" && info.MSIX.Arch == "")) {
 		return ErrFieldEmpty{"arch"}
 	}
 	if info.Version == "" {
 		return ErrFieldEmpty{"version"}
 	}
 
-	info.Contents, err = files.PrepareForPackager(info.Contents, info.Umask, packager, info.DisableGlobbing)
+	info.Contents, err = files.PrepareForPackager(
+		info.Contents,
+		info.Umask,
+		packager,
+		info.DisableGlobbing,
+		info.MTime,
+	)
 
 	return err
 }
@@ -475,7 +633,13 @@ func Validate(info *Info) (err error) {
 	}
 
 	for packager := range packagers {
-		_, err := files.PrepareForPackager(info.Contents, info.Umask, packager, info.DisableGlobbing)
+		_, err := files.PrepareForPackager(
+			info.Contents,
+			info.Umask,
+			packager,
+			info.DisableGlobbing,
+			info.MTime,
+		)
 		if err != nil {
 			return err
 		}
@@ -507,7 +671,9 @@ func WithDefaults(info *Info) *Info {
 	if info.Umask == 0 {
 		info.Umask = 0o02
 	}
-
+	if info.MTime.IsZero() {
+		info.MTime = modtime.FromEnv()
+	}
 	switch info.VersionSchema {
 	case "none":
 		// No change to the version or prerelease info set in the YAML file
@@ -533,6 +699,6 @@ func (s *ErrSigningFailure) Error() string {
 	return fmt.Sprintf("signing error: %v", s.Err)
 }
 
-func (s *ErrSigningFailure) Unwarp() error {
+func (s *ErrSigningFailure) Unwrap() error {
 	return s.Err
 }

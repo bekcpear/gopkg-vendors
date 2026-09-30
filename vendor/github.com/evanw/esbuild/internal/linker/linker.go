@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash"
+	"net/url"
 	"path"
 	"sort"
 	"strconv"
@@ -687,7 +688,7 @@ func (c *linkerContext) generateChunksInParallel(additionalFiles []graph.OutputF
 				})
 
 			// Generate the optional legal comments file for this chunk
-			if chunk.externalLegalComments != nil {
+			if len(chunk.externalLegalComments) > 0 {
 				finalRelPathForLegalComments := chunk.finalRelPath + ".LEGAL.txt"
 
 				// Link the file to the legal comments
@@ -705,7 +706,8 @@ func (c *linkerContext) generateChunksInParallel(additionalFiles []graph.OutputF
 					AbsPath:  c.fs.Join(c.options.AbsOutputDir, finalRelPathForLegalComments),
 					Contents: chunk.externalLegalComments,
 					JSONMetadataChunk: fmt.Sprintf(
-						"{\n      \"imports\": [],\n      \"exports\": [],\n      \"inputs\": {},\n      \"bytes\": %d\n    }", len(chunk.externalLegalComments)),
+						c.options.MetafileFormat.MaybeRemoveWhitespace("{\n      \"imports\": [],\n      \"exports\": [],\n      \"inputs\": {},\n      \"bytes\": %d\n    }"),
+						len(chunk.externalLegalComments)),
 				})
 			}
 
@@ -719,10 +721,11 @@ func (c *linkerContext) generateChunksInParallel(additionalFiles []graph.OutputF
 				case config.SourceMapLinkedWithComment:
 					importPath := c.pathBetweenChunks(finalRelDir, finalRelPathForSourceMap)
 					importPath = strings.TrimPrefix(importPath, "./")
+					importURL := url.URL{Path: importPath}
 					outputContentsJoiner.EnsureNewlineAtEnd()
 					outputContentsJoiner.AddString(commentPrefix)
 					outputContentsJoiner.AddString("# sourceMappingURL=")
-					outputContentsJoiner.AddString(importPath)
+					outputContentsJoiner.AddString(importURL.EscapedPath())
 					outputContentsJoiner.AddString(commentSuffix)
 					outputContentsJoiner.AddString("\n")
 
@@ -742,7 +745,8 @@ func (c *linkerContext) generateChunksInParallel(additionalFiles []graph.OutputF
 						AbsPath:  c.fs.Join(c.options.AbsOutputDir, finalRelPathForSourceMap),
 						Contents: outputSourceMap,
 						JSONMetadataChunk: fmt.Sprintf(
-							"{\n      \"imports\": [],\n      \"exports\": [],\n      \"inputs\": {},\n      \"bytes\": %d\n    }", len(outputSourceMap)),
+							c.options.MetafileFormat.MaybeRemoveWhitespace("{\n      \"imports\": [],\n      \"exports\": [],\n      \"inputs\": {},\n      \"bytes\": %d\n    }"),
+							len(outputSourceMap)),
 					})
 				}
 			}
@@ -755,7 +759,8 @@ func (c *linkerContext) generateChunksInParallel(additionalFiles []graph.OutputF
 			if c.options.NeedsMetafile {
 				jsonMetadataChunkPieces := c.breakJoinerIntoPieces(chunk.jsonMetadataChunkCallback(len(outputContents)))
 				jsonMetadataChunkBytes, _ := c.substituteFinalPaths(jsonMetadataChunkPieces, func(finalRelPathForImport string) string {
-					return resolver.PrettyPath(c.fs, logger.Path{Text: c.fs.Join(c.options.AbsOutputDir, finalRelPathForImport), Namespace: "file"})
+					prettyPaths := resolver.MakePrettyPaths(c.fs, logger.Path{Text: c.fs.Join(c.options.AbsOutputDir, finalRelPathForImport), Namespace: "file"})
+					return prettyPaths.Select(c.options.MetafilePathStyle)
 				})
 				jsonMetadataChunk = string(jsonMetadataChunkBytes.Done())
 			}
@@ -1337,7 +1342,8 @@ func (c *linkerContext) scanImportsAndExports() {
 								if global, ok := otherRepr.AST.GlobalScope[name.Alias]; ok {
 									var hint string
 									if otherFile.InputFile.Loader == config.LoaderCSS {
-										hint = fmt.Sprintf("Use the \"local-css\" loader for %q to enable local names.", otherFile.InputFile.Source.PrettyPath)
+										hint = fmt.Sprintf("Use the \"local-css\" loader for %q to enable local names.",
+											otherFile.InputFile.Source.PrettyPaths.Select(c.options.LogPathStyle))
 									} else {
 										hint = fmt.Sprintf("Use the \":local\" selector to change %q into a local name.", name.Alias)
 									}
@@ -1354,8 +1360,8 @@ func (c *linkerContext) scanImportsAndExports() {
 								} else {
 									c.log.AddError(file.LineColumnTracker(),
 										css_lexer.RangeOfIdentifier(file.InputFile.Source, name.AliasLoc),
-										fmt.Sprintf("The name %q never appears in %q",
-											name.Alias, otherFile.InputFile.Source.PrettyPath))
+										fmt.Sprintf("The name %q never appears in %q", name.Alias,
+											otherFile.InputFile.Source.PrettyPaths.Select(c.options.LogPathStyle)))
 								}
 							}
 						}
@@ -1603,12 +1609,15 @@ func (c *linkerContext) scanImportsAndExports() {
 							otherTracker := logger.MakeLineColumnTracker(&otherFile.Source)
 							ambiguousTracker := logger.MakeLineColumnTracker(&ambiguousFile.Source)
 							c.log.AddIDWithNotes(logger.MsgID_Bundler_AmbiguousReexport, logger.Debug, nil, logger.Range{},
-								fmt.Sprintf("Re-export of %q in %q is ambiguous and has been removed", alias, file.Source.PrettyPath),
+								fmt.Sprintf("Re-export of %q in %q is ambiguous and has been removed", alias,
+									file.Source.PrettyPaths.Select(c.options.LogPathStyle)),
 								[]logger.MsgData{
 									otherTracker.MsgData(js_lexer.RangeOfIdentifier(otherFile.Source, mainLoc),
-										fmt.Sprintf("One definition of %q comes from %q here:", alias, otherFile.Source.PrettyPath)),
+										fmt.Sprintf("One definition of %q comes from %q here:", alias,
+											otherFile.Source.PrettyPaths.Select(c.options.LogPathStyle))),
 									ambiguousTracker.MsgData(js_lexer.RangeOfIdentifier(ambiguousFile.Source, ambiguousLoc),
-										fmt.Sprintf("Another definition of %q comes from %q here:", alias, ambiguousFile.Source.PrettyPath)),
+										fmt.Sprintf("Another definition of %q comes from %q here:", alias,
+											ambiguousFile.Source.PrettyPaths.Select(c.options.LogPathStyle))),
 								},
 							)
 							continue nextAlias
@@ -1621,6 +1630,10 @@ func (c *linkerContext) scanImportsAndExports() {
 				// do is to silently omit them from the export list.
 				if otherRepr.Meta.IsProbablyTypeScriptType[export.Ref] {
 					continue
+				}
+
+				if c.options.OutputFormat == config.FormatESModule && c.options.UnsupportedJSFeatures.Has(compat.ArbitraryModuleNamespaceNames) && c.graph.Files[sourceIndex].IsEntryPoint() {
+					c.maybeForbidArbitraryModuleNamespaceIdentifier("export", export.SourceIndex, export.NameLoc, alias)
 				}
 
 				aliases = append(aliases, alias)
@@ -2287,7 +2300,16 @@ func (c *linkerContext) createExportsForFile(sourceIndex uint32) {
 		} else {
 			getter = js_ast.Expr{Data: &js_ast.EArrow{PreferExpr: true, Body: body}}
 		}
+
+		// Special case for __proto__ property: use a computed property
+		// name to avoid it being treated as the object's prototype
+		var flags js_ast.PropertyFlags
+		if alias == "__proto__" && !c.options.UnsupportedJSFeatures.Has(compat.ObjectExtensions) {
+			flags |= js_ast.PropertyIsComputed
+		}
+
 		properties = append(properties, js_ast.Property{
+			Flags:      flags,
 			Key:        js_ast.Expr{Data: &js_ast.EString{Value: helpers.StringToUTF16(alias)}},
 			ValueOrNil: getter,
 		})
@@ -2409,9 +2431,9 @@ func (c *linkerContext) createWrapperForFile(sourceIndex uint32) {
 	// However, that generation is special-cased for various reasons and is
 	// done later on. Still, we're going to need to ensure that this file
 	// both depends on the "__commonJS" symbol and declares the "require_foo"
-	// symbol. Instead of special-casing this during the reachablity analysis
+	// symbol. Instead of special-casing this during the reachability analysis
 	// below, we just append a dummy part to the end of the file with these
-	// dependencies and let the general-purpose reachablity analysis take care
+	// dependencies and let the general-purpose reachability analysis take care
 	// of it.
 	case graph.WrapCJS:
 		runtimeRepr := c.graph.Files[runtime.SourceIndex].InputFile.Repr.(*graph.JSRepr)
@@ -2670,8 +2692,8 @@ loop:
 				c.log.AddID(logger.MsgID_Bundler_ImportIsUndefined, kind,
 					trackerFile.LineColumnTracker(),
 					js_lexer.RangeOfIdentifier(trackerFile.InputFile.Source, namedImport.AliasLoc),
-					fmt.Sprintf("Import %q will always be undefined because the file %q has no exports",
-						namedImport.Alias, c.graph.Files[nextTracker.sourceIndex].InputFile.Source.PrettyPath))
+					fmt.Sprintf("Import %q will always be undefined because the file %q has no exports", namedImport.Alias,
+						c.graph.Files[nextTracker.sourceIndex].InputFile.Source.PrettyPaths.Select(c.options.LogPathStyle)))
 			}
 
 		case importDynamicFallback:
@@ -2731,7 +2753,7 @@ loop:
 						Kind: logger.Warning,
 						Data: trackerFile.LineColumnTracker().MsgData(r, fmt.Sprintf(
 							"Import %q will always be undefined because there is no matching export in %q",
-							namedImport.Alias, nextFile.Source.PrettyPath)),
+							namedImport.Alias, nextFile.Source.PrettyPaths.Select(c.options.LogPathStyle))),
 					}
 					if helpers.IsInsideNodeModules(trackerFile.InputFile.Source.KeyPath.Text) {
 						msg.Kind = logger.Debug
@@ -2745,7 +2767,7 @@ loop:
 					Kind: logger.Error,
 					Data: trackerFile.LineColumnTracker().MsgData(r, fmt.Sprintf(
 						"No matching export in %q for import %q",
-						nextFile.Source.PrettyPath, namedImport.Alias)),
+						nextFile.Source.PrettyPaths.Select(c.options.LogPathStyle), namedImport.Alias)),
 				}
 				c.maybeCorrectObviousTypo(nextFile.Repr.(*graph.JSRepr), namedImport.Alias, &msg)
 				c.log.AddMsg(msg)
@@ -2835,6 +2857,15 @@ loop:
 	}
 
 	return
+}
+
+func (c *linkerContext) maybeForbidArbitraryModuleNamespaceIdentifier(kind string, sourceIndex uint32, loc logger.Loc, alias string) {
+	if !js_ast.IsIdentifier(alias) {
+		file := &c.graph.Files[sourceIndex]
+		where := config.PrettyPrintTargetEnvironment(c.options.OriginalTargetEnv, c.options.UnsupportedJSFeatureOverridesMask)
+		c.log.AddError(file.LineColumnTracker(), file.InputFile.Source.RangeOfString(loc), fmt.Sprintf(
+			"Using the string %q as an %s name is not supported in %s", alias, kind, where))
+	}
 }
 
 // Attempt to correct an import name with a typo
@@ -3370,7 +3401,7 @@ type cssImportOrder struct {
 // The only exception to this is "@layer". Evaluating a CSS file multiple
 // times is sort of equivalent to evaluating it once at the first location
 // as far as "@layer" is concerned. So we may in some cases keep both the
-// first and and last locations and only write out the "@layer" information
+// first and last locations and only write out the "@layer" information
 // for the first location.
 func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order []cssImportOrder) {
 	var visit func(uint32, []uint32, []css_ast.ImportConditions, []ast.ImportRecord)
@@ -3744,7 +3775,7 @@ func importConditionsAreEqual(a []css_ast.ImportConditions, b []css_ast.ImportCo
 		bi := b[i]
 		if !css_ast.TokensEqualIgnoringWhitespace(ai.Layers, bi.Layers) ||
 			!css_ast.TokensEqualIgnoringWhitespace(ai.Supports, bi.Supports) ||
-			!css_ast.TokensEqualIgnoringWhitespace(ai.Media, bi.Media) {
+			!css_ast.MediaQueriesEqualIgnoringWhitespace(ai.Queries, bi.Queries) {
 			return false
 		}
 	}
@@ -3778,7 +3809,7 @@ func importConditionsAreEqual(a []css_ast.ImportConditions, b []css_ast.ImportCo
 // For "lib.css", the entry with the conditions [supports(display: flex)] should
 // make the entry with the conditions [supports(display: flex), screen] redundant.
 //
-// Note that all of this deliberately ignores the existance of "@layer" because
+// Note that all of this deliberately ignores the existence of "@layer" because
 // that is handled separately. All of this is only for handling unlayered styles.
 func isConditionalImportRedundant(earlier []css_ast.ImportConditions, later []css_ast.ImportConditions) bool {
 	if len(later) > len(earlier) {
@@ -3792,7 +3823,7 @@ func isConditionalImportRedundant(earlier []css_ast.ImportConditions, later []cs
 		// Only compare "@supports" and "@media" if "@layers" is equal
 		if css_ast.TokensEqualIgnoringWhitespace(a.Layers, b.Layers) {
 			sameSupports := css_ast.TokensEqualIgnoringWhitespace(a.Supports, b.Supports)
-			sameMedia := css_ast.TokensEqualIgnoringWhitespace(a.Media, b.Media)
+			sameMedia := css_ast.MediaQueriesEqualIgnoringWhitespace(a.Queries, b.Queries)
 
 			// If the import conditions are exactly equal, then only keep
 			// the later one. The earlier one is redundant. Example:
@@ -3825,7 +3856,7 @@ func isConditionalImportRedundant(earlier []css_ast.ImportConditions, later []cs
 			//   @import "foo.css" layer(abc) supports(display: flex);
 			//
 			// The later one makes the earlier one redundant.
-			if sameSupports && len(b.Media) == 0 {
+			if sameSupports && len(b.Queries) == 0 {
 				continue
 			}
 		}
@@ -4307,6 +4338,12 @@ func (c *linkerContext) convertStmtsForChunk(sourceIndex uint32, stmtList *stmtL
 				continue
 			}
 
+			if c.options.UnsupportedJSFeatures.Has(compat.ArbitraryModuleNamespaceNames) && s.Items != nil {
+				for _, item := range *s.Items {
+					c.maybeForbidArbitraryModuleNamespaceIdentifier("import", sourceIndex, item.AliasLoc, item.Alias)
+				}
+			}
+
 			// Make sure these don't end up in the wrapper closure
 			if shouldExtractESMStmtsForWrap {
 				stmtList.outsideWrapperPrefix = append(stmtList.outsideWrapperPrefix, stmt)
@@ -4318,6 +4355,10 @@ func (c *linkerContext) convertStmtsForChunk(sourceIndex uint32, stmtList *stmtL
 			if s.Alias != nil {
 				if c.shouldRemoveImportExportStmt(sourceIndex, stmtList, stmt.Loc, s.NamespaceRef, s.ImportRecordIndex) {
 					continue
+				}
+
+				if c.options.UnsupportedJSFeatures.Has(compat.ArbitraryModuleNamespaceNames) {
+					c.maybeForbidArbitraryModuleNamespaceIdentifier("export", sourceIndex, s.Alias.Loc, s.Alias.OriginalName)
 				}
 
 				if shouldStripExports {
@@ -4426,6 +4467,12 @@ func (c *linkerContext) convertStmtsForChunk(sourceIndex uint32, stmtList *stmtL
 				continue
 			}
 
+			if c.options.UnsupportedJSFeatures.Has(compat.ArbitraryModuleNamespaceNames) {
+				for _, item := range s.Items {
+					c.maybeForbidArbitraryModuleNamespaceIdentifier("import", sourceIndex, item.Name.Loc, item.OriginalName)
+				}
+			}
+
 			if shouldStripExports {
 				// Turn this statement into "import {foo} from 'path'"
 				for i, item := range s.Items {
@@ -4436,6 +4483,12 @@ func (c *linkerContext) convertStmtsForChunk(sourceIndex uint32, stmtList *stmtL
 					Items:             &s.Items,
 					ImportRecordIndex: s.ImportRecordIndex,
 					IsSingleLine:      s.IsSingleLine,
+				}
+			} else if c.options.UnsupportedJSFeatures.Has(compat.ArbitraryModuleNamespaceNames) {
+				for _, item := range s.Items {
+					if item.AliasLoc != item.Name.Loc {
+						c.maybeForbidArbitraryModuleNamespaceIdentifier("export", sourceIndex, item.AliasLoc, item.Alias)
+					}
 				}
 			}
 
@@ -4449,6 +4502,12 @@ func (c *linkerContext) convertStmtsForChunk(sourceIndex uint32, stmtList *stmtL
 			if shouldStripExports {
 				// Remove export statements entirely
 				continue
+			}
+
+			if c.options.UnsupportedJSFeatures.Has(compat.ArbitraryModuleNamespaceNames) {
+				for _, item := range s.Items {
+					c.maybeForbidArbitraryModuleNamespaceIdentifier("export", sourceIndex, item.AliasLoc, item.Alias)
+				}
 			}
 
 			// Make sure these don't end up in the wrapper closure
@@ -4599,8 +4658,6 @@ func (c *linkerContext) generateCodeForFileInChunkJS(
 	r renamer.Renamer,
 	waitGroup *sync.WaitGroup,
 	partRange partRange,
-	entryBits helpers.BitSet,
-	chunkAbsDir string,
 	toCommonJSRef ast.Ref,
 	toESMRef ast.Ref,
 	runtimeRequireRef ast.Ref,
@@ -4763,13 +4820,13 @@ func (c *linkerContext) generateCodeForFileInChunkJS(
 			var cjsArgs []js_ast.Expr
 			if c.options.ProfilerNames {
 				// "__commonJS({ 'file.js'(exports, module) { ... } })"
-				var flags js_ast.PropertyFlags
+				kind := js_ast.PropertyField
 				if !c.options.UnsupportedJSFeatures.Has(compat.ObjectExtensions) {
-					flags |= js_ast.PropertyIsMethod
+					kind = js_ast.PropertyMethod
 				}
 				cjsArgs = []js_ast.Expr{{Data: &js_ast.EObject{Properties: []js_ast.Property{{
-					Flags:      flags,
-					Key:        js_ast.Expr{Data: &js_ast.EString{Value: helpers.StringToUTF16(file.InputFile.Source.PrettyPath)}},
+					Kind:       kind,
+					Key:        js_ast.Expr{Data: &js_ast.EString{Value: helpers.StringToUTF16(file.InputFile.Source.PrettyPaths.Select(c.options.CodePathStyle))}},
 					ValueOrNil: js_ast.Expr{Data: &js_ast.EFunction{Fn: js_ast.Fn{Args: args, Body: js_ast.FnBody{Block: js_ast.SBlock{Stmts: stmts}}}}},
 				}}}}}
 			} else if c.options.UnsupportedJSFeatures.Has(compat.Arrow) {
@@ -4835,13 +4892,13 @@ func (c *linkerContext) generateCodeForFileInChunkJS(
 			var esmArgs []js_ast.Expr
 			if c.options.ProfilerNames {
 				// "__esm({ 'file.js'() { ... } })"
-				var flags js_ast.PropertyFlags
+				kind := js_ast.PropertyField
 				if !c.options.UnsupportedJSFeatures.Has(compat.ObjectExtensions) {
-					flags |= js_ast.PropertyIsMethod
+					kind = js_ast.PropertyMethod
 				}
 				esmArgs = []js_ast.Expr{{Data: &js_ast.EObject{Properties: []js_ast.Property{{
-					Flags:      flags,
-					Key:        js_ast.Expr{Data: &js_ast.EString{Value: helpers.StringToUTF16(file.InputFile.Source.PrettyPath)}},
+					Kind:       kind,
+					Key:        js_ast.Expr{Data: &js_ast.EString{Value: helpers.StringToUTF16(file.InputFile.Source.PrettyPaths.Select(c.options.CodePathStyle))}},
 					ValueOrNil: js_ast.Expr{Data: &js_ast.EFunction{Fn: js_ast.Fn{Body: js_ast.FnBody{Block: js_ast.SBlock{Stmts: stmts}}, IsAsync: isAsync}}},
 				}}}}}
 			} else if c.options.UnsupportedJSFeatures.Has(compat.Arrow) {
@@ -4913,6 +4970,7 @@ func (c *linkerContext) generateCodeForFileInChunkJS(
 		RequireOrImportMetaForSource: c.requireOrImportMetaForSource,
 		MangledProps:                 c.mangledProps,
 		NeedsMetafile:                c.options.NeedsMetafile,
+		MetafileFormat:               c.options.MetafileFormat,
 	}
 	tree := repr.AST
 	tree.Directives = nil // This is handled elsewhere
@@ -4923,7 +4981,8 @@ func (c *linkerContext) generateCodeForFileInChunkJS(
 	}
 
 	if file.InputFile.Loader == config.LoaderFile {
-		result.JSONMetadataImports = append(result.JSONMetadataImports, fmt.Sprintf("\n        {\n          \"path\": %s,\n          \"kind\": \"file-loader\"\n        }",
+		result.JSONMetadataImports = append(result.JSONMetadataImports, fmt.Sprintf(
+			c.options.MetafileFormat.MaybeRemoveWhitespace("\n        {\n          \"path\": %s,\n          \"kind\": \"file-loader\"\n        }"),
 			helpers.QuoteForJSON(file.InputFile.UniqueKeyForAdditionalFile, c.options.ASCIIOnly)))
 	}
 
@@ -5040,7 +5099,7 @@ func (c *linkerContext) generateEntryPointTailJS(
 
 				// "{if: null}"
 				var valueOrNil js_ast.Expr
-				if _, ok := js_lexer.Keywords[export]; ok {
+				if _, ok := js_lexer.Keywords[export]; ok || !js_ast.IsIdentifier(export) {
 					// Make sure keywords don't cause a syntax error. This has to map to
 					// "null" instead of something shorter like "0" because the library
 					// "cjs-module-lexer" only supports identifiers in this position, and
@@ -5271,12 +5330,12 @@ func (c *linkerContext) renameSymbolsInChunk(chunk *chunkInfo, filesInOrder []ui
 	reservedNames := renamer.ComputeReservedNames(moduleScopes, c.graph.Symbols)
 
 	// Node contains code that scans CommonJS modules in an attempt to statically
-	// detect the  set of export names that a module will use. However, it doesn't
+	// detect the set of export names that a module will use. However, it doesn't
 	// do any scope analysis so it can be fooled by local variables with the same
 	// name as the CommonJS module-scope variables "exports" and "module". Avoid
 	// using these names in this case even if there is not a risk of a name
 	// collision because there is still a risk of node incorrectly detecting
-	// something in a nested scope as an top-level export. Here's a case where
+	// something in a nested scope as a top-level export. Here's a case where
 	// this happened: https://github.com/evanw/esbuild/issues/3544
 	if c.options.OutputFormat == config.FormatCommonJS && c.options.Platform == config.PlatformNode {
 		reservedNames["exports"] = 1
@@ -5549,8 +5608,6 @@ func (c *linkerContext) generateChunkJS(chunkIndex int, chunkWaitGroup *sync.Wai
 			r,
 			&waitGroup,
 			partRange,
-			chunk.entryBits,
-			chunkAbsDir,
 			toCommonJSRef,
 			toESMRef,
 			runtimeRequireRef,
@@ -5577,6 +5634,7 @@ func (c *linkerContext) generateChunkJS(chunkIndex int, chunkWaitGroup *sync.Wai
 			MinifySyntax:      c.options.MinifySyntax,
 			LineLimit:         c.options.LineLimit,
 			NeedsMetafile:     c.options.NeedsMetafile,
+			MetafileFormat:    c.options.MetafileFormat,
 		}
 		crossChunkImportRecords := make([]ast.ImportRecord, len(chunk.crossChunkImports))
 		for i, chunkImport := range chunk.crossChunkImports {
@@ -5692,7 +5750,7 @@ func (c *linkerContext) generateChunkJS(chunkIndex int, chunkWaitGroup *sync.Wai
 	if c.options.NeedsMetafile {
 		// Print imports
 		isFirstMeta := true
-		jMeta.AddString("{\n      \"imports\": [")
+		jMeta.AddString(c.options.MetafileFormat.MaybeRemoveWhitespace("{\n      \"imports\": ["))
 		for _, json := range jsonMetadataImports {
 			if isFirstMeta {
 				isFirstMeta = false
@@ -5712,11 +5770,11 @@ func (c *linkerContext) generateChunkJS(chunkIndex int, chunkWaitGroup *sync.Wai
 			}
 		}
 		if !isFirstMeta {
-			jMeta.AddString("\n      ")
+			jMeta.AddString(c.options.MetafileFormat.MaybeRemoveWhitespace("\n      "))
 		}
 
 		// Print exports
-		jMeta.AddString("],\n      \"exports\": [")
+		jMeta.AddString(c.options.MetafileFormat.MaybeRemoveWhitespace("],\n      \"exports\": ["))
 		var aliases []string
 		if c.options.OutputFormat.KeepESMImportExportSyntax() {
 			if chunk.isEntryPoint {
@@ -5744,21 +5802,22 @@ func (c *linkerContext) generateChunkJS(chunkIndex int, chunkWaitGroup *sync.Wai
 			} else {
 				jMeta.AddString(",")
 			}
-			jMeta.AddString(fmt.Sprintf("\n        %s",
+			jMeta.AddString(fmt.Sprintf(
+				c.options.MetafileFormat.MaybeRemoveWhitespace("\n        %s"),
 				helpers.QuoteForJSON(alias, c.options.ASCIIOnly)))
 		}
 		if !isFirstMeta {
-			jMeta.AddString("\n      ")
+			jMeta.AddString(c.options.MetafileFormat.MaybeRemoveWhitespace("\n      "))
 		}
-		jMeta.AddString("],\n")
+		jMeta.AddString(c.options.MetafileFormat.MaybeRemoveWhitespace("],\n"))
 		if chunk.isEntryPoint {
-			entryPoint := c.graph.Files[chunk.sourceIndex].InputFile.Source.PrettyPath
-			jMeta.AddString(fmt.Sprintf("      \"entryPoint\": %s,\n", helpers.QuoteForJSON(entryPoint, c.options.ASCIIOnly)))
+			entryPoint := c.graph.Files[chunk.sourceIndex].InputFile.Source.PrettyPaths.Select(c.options.MetafilePathStyle)
+			jMeta.AddString(fmt.Sprintf(c.options.MetafileFormat.MaybeRemoveWhitespace("      \"entryPoint\": %s,\n"), helpers.QuoteForJSON(entryPoint, c.options.ASCIIOnly)))
 		}
 		if chunkRepr.hasCSSChunk {
-			jMeta.AddString(fmt.Sprintf("      \"cssBundle\": %s,\n", helpers.QuoteForJSON(c.chunks[chunkRepr.cssChunkIndex].uniqueKey, c.options.ASCIIOnly)))
+			jMeta.AddString(fmt.Sprintf(c.options.MetafileFormat.MaybeRemoveWhitespace("      \"cssBundle\": %s,\n"), helpers.QuoteForJSON(c.chunks[chunkRepr.cssChunkIndex].uniqueKey, c.options.ASCIIOnly)))
 		}
-		jMeta.AddString("      \"inputs\": {")
+		jMeta.AddString(c.options.MetafileFormat.MaybeRemoveWhitespace("      \"inputs\": {"))
 	}
 
 	// Concatenate the generated JavaScript chunks together
@@ -5787,7 +5846,7 @@ func (c *linkerContext) generateChunkJS(chunkIndex int, chunkWaitGroup *sync.Wai
 				j.AddString("\n")
 			}
 
-			path := c.graph.Files[compileResult.sourceIndex].InputFile.Source.PrettyPath
+			path := c.graph.Files[compileResult.sourceIndex].InputFile.Source.PrettyPaths.Select(c.options.CodePathStyle)
 
 			// Make sure newlines in the path can't cause a syntax error. This does
 			// not minimize allocations because it's expected that this case never
@@ -5815,6 +5874,16 @@ func (c *linkerContext) generateChunkJS(chunkIndex int, chunkWaitGroup *sync.Wai
 			// Ignore empty source map chunks
 			if compileResult.SourceMapChunk.ShouldIgnore {
 				prevOffset.AdvanceBytes(compileResult.JS)
+
+				// Include a null entry in the source map
+				if len(compileResult.JS) > 0 && c.options.SourceMap != config.SourceMapNone {
+					if n := len(compileResultsForSourceMap); n > 0 && !compileResultsForSourceMap[n-1].isNullEntry {
+						compileResultsForSourceMap = append(compileResultsForSourceMap, compileResultForSourceMap{
+							sourceIndex: compileResult.sourceIndex,
+							isNullEntry: true,
+						})
+					}
+				}
 			} else {
 				prevOffset = sourcemap.LineColumnOffset{}
 
@@ -5909,14 +5978,15 @@ func (c *linkerContext) generateChunkJS(chunkIndex int, chunkWaitGroup *sync.Wai
 				for _, output := range pieces[i] {
 					count += c.accurateFinalByteCount(output, finalRelDir)
 				}
-				jMeta.AddString(fmt.Sprintf("\n        %s: {\n          \"bytesInOutput\": %d\n        %s}",
-					helpers.QuoteForJSON(c.graph.Files[sourceIndex].InputFile.Source.PrettyPath, c.options.ASCIIOnly),
+				jMeta.AddString(fmt.Sprintf(
+					c.options.MetafileFormat.MaybeRemoveWhitespace("\n        %s: {\n          \"bytesInOutput\": %d\n        %s}"),
+					helpers.QuoteForJSON(c.graph.Files[sourceIndex].InputFile.Source.PrettyPaths.Select(c.options.MetafilePathStyle), c.options.ASCIIOnly),
 					count, c.generateExtraDataForFileJS(sourceIndex)))
 			}
 			if len(metaOrder) > 0 {
-				jMeta.AddString("\n      ")
+				jMeta.AddString(c.options.MetafileFormat.MaybeRemoveWhitespace("\n      "))
 			}
-			jMeta.AddString(fmt.Sprintf("},\n      \"bytes\": %d\n    }", finalOutputSize))
+			jMeta.AddString(fmt.Sprintf(c.options.MetafileFormat.MaybeRemoveWhitespace("},\n      \"bytes\": %d\n    }"), finalOutputSize))
 			return jMeta
 		}
 	}
@@ -5929,7 +5999,7 @@ func (c *linkerContext) generateChunkJS(chunkIndex int, chunkWaitGroup *sync.Wai
 func (c *linkerContext) generateGlobalNamePrefix() string {
 	var text string
 	globalName := c.options.GlobalName
-	prefix := globalName[0]
+	prefix, globalName := globalName[0], globalName[1:]
 	space := " "
 	join := ";\n"
 
@@ -5938,9 +6008,18 @@ func (c *linkerContext) generateGlobalNamePrefix() string {
 		join = ";"
 	}
 
+	// Assume the "this" and "import.meta" objects always exist
+	isExistingObject := prefix == "this"
+	if prefix == "import" && len(globalName) > 0 && globalName[0] == "meta" {
+		prefix, globalName = "import.meta", globalName[1:]
+		isExistingObject = true
+	}
+
 	// Use "||=" to make the code more compact when it's supported
-	if len(globalName) > 1 && !c.options.UnsupportedJSFeatures.Has(compat.LogicalAssignment) {
-		if js_printer.CanEscapeIdentifier(prefix, c.options.UnsupportedJSFeatures, c.options.ASCIIOnly) {
+	if len(globalName) > 0 && !c.options.UnsupportedJSFeatures.Has(compat.LogicalAssignment) {
+		if isExistingObject {
+			// Keep the prefix as it is
+		} else if js_printer.CanEscapeIdentifier(prefix, c.options.UnsupportedJSFeatures, c.options.ASCIIOnly) {
 			if c.options.ASCIIOnly {
 				prefix = string(js_printer.QuoteIdentifier(nil, prefix, c.options.UnsupportedJSFeatures))
 			}
@@ -5948,7 +6027,7 @@ func (c *linkerContext) generateGlobalNamePrefix() string {
 		} else {
 			prefix = fmt.Sprintf("this[%s]", helpers.QuoteForJSON(prefix, c.options.ASCIIOnly))
 		}
-		for _, name := range globalName[1:] {
+		for _, name := range globalName {
 			var dotOrIndex string
 			if js_printer.CanEscapeIdentifier(name, c.options.UnsupportedJSFeatures, c.options.ASCIIOnly) {
 				if c.options.ASCIIOnly {
@@ -5958,12 +6037,19 @@ func (c *linkerContext) generateGlobalNamePrefix() string {
 			} else {
 				dotOrIndex = fmt.Sprintf("[%s]", helpers.QuoteForJSON(name, c.options.ASCIIOnly))
 			}
-			prefix = fmt.Sprintf("(%s%s||=%s{})%s", prefix, space, space, dotOrIndex)
+			if isExistingObject {
+				prefix = fmt.Sprintf("%s%s", prefix, dotOrIndex)
+				isExistingObject = false
+			} else {
+				prefix = fmt.Sprintf("(%s%s||=%s{})%s", prefix, space, space, dotOrIndex)
+			}
 		}
 		return fmt.Sprintf("%s%s%s=%s", text, prefix, space, space)
 	}
 
-	if js_printer.CanEscapeIdentifier(prefix, c.options.UnsupportedJSFeatures, c.options.ASCIIOnly) {
+	if isExistingObject {
+		text = fmt.Sprintf("%s%s=%s", prefix, space, space)
+	} else if js_printer.CanEscapeIdentifier(prefix, c.options.UnsupportedJSFeatures, c.options.ASCIIOnly) {
 		if c.options.ASCIIOnly {
 			prefix = string(js_printer.QuoteIdentifier(nil, prefix, c.options.UnsupportedJSFeatures))
 		}
@@ -5973,7 +6059,7 @@ func (c *linkerContext) generateGlobalNamePrefix() string {
 		text = fmt.Sprintf("%s%s=%s", prefix, space, space)
 	}
 
-	for _, name := range globalName[1:] {
+	for _, name := range globalName {
 		oldPrefix := prefix
 		if js_printer.CanEscapeIdentifier(name, c.options.UnsupportedJSFeatures, c.options.ASCIIOnly) {
 			if c.options.ASCIIOnly {
@@ -6034,9 +6120,9 @@ func (c *linkerContext) generateChunkCSS(chunkIndex int, chunkWaitGroup *sync.Wa
 	// in parallel, and must be done from the last rule to the first rule.
 	timer.Begin("Prepare CSS ASTs")
 	asts := make([]css_ast.AST, len(chunkRepr.importsInChunkInOrder))
-	var remover css_parser.DuplicateRuleRemover
+	var remover css_parser.DeadRuleRemover
 	if c.options.MinifySyntax {
-		remover = css_parser.MakeDuplicateRuleMangler(c.graph.Symbols)
+		remover = css_parser.MakeDeadRuleMangler(c.graph.Symbols)
 	}
 	for i := len(chunkRepr.importsInChunkInOrder) - 1; i >= 0; i-- {
 		entry := chunkRepr.importsInChunkInOrder[i]
@@ -6132,7 +6218,7 @@ func (c *linkerContext) generateChunkCSS(chunkIndex int, chunkWaitGroup *sync.Wa
 
 			// Remove top-level duplicate rules across files
 			if c.options.MinifySyntax {
-				rules = remover.RemoveDuplicateRulesInPlace(entry.sourceIndex, rules, ast.ImportRecords)
+				rules = remover.RemoveDeadRulesInPlace(entry.sourceIndex, rules, ast.ImportRecords)
 			}
 
 			ast.Rules = rules
@@ -6156,6 +6242,7 @@ func (c *linkerContext) generateChunkCSS(chunkIndex int, chunkWaitGroup *sync.Wa
 				SourceMap:           c.options.SourceMap,
 				UnsupportedFeatures: c.options.UnsupportedCSSFeatures,
 				NeedsMetafile:       c.options.NeedsMetafile,
+				MetafileFormat:      c.options.MetafileFormat,
 				LocalNames:          c.mangledProps,
 			}
 
@@ -6212,6 +6299,7 @@ func (c *linkerContext) generateChunkCSS(chunkIndex int, chunkWaitGroup *sync.Wa
 				LineLimit:        c.options.LineLimit,
 				ASCIIOnly:        c.options.ASCIIOnly,
 				NeedsMetafile:    c.options.NeedsMetafile,
+				MetafileFormat:   c.options.MetafileFormat,
 			})
 			jsonMetadataImports = result.JSONMetadataImports
 			if len(result.CSS) > 0 {
@@ -6226,7 +6314,7 @@ func (c *linkerContext) generateChunkCSS(chunkIndex int, chunkWaitGroup *sync.Wa
 	jMeta := helpers.Joiner{}
 	if c.options.NeedsMetafile {
 		isFirstMeta := true
-		jMeta.AddString("{\n      \"imports\": [")
+		jMeta.AddString(c.options.MetafileFormat.MaybeRemoveWhitespace("{\n      \"imports\": ["))
 		for _, json := range jsonMetadataImports {
 			if isFirstMeta {
 				isFirstMeta = false
@@ -6246,7 +6334,7 @@ func (c *linkerContext) generateChunkCSS(chunkIndex int, chunkWaitGroup *sync.Wa
 			}
 		}
 		if !isFirstMeta {
-			jMeta.AddString("\n      ")
+			jMeta.AddString(c.options.MetafileFormat.MaybeRemoveWhitespace("\n      "))
 		}
 		if chunk.isEntryPoint {
 			file := &c.graph.Files[chunk.sourceIndex]
@@ -6255,13 +6343,14 @@ func (c *linkerContext) generateChunkCSS(chunkIndex int, chunkWaitGroup *sync.Wa
 			// importing CSS into JavaScript. We want this to be a 1:1 relationship
 			// and there is already an output file for the JavaScript entry point.
 			if _, ok := file.InputFile.Repr.(*graph.CSSRepr); ok {
-				jMeta.AddString(fmt.Sprintf("],\n      \"entryPoint\": %s,\n      \"inputs\": {",
-					helpers.QuoteForJSON(file.InputFile.Source.PrettyPath, c.options.ASCIIOnly)))
+				jMeta.AddString(fmt.Sprintf(
+					c.options.MetafileFormat.MaybeRemoveWhitespace("],\n      \"entryPoint\": %s,\n      \"inputs\": {"),
+					helpers.QuoteForJSON(file.InputFile.Source.PrettyPaths.Select(c.options.MetafilePathStyle), c.options.ASCIIOnly)))
 			} else {
-				jMeta.AddString("],\n      \"inputs\": {")
+				jMeta.AddString(c.options.MetafileFormat.MaybeRemoveWhitespace("],\n      \"inputs\": {"))
 			}
 		} else {
-			jMeta.AddString("],\n      \"inputs\": {")
+			jMeta.AddString(c.options.MetafileFormat.MaybeRemoveWhitespace("],\n      \"inputs\": {"))
 		}
 	}
 
@@ -6281,7 +6370,8 @@ func (c *linkerContext) generateChunkCSS(chunkIndex int, chunkWaitGroup *sync.Wa
 			if newlineBeforeComment {
 				newline = "\n"
 			}
-			comment := fmt.Sprintf("%s/* %s */\n", newline, c.graph.Files[compileResult.sourceIndex.GetIndex()].InputFile.Source.PrettyPath)
+			comment := fmt.Sprintf("%s/* %s */\n", newline,
+				c.graph.Files[compileResult.sourceIndex.GetIndex()].InputFile.Source.PrettyPaths.Select(c.options.CodePathStyle))
 			prevOffset.AdvanceString(comment)
 			j.AddString(comment)
 		}
@@ -6296,6 +6386,16 @@ func (c *linkerContext) generateChunkCSS(chunkIndex int, chunkWaitGroup *sync.Wa
 		// Ignore empty source map chunks
 		if compileResult.SourceMapChunk.ShouldIgnore {
 			prevOffset.AdvanceBytes(compileResult.CSS)
+
+			// Include a null entry in the source map
+			if len(compileResult.CSS) > 0 && c.options.SourceMap != config.SourceMapNone && compileResult.sourceIndex.IsValid() {
+				if n := len(compileResultsForSourceMap); n > 0 && !compileResultsForSourceMap[n-1].isNullEntry {
+					compileResultsForSourceMap = append(compileResultsForSourceMap, compileResultForSourceMap{
+						sourceIndex: compileResult.sourceIndex.GetIndex(),
+						isNullEntry: true,
+					})
+				}
+			}
 		} else {
 			prevOffset = sourcemap.LineColumnOffset{}
 
@@ -6353,14 +6453,15 @@ func (c *linkerContext) generateChunkCSS(chunkIndex int, chunkWaitGroup *sync.Wa
 				} else {
 					jMeta.AddString(",")
 				}
-				jMeta.AddString(fmt.Sprintf("\n        %s: {\n          \"bytesInOutput\": %d\n        }",
-					helpers.QuoteForJSON(c.graph.Files[compileResult.sourceIndex.GetIndex()].InputFile.Source.PrettyPath, c.options.ASCIIOnly),
+				jMeta.AddString(fmt.Sprintf(
+					c.options.MetafileFormat.MaybeRemoveWhitespace("\n        %s: {\n          \"bytesInOutput\": %d\n        }"),
+					helpers.QuoteForJSON(c.graph.Files[compileResult.sourceIndex.GetIndex()].InputFile.Source.PrettyPaths.Select(c.options.MetafilePathStyle), c.options.ASCIIOnly),
 					c.accurateFinalByteCount(pieces[i], finalRelDir)))
 			}
 			if len(compileResults) > 0 {
-				jMeta.AddString("\n      ")
+				jMeta.AddString(c.options.MetafileFormat.MaybeRemoveWhitespace("\n      "))
 			}
-			jMeta.AddString(fmt.Sprintf("},\n      \"bytes\": %d\n    }", finalOutputSize))
+			jMeta.AddString(fmt.Sprintf(c.options.MetafileFormat.MaybeRemoveWhitespace("},\n      \"bytes\": %d\n    }"), finalOutputSize))
 			return jMeta
 		}
 	}
@@ -6418,12 +6519,11 @@ func wrapRulesWithConditions(
 
 		// Generate "@media" wrappers. This is not done if the rule block is
 		// empty because empty "@media" rules have no effect.
-		if len(rules) > 0 && len(item.Media) > 0 {
-			var prelude []css_ast.Token
-			prelude, importRecords = css_ast.CloneTokensWithImportRecords(item.Media, conditionImportRecords, nil, importRecords)
-			rules = []css_ast.Rule{{Data: &css_ast.RKnownAt{
-				AtToken: "media",
-				Prelude: prelude,
+		if len(rules) > 0 && len(item.Queries) > 0 {
+			var queries []css_ast.MediaQuery
+			queries, importRecords = css_ast.CloneMediaQueriesWithImportRecords(item.Queries, conditionImportRecords, nil, importRecords)
+			rules = []css_ast.Rule{{Data: &css_ast.RAtMedia{
+				Queries: queries,
 				Rules:   rules,
 			}}}
 		}
@@ -6454,8 +6554,8 @@ func (c *linkerContext) maybeAppendLegalComments(
 	}
 
 	type thirdPartyEntry struct {
-		packagePath string
-		comments    []string
+		packagePaths []string
+		comments     []string
 	}
 
 	var uniqueFirstPartyComments []string
@@ -6501,8 +6601,8 @@ func (c *linkerContext) maybeAppendLegalComments(
 
 		if packagePath != "" {
 			thirdPartyComments = append(thirdPartyComments, thirdPartyEntry{
-				packagePath: packagePath,
-				comments:    entry.comments,
+				packagePaths: []string{packagePath},
+				comments:     entry.comments,
 			})
 		} else {
 			for _, comment := range entry.comments {
@@ -6514,6 +6614,22 @@ func (c *linkerContext) maybeAppendLegalComments(
 		}
 	}
 
+	// Merge package paths with identical comments
+	identical := make(map[string]int)
+	end := 0
+	for _, entry := range thirdPartyComments {
+		key := strings.Join(entry.comments, "\x00")
+		if index, ok := identical[key]; ok {
+			existing := &thirdPartyComments[index]
+			existing.packagePaths = append(existing.packagePaths, entry.packagePaths...)
+		} else {
+			identical[key] = end
+			thirdPartyComments[end] = entry
+			end++
+		}
+	}
+	thirdPartyComments = thirdPartyComments[:end]
+
 	switch legalComments {
 	case config.LegalCommentsEndOfFile:
 		for _, comment := range uniqueFirstPartyComments {
@@ -6524,7 +6640,10 @@ func (c *linkerContext) maybeAppendLegalComments(
 		if len(thirdPartyComments) > 0 {
 			j.AddString("/*! Bundled license information:\n")
 			for _, entry := range thirdPartyComments {
-				j.AddString(fmt.Sprintf("\n%s:\n", helpers.EscapeClosingTag(entry.packagePath, slashTag)))
+				j.AddString("\n")
+				for _, packagePath := range entry.packagePaths {
+					j.AddString(fmt.Sprintf("%s:\n", helpers.EscapeClosingTag(packagePath, slashTag)))
+				}
 				for _, comment := range entry.comments {
 					comment = helpers.EscapeClosingTag(comment, slashTag)
 					if strings.HasPrefix(comment, "//") {
@@ -6551,7 +6670,10 @@ func (c *linkerContext) maybeAppendLegalComments(
 			}
 			jComments.AddString("Bundled license information:\n")
 			for _, entry := range thirdPartyComments {
-				jComments.AddString(fmt.Sprintf("\n%s:\n", entry.packagePath))
+				jComments.AddString("\n")
+				for _, packagePath := range entry.packagePaths {
+					jComments.AddString(fmt.Sprintf("%s:\n", packagePath))
+				}
 				for _, comment := range entry.comments {
 					jComments.AddString(fmt.Sprintf("  %s\n", strings.ReplaceAll(comment, "\n", "\n  ")))
 				}
@@ -6706,7 +6828,7 @@ func (c *linkerContext) generateIsolatedHash(chunk *chunkInfo, channel chan []by
 			if file.InputFile.Source.KeyPath.Namespace == "file" {
 				// Use the pretty path as the file name since it should be platform-
 				// independent (relative paths and the "/" path separator)
-				filePath = file.InputFile.Source.PrettyPath
+				filePath = file.InputFile.Source.PrettyPaths.Rel
 			} else {
 				// If this isn't in the "file" namespace, just use the full path text
 				// verbatim. This could be a source of cross-platform differences if
@@ -6868,6 +6990,7 @@ type compileResultForSourceMap struct {
 	sourceMapChunk  sourcemap.Chunk
 	generatedOffset sourcemap.LineColumnOffset
 	sourceIndex     uint32
+	isNullEntry     bool
 }
 
 func (c *linkerContext) generateSourceMapForChunk(
@@ -6884,13 +7007,15 @@ func (c *linkerContext) generateSourceMapForChunk(
 
 	// Generate the "sources" and "sourcesContent" arrays
 	type item struct {
-		path           logger.Path
-		prettyPath     string
+		source         string
 		quotedContents []byte
 	}
 	items := make([]item, 0, len(results))
 	nextSourcesIndex := 0
 	for _, result := range results {
+		if result.isNullEntry {
+			continue
+		}
 		if _, ok := sourceIndexToSourcesIndex[result.sourceIndex]; ok {
 			continue
 		}
@@ -6903,9 +7028,44 @@ func (c *linkerContext) generateSourceMapForChunk(
 			if !c.options.ExcludeSourcesContent {
 				quotedContents = dataForSourceMaps[result.sourceIndex].QuotedContents[0]
 			}
+			source := file.InputFile.Source.KeyPath.Text
+			if file.InputFile.Source.KeyPath.Namespace == "file" {
+				// Serialize the file path as a "file://" URL, since source maps encode
+				// sources as URLs. While we could output absolute "file://" URLs, it
+				// will be turned into a relative path when it's written out below for
+				// better readability and to be independent of build directory.
+				source = helpers.FileURLFromFilePath(source).String()
+			} else {
+				// If the path for this file isn't in the "file" namespace, then write
+				// out something arbitrary instead. Source maps encode sources as URLs
+				// but plugins are allowed to put almost anything in the "namespace"
+				// and "path" fields, so we don't attempt to control whether this forms
+				// a valid URL or not.
+				//
+				// The approach used here is to join the namespace with the path text
+				// using a ":" character. It's important to include the namespace
+				// because esbuild considers paths with different namespaces to have
+				// separate identities. And using a ":" means that the path is more
+				// likely to form a valid URL in the source map.
+				//
+				// For example, you could imagine a plugin that uses the "https"
+				// namespace and path text like "//example.com/foo.js", which would
+				// then be joined into the URL "https://example.com/foo.js" here.
+				//
+				// Note that this logic is currently mostly the same as the pretty-
+				// printed paths that esbuild shows to humans in error messages.
+				// However, this code has been forked below as these source map URLs
+				// are intended for code instead of humans, and we don't want the
+				// changes for humans to unintentionally break code that uses them.
+				//
+				// See https://github.com/evanw/esbuild/issues/4078 for more info.
+				if ns := file.InputFile.Source.KeyPath.Namespace; ns != "" {
+					source = fmt.Sprintf("%s:%s", ns, source)
+				}
+				source += file.InputFile.Source.KeyPath.IgnoredSuffix
+			}
 			items = append(items, item{
-				path:           file.InputFile.Source.KeyPath,
-				prettyPath:     file.InputFile.Source.PrettyPath,
+				source:         source,
 				quotedContents: quotedContents,
 			})
 			nextSourcesIndex++
@@ -6915,24 +7075,12 @@ func (c *linkerContext) generateSourceMapForChunk(
 		// Complex case: nested source map
 		sm := file.InputFile.InputSourceMap
 		for i, source := range sm.Sources {
-			path := logger.Path{
-				Namespace: file.InputFile.Source.KeyPath.Namespace,
-				Text:      source,
-			}
-
-			// If this file is in the "file" namespace, change the relative path in
-			// the source map into an absolute path using the directory of this file
-			if path.Namespace == "file" {
-				path.Text = c.fs.Join(c.fs.Dir(file.InputFile.Source.KeyPath.Text), source)
-			}
-
 			var quotedContents []byte
 			if !c.options.ExcludeSourcesContent {
 				quotedContents = dataForSourceMaps[result.sourceIndex].QuotedContents[i]
 			}
 			items = append(items, item{
-				path:           path,
-				prettyPath:     source,
+				source:         source,
 				quotedContents: quotedContents,
 			})
 		}
@@ -6948,14 +7096,19 @@ func (c *linkerContext) generateSourceMapForChunk(
 
 		// Modify the absolute path to the original file to be relative to the
 		// directory that will contain the output file for this chunk
-		if item.path.Namespace == "file" {
-			if relPath, ok := c.fs.Rel(chunkAbsDir, item.path.Text); ok {
+		if sourceURL, err := url.Parse(item.source); err == nil && helpers.IsFileURL(sourceURL) {
+			sourcePath := helpers.FilePathFromFileURL(c.fs, sourceURL)
+			if relPath, ok := c.fs.Rel(chunkAbsDir, sourcePath); ok {
 				// Make sure to always use forward slashes, even on Windows
-				item.prettyPath = strings.ReplaceAll(relPath, "\\", "/")
+				relativeURL := url.URL{Path: strings.ReplaceAll(relPath, "\\", "/")}
+				item.source = relativeURL.String()
+
+				// Replace certain percent encodings for better readability
+				item.source = strings.ReplaceAll(item.source, "%20", " ")
 			}
 		}
 
-		j.AddBytes(helpers.QuoteForJSON(item.prettyPath, c.options.ASCIIOnly))
+		j.AddBytes(helpers.QuoteForJSON(item.source, c.options.ASCIIOnly))
 	}
 	j.AddString("]")
 
@@ -6986,7 +7139,16 @@ func (c *linkerContext) generateSourceMapForChunk(
 	for _, result := range results {
 		chunk := result.sourceMapChunk
 		offset := result.generatedOffset
-		sourcesIndex := sourceIndexToSourcesIndex[result.sourceIndex]
+		sourcesIndex, ok := sourceIndexToSourcesIndex[result.sourceIndex]
+		if !ok {
+			// If there's no sourcesIndex, then every mapping for this result's
+			// sourceIndex were null mappings. We still need to emit the null
+			// mapping, but its source index won't matter.
+			sourcesIndex = 0
+			if !result.isNullEntry {
+				panic("Internal error")
+			}
+		}
 
 		// This should have already been checked earlier
 		if chunk.ShouldIgnore {
@@ -7010,28 +7172,38 @@ func (c *linkerContext) generateSourceMapForChunk(
 			startState.GeneratedColumn += prevColumnOffset
 		}
 
-		// Append the precomputed source map chunk
-		sourcemap.AppendSourceMapChunk(&j, prevEndState, startState, chunk.Buffer)
+		if result.isNullEntry {
+			// Emit a "null" mapping
+			chunk.Buffer.Data = []byte("A")
+			sourcemap.AppendSourceMapChunk(&j, prevEndState, startState, chunk.Buffer)
 
-		// Generate the relative offset to start from next time
-		prevOriginalName := prevEndState.OriginalName
-		prevEndState = chunk.EndState
-		prevEndState.SourceIndex += sourcesIndex
-		if chunk.Buffer.FirstNameOffset.IsValid() {
-			prevEndState.OriginalName += totalQuotedNameLen
+			// Only the generated position was advanced
+			prevEndState.GeneratedLine = startState.GeneratedLine
+			prevEndState.GeneratedColumn = startState.GeneratedColumn
 		} else {
-			// It's possible for a chunk to have mappings but for none of those
-			// mappings to have an associated name. The name is optional and is
-			// omitted when the mapping is for a non-name token or if the final
-			// and original names are the same. In that case we need to restore
-			// the previous original name end state since it wasn't modified after
-			// all. If we don't do this, then files after this will adjust their
-			// name offsets assuming that the previous generated mapping has this
-			// file's offset, which is wrong.
-			prevEndState.OriginalName = prevOriginalName
+			// Append the precomputed source map chunk
+			sourcemap.AppendSourceMapChunk(&j, prevEndState, startState, chunk.Buffer)
+
+			// Generate the relative offset to start from next time
+			prevOriginalName := prevEndState.OriginalName
+			prevEndState = chunk.EndState
+			prevEndState.SourceIndex += sourcesIndex
+			if chunk.Buffer.FirstNameOffset.IsValid() {
+				prevEndState.OriginalName += totalQuotedNameLen
+			} else {
+				// It's possible for a chunk to have mappings but for none of those
+				// mappings to have an associated name. The name is optional and is
+				// omitted when the mapping is for a non-name token or if the final
+				// and original names are the same. In that case we need to restore
+				// the previous original name end state since it wasn't modified after
+				// all. If we don't do this, then files after this will adjust their
+				// name offsets assuming that the previous generated mapping has this
+				// file's offset, which is wrong.
+				prevEndState.OriginalName = prevOriginalName
+			}
+			prevColumnOffset = chunk.FinalGeneratedColumn
+			totalQuotedNameLen += len(chunk.QuotedNames)
 		}
-		prevColumnOffset = chunk.FinalGeneratedColumn
-		totalQuotedNameLen += len(chunk.QuotedNames)
 
 		// If this was all one line, include the column offset from the start
 		if prevEndState.GeneratedLine == 0 {
@@ -7082,7 +7254,8 @@ func (c *linkerContext) recoverInternalError(waitGroup *sync.WaitGroup, sourceIn
 	if r := recover(); r != nil {
 		text := fmt.Sprintf("panic: %v", r)
 		if sourceIndex != runtime.SourceIndex {
-			text = fmt.Sprintf("%s (while printing %q)", text, c.graph.Files[sourceIndex].InputFile.Source.PrettyPath)
+			text = fmt.Sprintf("%s (while printing %q)", text,
+				c.graph.Files[sourceIndex].InputFile.Source.PrettyPaths.Select(c.options.LogPathStyle))
 		}
 		c.log.AddErrorWithNotes(nil, logger.Range{}, text,
 			[]logger.MsgData{{Text: helpers.PrettyPrintedStack()}})

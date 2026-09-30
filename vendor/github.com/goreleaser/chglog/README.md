@@ -40,7 +40,7 @@ changelog formats not being the same.
 ## Install
 
 ```bash
-go get github.com/goreleaser/chglog/cmd/chglog@latest
+go install github.com/goreleaser/chglog/cmd/chglog@latest
 ```
 
 ## Usage
@@ -50,6 +50,7 @@ The first steps are to run `chglog config` to initialize a configuration file
 
 ```yaml
 conventional-commits: false
+exclude-merge-commits: false
 deb:
   distribution: []
   urgency: ""

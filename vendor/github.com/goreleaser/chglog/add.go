@@ -28,6 +28,7 @@ func AddEntry(
 	deb *ChangelogDeb,
 	current ChangeLogEntries,
 	useConventionalCommits bool,
+	excludeMergeCommits bool,
 ) (cle ChangeLogEntries, err error) {
 	var (
 		ref      *plumbing.Reference
@@ -48,7 +49,7 @@ func AddEntry(
 	}
 
 	cle = append(cle, current...)
-	if commits, err = CommitsBetween(gitRepo, from, to); err != nil {
+	if commits, err = CommitsBetween(gitRepo, from, to, excludeMergeCommits); err != nil {
 		return nil, fmt.Errorf("error adding entry: %w", err)
 	}
 
@@ -89,6 +90,9 @@ func CreateEntry(date time.Time, version fmt.Stringer, owner string, notes *Chan
 		msg := processMsg(c.Message)
 		if useConventionalCommits {
 			cc = conventional_commit.ParseConventionalCommit(msg)
+		}
+		if changelog.Packager == "" {
+			changelog.Packager = fmt.Sprintf("%s <%s>", c.Author.Name, c.Author.Email)
 		}
 		changelog.Changes[idx] = &ChangeLogChange{
 			Commit: c.Hash.String(),

@@ -1,3 +1,5 @@
+// Copyright (C) Michael J. Fromberger. All Rights Reserved.
+
 // Copyright (c) 2015, Michael J. Fromberger
 
 // Package shell supports splitting and joining of shell command strings.
@@ -36,7 +38,14 @@ const shouldQuote = `*?[#~=%`
 // These are the separator characters in unquoted text.
 const spaces = " \t\n"
 
-const allQuote = mustQuote + shouldQuote + spaces
+var allQuote [256]bool
+
+func init() {
+	const all = mustQuote + shouldQuote + spaces
+	for i := range len(all) {
+		allQuote[all[i]] = true
+	}
+}
 
 type state int
 
@@ -189,7 +198,7 @@ func (s *Scanner) Next() bool {
 		c, err := s.buf.ReadByte()
 		s.err = err
 		if err == io.EOF {
-			break
+			return s.st != stBreak
 		} else if err != nil {
 			return false
 		}
@@ -208,7 +217,6 @@ func (s *Scanner) Next() bool {
 			panic("unknown action")
 		}
 	}
-	return s.st != stBreak
 }
 
 // Text returns the text of the current token, or "" if there is none.
@@ -274,20 +282,17 @@ func Split(s string) ([]string, bool) {
 }
 
 func quotable(s string) (hasQ, hasOther bool) {
-	const (
-		quote = 1
-		other = 2
-		all   = quote + other
-	)
-	var v uint
-	for i := 0; i < len(s) && v < all; i++ {
+	for i := range len(s) {
 		if s[i] == '\'' {
-			v |= quote
-		} else if strings.IndexByte(allQuote, s[i]) >= 0 {
-			v |= other
+			hasQ = true
+		} else if allQuote[s[i]] {
+			hasOther = true
+		}
+		if hasQ && hasOther {
+			return
 		}
 	}
-	return v&quote != 0, v&other != 0
+	return
 }
 
 var bufPool = &sync.Pool{
@@ -300,26 +305,25 @@ func Quote(s string) string {
 	if s == "" {
 		return "''"
 	}
-	if hasQ, hasOther := quotable(s); !hasQ && !hasOther {
+	hq, ho := quotable(s)
+	if !hq && !ho {
 		return s // no quotation needed
 	}
 	buf := bufPool.Get().(*bytes.Buffer)
 	defer bufPool.Put(buf)
 	buf.Reset()
 
-	quote(s, buf)
+	quote(s, buf, hq, ho)
 	return buf.String()
 }
 
 // quote appends the quoted representation of s to buf.
 // Any existing contents in buf are not modified.
-func quote(s string, buf *bytes.Buffer) {
+func quote(s string, buf *bytes.Buffer, hasQ, hasOther bool) {
 	if s == "" {
 		buf.WriteString("''")
 		return
 	}
-
-	hasQ, hasOther := quotable(s)
 	if !hasQ && !hasOther {
 		buf.WriteString(s)
 		return // fast path: nothing needs quotation
@@ -356,10 +360,12 @@ func Join(ss []string) string {
 	defer bufPool.Put(buf)
 	buf.Reset()
 
-	quote(ss[0], buf)
+	hq, ho := quotable(ss[0])
+	quote(ss[0], buf, hq, ho)
 	for _, s := range ss[1:] {
 		buf.WriteByte(' ')
-		quote(s, buf)
+		hq, ho := quotable(s)
+		quote(s, buf, hq, ho)
 	}
 	return buf.String()
 }

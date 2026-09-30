@@ -6,6 +6,7 @@ package ast
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/evanw/esbuild/internal/helpers"
 	"github.com/evanw/esbuild/internal/logger"
@@ -77,6 +78,18 @@ func (kind ImportKind) MustResolveToCSS() bool {
 	}
 	return false
 }
+
+type ImportPhase uint8
+
+const (
+	EvaluationPhase ImportPhase = iota
+
+	// See: https://github.com/tc39/proposal-defer-import-eval
+	DeferPhase
+
+	// See: https://github.com/tc39/proposal-source-phase-imports
+	SourcePhase
+)
 
 type ImportRecordFlags uint16
 
@@ -167,6 +180,7 @@ type ImportRecord struct {
 	CopySourceIndex Index32
 
 	Flags ImportRecordFlags
+	Phase ImportPhase
 	Kind  ImportKind
 }
 
@@ -798,15 +812,16 @@ func (minifier NameMinifier) NumberToMinifiedName(i int) string {
 	n_tail := len(minifier.tail)
 
 	j := i % n_head
-	name := minifier.head[j : j+1]
+	var name strings.Builder
+	name.WriteString(minifier.head[j : j+1])
 	i = i / n_head
 
 	for i > 0 {
 		i--
 		j := i % n_tail
-		name += minifier.tail[j : j+1]
+		name.WriteString(minifier.tail[j : j+1])
 		i = i / n_tail
 	}
 
-	return name
+	return name.String()
 }

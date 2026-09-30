@@ -4,8 +4,10 @@ package rpm
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/goreleaser/chglog"
 	"github.com/goreleaser/nfpm/v2"
 	"github.com/goreleaser/nfpm/v2/files"
+	"github.com/goreleaser/nfpm/v2/internal/modtime"
 	"github.com/goreleaser/nfpm/v2/internal/sign"
 )
 
@@ -25,6 +28,11 @@ const (
 	tagChangelogName = 1081
 	// https://github.com/rpm-software-management/rpm/blob/master/lib/rpmtag.h#L154
 	tagChangelogText = 1082
+	// https://github.com/rpm-software-management/rpm/blob/master/include/rpm/rpmtag.h#L183
+	tagSourcePackage = 1106
+	// RPMSENSE_SCRIPT_POST marks a dependency as Requires(post).
+	// https://github.com/rpm-software-management/rpm/blob/master/include/rpm/rpmds.h
+	rpmSenseScriptPost = 1 << 10
 
 	// Symbolic link
 	tagLink = 0o120000
@@ -39,21 +47,37 @@ const (
 {{- end}}{{- end}}`
 )
 
-const packagerName = "rpm"
-
 // nolint: gochecknoinits
 func init() {
-	nfpm.RegisterPackager(packagerName, Default)
+	nfpm.RegisterPackager(formatRPM.String(), DefaultRPM)
+	nfpm.RegisterPackager(formatSRPM.String(), DefaultSRPM)
 }
 
-// Default RPM packager.
+// DefaultRPM RPM packager.
 // nolint: gochecknoglobals
-var Default = &RPM{}
+var DefaultRPM = &RPM{formatRPM}
+
+// DefaultSRPM SRPM packager.
+// nolint: gochecknoglobals
+var DefaultSRPM = &RPM{formatSRPM}
+
+type format uint
+
+const (
+	formatRPM format = iota
+	formatSRPM
+)
+
+// String implements fmt.Stringer.
+func (f format) String() string { return [2]string{"rpm", "srpm"}[f] }
 
 // RPM is a RPM packager implementation.
-type RPM struct{}
+type RPM struct {
+	format format
+}
 
 // https://docs.fedoraproject.org/ro/Fedora_Draft_Documentation/0.1/html/RPM_Guide/ch01s03.html
+// https://github.com/rpm-software-management/rpm/blob/4a9b7b5908d8b463a836b51322242677677bd8b7/lib/rpmrc.cc#L1167
 // nolint: gochecknoglobals
 var archToRPM = map[string]string{
 	"all":      "noarch",
@@ -66,7 +90,8 @@ var archToRPM = map[string]string{
 	"mips64le": "mips64el",
 	"mipsle":   "mipsel",
 	"mips":     "mips",
-	// TODO: other arches
+	"loong64":  "loongarch64",
+	"riscv64":  "riscv64",
 }
 
 func setDefaults(info *nfpm.Info) *nfpm.Info {
@@ -76,41 +101,45 @@ func setDefaults(info *nfpm.Info) *nfpm.Info {
 		info.Arch = arch
 	}
 
-	info.Release = defaultTo(info.Release, "1")
-
+	info.Release = cmp.Or(info.Release, "1")
+	info.RPM.Compression = cmp.Or(info.RPM.Compression, "gzip")
 	return info
 }
 
 // ConventionalFileName returns a file name according
 // to the conventions for RPM packages. See:
 // http://ftp.rpm.org/max-rpm/ch-rpm-file-format.html
-func (*RPM) ConventionalFileName(info *nfpm.Info) string {
+func (r *RPM) ConventionalFileName(info *nfpm.Info) string {
 	info = setDefaults(info)
 
 	// name-version-release.architecture.rpm
 	return fmt.Sprintf(
-		"%s-%s-%s.%s.rpm",
+		"%s-%s-%s.%s%s",
 		info.Name,
 		formatVersion(info),
 		defaultTo(info.Release, "1"),
 		info.Arch,
+		r.ConventionalExtension(),
 	)
 }
 
 // ConventionalExtension returns the file name conventionally used for RPM packages
-func (*RPM) ConventionalExtension() string {
+func (r *RPM) ConventionalExtension() string {
+	if r.format == formatSRPM {
+		return ".src.rpm"
+	}
 	return ".rpm"
 }
 
 // Package writes a new RPM package to the given writer using the given info.
-func (*RPM) Package(info *nfpm.Info, w io.Writer) (err error) {
+func (r *RPM) Package(info *nfpm.Info, w io.Writer) (err error) {
 	var (
 		meta *rpmpack.RPMMetaData
 		rpm  *rpmpack.RPM
 	)
 	info = setDefaults(info)
 
-	err = nfpm.PrepareForPackager(info, packagerName)
+	err = nfpm.PrepareForPackager(info, "rpm")
 	if err != nil {
 		return err
 	}
@@ -120,6 +149,10 @@ func (*RPM) Package(info *nfpm.Info, w io.Writer) (err error) {
 	}
 	if rpm, err = rpmpack.NewRPM(*meta); err != nil {
 		return err
+	}
+
+	if r.format == formatSRPM {
+		rpm.AddCustomTag(tagSourcePackage, rpmpack.EntryUint32([]uint32{1}))
 	}
 
 	if info.RPM.Signature.KeyFile != "" {
@@ -204,16 +237,21 @@ func buildRPMMeta(info *nfpm.Info) (*rpmpack.RPMMetaData, error) {
 		suggests,
 		conflicts rpmpack.Relations
 	)
-	if info.RPM.Compression == "" {
-		info.RPM.Compression = "gzip:-1"
-	}
-	if epoch, err = strconv.ParseUint(defaultTo(info.Epoch, "0"), 10, 32); err != nil {
-		return nil, err
+
+	if info.Epoch == "" {
+		epoch = uint64(rpmpack.NoEpoch)
+	} else {
+		if epoch, err = strconv.ParseUint(info.Epoch, 10, 32); err != nil {
+			return nil, err
+		}
 	}
 	if provides, err = toRelation(info.Provides); err != nil {
 		return nil, err
 	}
 	if depends, err = toRelation(info.Depends); err != nil {
+		return nil, err
+	}
+	if err = addPostRequires(&depends, info.RPM.Requires.Post); err != nil {
 		return nil, err
 	}
 	if recommends, err = toRelation(info.Recommends); err != nil {
@@ -229,9 +267,12 @@ func buildRPMMeta(info *nfpm.Info) (*rpmpack.RPMMetaData, error) {
 		return nil, err
 	}
 
-	hostname, err := os.Hostname()
-	if err != nil {
-		return nil, err
+	hostname := info.RPM.BuildHost
+	if hostname == "" {
+		hostname, err = os.Hostname()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &rpmpack.RPMMetaData{
@@ -256,7 +297,7 @@ func buildRPMMeta(info *nfpm.Info) (*rpmpack.RPMMetaData, error) {
 		Suggests:    suggests,
 		Conflicts:   conflicts,
 		Compressor:  info.RPM.Compression,
-		BuildTime:   time.Now(),
+		BuildTime:   modtime.Get(info.MTime),
 		BuildHost:   hostname,
 	}, nil
 }
@@ -265,7 +306,7 @@ func formatVersion(info *nfpm.Info) string {
 	version := info.Version
 
 	if info.Prerelease != "" {
-		version += "~" + info.Prerelease
+		version += "~" + strings.ReplaceAll(info.Prerelease, "-", "_")
 	}
 
 	if info.VersionMetadata != "" {
@@ -291,6 +332,19 @@ func toRelation(items []string) (rpmpack.Relations, error) {
 	}
 
 	return relations, nil
+}
+
+func addPostRequires(relations *rpmpack.Relations, items []string) error {
+	for idx := range items {
+		relation, err := rpmpack.NewRelation(items[idx])
+		if err != nil {
+			return err
+		}
+		relation.Sense |= rpmSenseScriptPost
+		*relations = append(*relations, relation)
+	}
+
+	return nil
 }
 
 func addScriptFiles(info *nfpm.Info, rpm *rpmpack.RPM) error {
@@ -341,12 +395,22 @@ func addScriptFiles(info *nfpm.Info, rpm *rpmpack.RPM) error {
 		rpm.AddPosttrans(string(data))
 	}
 
+	if info.RPM.Scripts.Verify != "" {
+		data, err := os.ReadFile(info.RPM.Scripts.Verify)
+		if err != nil {
+			return err
+		}
+		rpm.AddVerifyScript(string(data))
+	}
+
 	return nil
 }
 
+// TODO: pass mtime down in all content types
 func createFilesInsideRPM(info *nfpm.Info, rpm *rpmpack.RPM) (err error) {
+	mtime := modtime.Get(info.MTime)
 	for _, content := range info.Contents {
-		if content.Packager != "" && content.Packager != packagerName {
+		if content.Packager != "" && content.Packager != "rpm" {
 			continue
 		}
 
@@ -357,6 +421,8 @@ func createFilesInsideRPM(info *nfpm.Info, rpm *rpmpack.RPM) (err error) {
 			file, err = asRPMFile(content, rpmpack.ConfigFile)
 		case files.TypeConfigNoReplace:
 			file, err = asRPMFile(content, rpmpack.ConfigFile|rpmpack.NoReplaceFile)
+		case files.TypeConfigMissingOK:
+			file, err = asRPMFile(content, rpmpack.ConfigFile|rpmpack.MissingOkFile)
 		case files.TypeRPMGhost:
 			if content.FileInfo.Mode == 0 {
 				content.FileInfo.Mode = os.FileMode(0o644)
@@ -372,7 +438,7 @@ func createFilesInsideRPM(info *nfpm.Info, rpm *rpmpack.RPM) (err error) {
 		case files.TypeSymlink:
 			file = asRPMSymlink(content)
 		case files.TypeDir:
-			file = asRPMDirectory(content)
+			file = asRPMDirectory(content, mtime)
 		case files.TypeImplicitDir:
 			// we don't need to add imlicit directories to RPMs
 			continue
@@ -393,11 +459,11 @@ func createFilesInsideRPM(info *nfpm.Info, rpm *rpmpack.RPM) (err error) {
 	return nil
 }
 
-func asRPMDirectory(content *files.Content) *rpmpack.RPMFile {
+func asRPMDirectory(content *files.Content, mtime time.Time) *rpmpack.RPMFile {
 	return &rpmpack.RPMFile{
 		Name:  content.Destination,
-		Mode:  uint(content.Mode()) | tagDirectory,
-		MTime: uint32(time.Now().Unix()),
+		Mode:  normalizeFileMode(content.Mode()) | tagDirectory,
+		MTime: uint32(mtime.Unix()),
 		Owner: content.FileInfo.Owner,
 		Group: content.FileInfo.Group,
 	}
@@ -423,10 +489,30 @@ func asRPMFile(content *files.Content, fileType rpmpack.FileType) (*rpmpack.RPMF
 	return &rpmpack.RPMFile{
 		Name:  content.Destination,
 		Body:  data,
-		Mode:  uint(content.FileInfo.Mode),
+		Mode:  normalizeFileMode(content.FileInfo.Mode),
 		MTime: uint32(content.FileInfo.MTime.Unix()),
 		Owner: content.FileInfo.Owner,
 		Group: content.FileInfo.Group,
 		Type:  fileType,
 	}, nil
+}
+
+func normalizeFileMode(mode fs.FileMode) uint {
+	rpmMode := uint(mode.Perm())
+
+	// Go's os.FileMode stores setuid/setgid/sticky at high bits
+	// (fs.ModeSetuid, etc.), but YAML-parsed octal values like 04755
+	// place them at the traditional Unix positions (0o4000, 0o2000,
+	// 0o1000). We must check both encodings.
+	if mode&fs.ModeSetuid != 0 || uint(mode)&0o4000 != 0 {
+		rpmMode |= 0o4000
+	}
+	if mode&fs.ModeSetgid != 0 || uint(mode)&0o2000 != 0 {
+		rpmMode |= 0o2000
+	}
+	if mode&fs.ModeSticky != 0 || uint(mode)&0o1000 != 0 {
+		rpmMode |= 0o1000
+	}
+
+	return rpmMode
 }

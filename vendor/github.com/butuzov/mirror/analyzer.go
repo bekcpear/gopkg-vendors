@@ -5,11 +5,11 @@ import (
 	"go/ast"
 	"strings"
 
-	"github.com/butuzov/mirror/internal/checker"
-
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
+
+	"github.com/butuzov/mirror/internal/checker"
 )
 
 func NewAnalyzer() *analysis.Analyzer {
@@ -44,9 +44,9 @@ func Run(pass *analysis.Pass, withTests bool) []*checker.Violation {
 		BytesFunctions, BytesBufferMethods,
 		RegexpFunctions, RegexpRegexpMethods,
 		StringFunctions, StringsBuilderMethods,
+		MaphashMethods, MaphashFunctions,
 		BufioMethods, HTTPTestMethods,
-		OsFileMethods, MaphashMethods,
-		UTF8Functions,
+		OsFileMethods, UTF8Functions,
 	)
 
 	check.Type = checker.WrapType(pass.TypesInfo)

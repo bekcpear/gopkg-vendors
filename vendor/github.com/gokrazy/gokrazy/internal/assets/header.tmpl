@@ -63,11 +63,11 @@ table {
           <td>{{ .SBOMHash | printSBOMHash }}</td>
         </tr>
 	{{ end }}
-        {{ if .EEPROM }}
+        {{ if (ne .FirmwareVersion "") }}
         <tr>
-          <th>EEPROM</th>
+          <th>Firmware</th>
           <td style="vertical-align: top">
-	    {{ .EEPROM.FirmwareDate }}<br>
+	    {{ .FirmwareVersion }}<br>
 	  </td>
         </tr>
         {{ end }}

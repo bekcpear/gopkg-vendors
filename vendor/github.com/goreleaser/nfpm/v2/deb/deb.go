@@ -3,15 +3,20 @@ package deb
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"crypto/md5" // nolint:gas
 	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -21,6 +26,8 @@ import (
 	"github.com/goreleaser/nfpm/v2"
 	"github.com/goreleaser/nfpm/v2/deprecation"
 	"github.com/goreleaser/nfpm/v2/files"
+	"github.com/goreleaser/nfpm/v2/internal/maps"
+	"github.com/goreleaser/nfpm/v2/internal/modtime"
 	"github.com/goreleaser/nfpm/v2/internal/sign"
 	"github.com/klauspost/compress/zstd"
 	"github.com/ulikunitz/xz"
@@ -33,6 +40,7 @@ func init() {
 	nfpm.RegisterPackager(packagerName, Default)
 }
 
+// https://wiki.debian.org/ArchitectureSpecificsMemo
 // nolint: gochecknoglobals
 var archToDebian = map[string]string{
 	"386":      "i386",
@@ -44,6 +52,9 @@ var archToDebian = map[string]string{
 	"mipsle":   "mipsel",
 	"ppc64le":  "ppc64el",
 	"s390":     "s390x",
+	"x86_64":   "amd64",
+	"aarch64":  "arm64",
+	"riscv64":  "riscv64",
 }
 
 func ensureValidArch(info *nfpm.Info) *nfpm.Info {
@@ -51,6 +62,14 @@ func ensureValidArch(info *nfpm.Info) *nfpm.Info {
 		info.Arch = info.Deb.Arch
 	} else if arch, ok := archToDebian[info.Arch]; ok {
 		info.Arch = arch
+	}
+
+	switch info.Deb.ArchVariant {
+	case "", "amd64v1", "amd64v2", "amd64v3", "amd64v4":
+		// ignore empty, ignore already valid
+	case "v1", "v2", "v3", "v4":
+		// prefix 'amd64' to valid versions
+		info.Deb.ArchVariant = "amd64" + info.Deb.ArchVariant
 	}
 
 	return info
@@ -124,15 +143,17 @@ func (d *Deb) Package(info *nfpm.Info, deb io.Writer) (err error) { // nolint: f
 		return fmt.Errorf("cannot write ar header to deb file: %w", err)
 	}
 
-	if err := addArFile(w, "debian-binary", debianBinary); err != nil {
+	mtime := modtime.Get(info.MTime)
+
+	if err := addArFile(w, "debian-binary", debianBinary, mtime); err != nil {
 		return fmt.Errorf("cannot pack debian-binary: %w", err)
 	}
 
-	if err := addArFile(w, "control.tar.gz", controlTarGz); err != nil {
+	if err := addArFile(w, "control.tar.gz", controlTarGz, mtime); err != nil {
 		return fmt.Errorf("cannot add control.tar.gz to deb: %w", err)
 	}
 
-	if err := addArFile(w, dataTarballName, dataTarball); err != nil {
+	if err := addArFile(w, dataTarballName, dataTarball, mtime); err != nil {
 		return fmt.Errorf("cannot add data.tar.gz to deb: %w", err)
 	}
 
@@ -142,7 +163,7 @@ func (d *Deb) Package(info *nfpm.Info, deb io.Writer) (err error) { // nolint: f
 			return err
 		}
 
-		if err := addArFile(w, "_gpg"+sigType, sig); err != nil {
+		if err := addArFile(w, "_gpg"+sigType, sig, mtime); err != nil {
 			return &nfpm.ErrSigningFailure{
 				Err: fmt.Errorf("add signature to ar file: %w", err),
 			}
@@ -225,7 +246,9 @@ Signer: {{ .Signer }}
 Date: {{ .Date }}
 Role: {{ .Role }}
 Files:
-{{range .Files}}{{ .Md5Sum }} {{ .Sha1Sum }} {{ .Size }} {{ .Name }}{{end}}
+{{range .Files -}}
+{{"\t"}}{{ hex .Md5Sum }} {{ hex .Sha1Sum }} {{ .Size }} {{ .Name }}
+{{end -}}
 `
 
 type dpkgSigData struct {
@@ -236,17 +259,18 @@ type dpkgSigData struct {
 	Info   *nfpm.Info
 }
 type dpkgSigFileLine struct {
-	Md5Sum  [16]byte
-	Sha1Sum [20]byte
+	Md5Sum  []byte
+	Sha1Sum []byte
 	Size    int
 	Name    string
 }
 
 func newDpkgSigFileLine(name string, fileContent []byte) dpkgSigFileLine {
+	md5Sum, sha1Sum := md5.Sum(fileContent), sha1.Sum(fileContent)
 	return dpkgSigFileLine{
 		Name:    name,
-		Md5Sum:  md5.Sum(fileContent),
-		Sha1Sum: sha1.Sum(fileContent),
+		Md5Sum:  md5Sum[:],
+		Sha1Sum: sha1Sum[:],
 		Size:    len(fileContent),
 	}
 }
@@ -254,7 +278,7 @@ func newDpkgSigFileLine(name string, fileContent []byte) dpkgSigFileLine {
 func readDpkgSigData(info *nfpm.Info, debianBinary, controlTarGz, dataTarball []byte) (io.Reader, error) {
 	data := dpkgSigData{
 		Signer: info.Deb.Signature.Signer,
-		Date:   time.Now(),
+		Date:   modtime.Get(info.MTime),
 		Role:   info.Deb.Signature.Type,
 		Files: []dpkgSigFileLine{
 			newDpkgSigFileLine("debian-binary", debianBinary),
@@ -262,7 +286,9 @@ func readDpkgSigData(info *nfpm.Info, debianBinary, controlTarGz, dataTarball []
 			newDpkgSigFileLine("data.tar.gz", dataTarball),
 		},
 	}
-	temp, _ := template.New("dpkg-sig").Parse(dpkgSigTemplate)
+	temp, _ := template.New("dpkg-sig").Funcs(template.FuncMap{
+		"hex": hex.EncodeToString,
+	}).Parse(dpkgSigTemplate)
 	buf := &bytes.Buffer{}
 	err := temp.Execute(buf, data)
 	if err != nil {
@@ -275,9 +301,7 @@ func (*Deb) SetPackagerDefaults(info *nfpm.Info) {
 	// Priority should be set on all packages per:
 	//   https://www.debian.org/doc/debian-policy/ch-archive.html#priorities
 	// "optional" seems to be the safe/sane default here
-	if info.Priority == "" {
-		info.Priority = "optional"
-	}
+	info.Priority = cmp.Or(info.Priority, "optional")
 
 	// The safe thing here feels like defaulting to something like below.
 	// That will prevent existing configs from breaking anyway...  Wondering
@@ -287,14 +311,16 @@ func (*Deb) SetPackagerDefaults(info *nfpm.Info) {
 		deprecation.Println("Leaving the 'maintainer' field unset will not be allowed in a future version")
 		info.Maintainer = "Unset Maintainer <unset@localhost>"
 	}
+
+	info.Deb.Compression = cmp.Or(info.Deb.Compression, "gzip")
 }
 
-func addArFile(w *ar.Writer, name string, body []byte) error {
+func addArFile(w *ar.Writer, name string, body []byte, date time.Time) error {
 	header := ar.Header{
 		Name:    files.ToNixPath(name),
 		Size:    int64(len(body)),
 		Mode:    0o644,
-		ModTime: time.Now(),
+		ModTime: date,
 	}
 	if err := w.WriteHeader(&header); err != nil {
 		return fmt.Errorf("cannot write file header: %w", err)
@@ -317,18 +343,55 @@ func createDataTarball(info *nfpm.Info) (dataTarBall, md5sums []byte,
 		dataTarballWriteCloser io.WriteCloser
 	)
 
-	switch info.Deb.Compression {
-	case "", "gzip": // the default for now
-		dataTarballWriteCloser = gzip.NewWriter(&dataTarball)
+	parts := strings.Split(info.Deb.Compression, ":")
+	if len(parts) > 2 {
+		return nil, nil, 0, "", fmt.Errorf("malformed compressor setting: %s", info.Deb.Compression)
+	}
+
+	compressorType := parts[0]
+	compressorLevel := ""
+	if len(parts) == 2 {
+		compressorLevel = parts[1]
+	}
+
+	switch compressorType {
+	case "gzip":
+		level := 9
+		if compressorLevel != "" {
+			var err error
+			level, err = strconv.Atoi(compressorLevel)
+			if err != nil {
+				return nil, nil, 0, "", fmt.Errorf("parse gzip compressor level: %w", err)
+			}
+		}
+		dataTarballWriteCloser, err = gzip.NewWriterLevel(&dataTarball, level)
+		if err != nil {
+			return nil, nil, 0, "", err
+		}
 		name = "data.tar.gz"
 	case "xz":
+		if compressorLevel != "" {
+			return nil, nil, 0, "", fmt.Errorf("no compressor level supported for xz: %s", compressorLevel)
+		}
 		dataTarballWriteCloser, err = xz.NewWriter(&dataTarball)
 		if err != nil {
 			return nil, nil, 0, "", err
 		}
 		name = "data.tar.xz"
 	case "zstd":
-		dataTarballWriteCloser, err = zstd.NewWriter(&dataTarball)
+		level := zstd.SpeedBetterCompression
+		if compressorLevel != "" {
+			if intLevel, err := strconv.Atoi(compressorLevel); err == nil {
+				level = zstd.EncoderLevelFromZstd(intLevel)
+			} else {
+				var ok bool
+				ok, level = zstd.EncoderLevelFromString(compressorLevel)
+				if !ok {
+					return nil, nil, 0, "", fmt.Errorf("invalid zstd compressor level: %s", compressorLevel)
+				}
+			}
+		}
+		dataTarballWriteCloser, err = zstd.NewWriter(&dataTarball, zstd.WithEncoderLevel(level))
 		if err != nil {
 			return nil, nil, 0, "", err
 		}
@@ -375,40 +438,49 @@ func fillDataTar(info *nfpm.Info, w io.Writer) (md5sums []byte, instSize int64, 
 }
 
 func createFilesInsideDataTar(info *nfpm.Info, tw *tar.Writer) (md5buf bytes.Buffer, instSize int64, err error) {
-	// create files and implicit directories
 	for _, file := range info.Contents {
-		var size int64 // declare early to avoid shadowing err
 		switch file.Type {
 		case files.TypeRPMGhost:
-			// skip ghost files in deb
-			continue
+			continue // skip ghost files in deb
 		case files.TypeDir, files.TypeImplicitDir:
-			err = tw.WriteHeader(&tar.Header{
-				Name:     files.AsExplicitRelativePath(file.Destination),
-				Mode:     int64(file.FileInfo.Mode),
-				Typeflag: tar.TypeDir,
-				Format:   tar.FormatGNU,
-				Uname:    file.FileInfo.Owner,
-				Gname:    file.FileInfo.Group,
-				ModTime:  file.FileInfo.MTime,
-			})
+			header, err := tarHeader(file, info.MTime)
+			if err != nil {
+				return md5buf, 0, fmt.Errorf("build directory header for %q: %w",
+					file.Destination, err)
+			}
+
+			err = tw.WriteHeader(header)
+			if err != nil {
+				return md5buf, 0, fmt.Errorf("create directory %q in data tar: %w",
+					header.Name, err)
+			}
 		case files.TypeSymlink:
-			err = newItemInsideTar(tw, []byte{}, &tar.Header{
-				Name:     files.AsExplicitRelativePath(file.Destination),
-				Linkname: file.Source,
-				Typeflag: tar.TypeSymlink,
-				ModTime:  file.FileInfo.MTime,
-				Format:   tar.FormatGNU,
-			})
+			header, err := tarHeader(file, info.MTime)
+			if err != nil {
+				return md5buf, 0, fmt.Errorf("build symlink header for %q: %w",
+					file.Destination, err)
+			}
+
+			err = newItemInsideTar(tw, []byte{}, header)
+			if err != nil {
+				return md5buf, 0, fmt.Errorf("create symlink %q in data tar: %w",
+					header.Linkname, err)
+			}
 		case files.TypeDebChangelog:
-			size, err = createChangelogInsideDataTar(tw, &md5buf, info, file.Destination)
+			size, err := createChangelogInsideDataTar(tw, &md5buf, info, file.Destination)
+			if err != nil {
+				return md5buf, 0, fmt.Errorf("write changelog to data tar: %w", err)
+			}
+
+			instSize += size
 		default:
-			size, err = copyToTarAndDigest(file, tw, &md5buf)
+			size, err := copyToTarAndDigest(file, tw, &md5buf)
+			if err != nil {
+				return md5buf, 0, fmt.Errorf("write %q to data tar: %w", file.Destination, err)
+			}
+
+			instSize += size
 		}
-		if err != nil {
-			return md5buf, 0, err
-		}
-		instSize += size
 	}
 
 	return md5buf, instSize, nil
@@ -422,18 +494,11 @@ func copyToTarAndDigest(file *files.Content, tw *tar.Writer, md5w io.Writer) (in
 	// don't care if it errs while closing...
 	defer tarFile.Close() // nolint: errcheck,gosec
 
-	header, err := tar.FileInfoHeader(file, file.Source)
+	header, err := tarHeader(file)
 	if err != nil {
 		return 0, err
 	}
 
-	// tar.FileInfoHeader only uses file.Mode().Perm() which masks the mode with
-	// 0o777 which we don't want because we want to be able to set the suid bit.
-	header.Mode = int64(file.Mode())
-	header.Format = tar.FormatGNU
-	header.Name = files.AsExplicitRelativePath(file.Destination)
-	header.Uname = file.FileInfo.Owner
-	header.Gname = file.FileInfo.Group
 	if err := tw.WriteHeader(header); err != nil {
 		return 0, fmt.Errorf("cannot write header of %s to data.tar.gz: %w", file.Source, err)
 	}
@@ -441,7 +506,7 @@ func copyToTarAndDigest(file *files.Content, tw *tar.Writer, md5w io.Writer) (in
 	if _, err := io.Copy(tw, io.TeeReader(tarFile, digest)); err != nil {
 		return 0, fmt.Errorf("%s: failed to copy: %w", file.Source, err)
 	}
-	if _, err := fmt.Fprintf(md5w, "%x  %s\n", digest.Sum(nil), header.Name); err != nil {
+	if _, err := fmt.Fprintf(md5w, "%x  %s\n", digest.Sum(nil), files.AsRelativePath(header.Name)); err != nil {
 		return 0, fmt.Errorf("%s: failed to write md5: %w", file.Source, err)
 	}
 	return file.Size(), nil
@@ -504,12 +569,12 @@ func createChangelogInsideDataTar(
 		g,
 		"%x  %s\n",
 		digest.Sum(nil),
-		files.AsExplicitRelativePath(fileName),
+		files.AsRelativePath(fileName),
 	); err != nil {
 		return 0, err
 	}
 
-	if err = newFileInsideTar(tarw, fileName, changelogData); err != nil {
+	if err = newFileInsideTar(tarw, fileName, changelogData, modtime.Get(info.MTime)); err != nil {
 		return 0, err
 	}
 
@@ -553,19 +618,21 @@ func createControl(instSize int64, md5sums []byte, info *nfpm.Info) (controlTarG
 		return nil, err
 	}
 
-	filesToCreate := map[string][]byte{
-		"./control":   body.Bytes(),
-		"./md5sums":   md5sums,
-		"./conffiles": conffiles(info),
+	mtime := modtime.Get(info.MTime)
+	if err := newFileInsideTar(out, "./control", body.Bytes(), mtime); err != nil {
+		return nil, err
+	}
+	if err := newFileInsideTar(out, "./md5sums", md5sums, mtime); err != nil {
+		return nil, err
+	}
+	if conffiles, ok := conffiles(info); ok {
+		if err := newFileInsideTar(out, "./conffiles", conffiles, mtime); err != nil {
+			return nil, err
+		}
 	}
 
-	triggers := createTriggers(info)
-	if len(triggers) > 0 {
-		filesToCreate["./triggers"] = triggers
-	}
-
-	for name, content := range filesToCreate {
-		if err := newFileInsideTar(out, name, content); err != nil {
+	if triggers := createTriggers(info); len(triggers) > 0 {
+		if err := newFileInsideTar(out, "./triggers", triggers, mtime); err != nil {
 			return nil, err
 		}
 	}
@@ -575,41 +642,44 @@ func createControl(instSize int64, md5sums []byte, info *nfpm.Info) (controlTarG
 		mode     int64
 	}
 
-	specialFiles := map[string]*fileAndMode{}
-	specialFiles[info.Scripts.PreInstall] = &fileAndMode{
-		fileName: "preinst",
-		mode:     0o755,
-	}
-	specialFiles[info.Scripts.PostInstall] = &fileAndMode{
-		fileName: "postinst",
-		mode:     0o755,
-	}
-	specialFiles[info.Scripts.PreRemove] = &fileAndMode{
-		fileName: "prerm",
-		mode:     0o755,
-	}
-	specialFiles[info.Scripts.PostRemove] = &fileAndMode{
-		fileName: "postrm",
-		mode:     0o755,
-	}
-	specialFiles[info.Overridables.Deb.Scripts.Rules] = &fileAndMode{
-		fileName: "rules",
-		mode:     0o755,
-	}
-	specialFiles[info.Overridables.Deb.Scripts.Templates] = &fileAndMode{
-		fileName: "templates",
-		mode:     0o644,
-	}
-	specialFiles[info.Overridables.Deb.Scripts.Config] = &fileAndMode{
-		fileName: "config",
-		mode:     0o755,
+	specialFiles := map[string]*fileAndMode{
+		"preinst": {
+			fileName: info.Scripts.PreInstall,
+			mode:     0o755,
+		},
+		"postinst": {
+			fileName: info.Scripts.PostInstall,
+			mode:     0o755,
+		},
+		"prerm": {
+			fileName: info.Scripts.PreRemove,
+			mode:     0o755,
+		},
+		"postrm": {
+			fileName: info.Scripts.PostRemove,
+			mode:     0o755,
+		},
+		"rules": {
+			fileName: info.Deb.Scripts.Rules,
+			mode:     0o755,
+		},
+		"templates": {
+			fileName: info.Deb.Scripts.Templates,
+			mode:     0o644,
+		},
+		"config": {
+			fileName: info.Deb.Scripts.Config,
+			mode:     0o755,
+		},
 	}
 
-	for path, destMode := range specialFiles {
-		if path != "" {
-			if err := newFilePathInsideTar(out, path, destMode.fileName, destMode.mode); err != nil {
-				return nil, err
-			}
+	for _, filename := range maps.Keys(specialFiles) {
+		dets := specialFiles[filename]
+		if dets.fileName == "" {
+			continue
+		}
+		if err := newFilePathInsideTar(out, dets.fileName, filename, dets.mode, mtime); err != nil {
+			return nil, err
 		}
 	}
 
@@ -632,23 +702,19 @@ func newItemInsideTar(out *tar.Writer, content []byte, header *tar.Header) error
 	return nil
 }
 
-func newFileInsideTar(out *tar.Writer, name string, content []byte) error {
+func newFileInsideTar(out *tar.Writer, name string, content []byte, modtime time.Time) error {
 	return newItemInsideTar(out, content, &tar.Header{
 		Name:     files.AsExplicitRelativePath(name),
 		Size:     int64(len(content)),
 		Mode:     0o644,
-		ModTime:  time.Now(),
+		ModTime:  modtime,
 		Typeflag: tar.TypeReg,
 		Format:   tar.FormatGNU,
 	})
 }
 
-func newFilePathInsideTar(out *tar.Writer, path, dest string, mode int64) error {
-	file, err := os.Open(path) //nolint:gosec
-	if err != nil {
-		return err
-	}
-	content, err := io.ReadAll(file)
+func newFilePathInsideTar(out *tar.Writer, path, dest string, mode int64, modtime time.Time) error {
+	content, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
@@ -656,22 +722,26 @@ func newFilePathInsideTar(out *tar.Writer, path, dest string, mode int64) error 
 		Name:     files.AsExplicitRelativePath(dest),
 		Size:     int64(len(content)),
 		Mode:     mode,
-		ModTime:  time.Now(),
+		ModTime:  modtime,
 		Typeflag: tar.TypeReg,
 		Format:   tar.FormatGNU,
 	})
 }
 
-func conffiles(info *nfpm.Info) []byte {
+func conffiles(info *nfpm.Info) ([]byte, bool) {
 	// nolint: prealloc
 	var confs []string
 	for _, file := range info.Contents {
 		switch file.Type {
-		case files.TypeConfig, files.TypeConfigNoReplace:
+		case files.TypeConfig, files.TypeConfigNoReplace, files.TypeConfigMissingOK:
 			confs = append(confs, files.NormalizeAbsoluteFilePath(file.Destination))
 		}
 	}
-	return []byte(strings.Join(confs, "\n") + "\n")
+	if len(confs) == 0 {
+		return nil, false
+	}
+
+	return []byte(strings.Join(confs, "\n") + "\n"), true
 }
 
 func createTriggers(info *nfpm.Info) []byte {
@@ -710,6 +780,9 @@ Section: {{.Info.Section}}
 Priority: {{.Info.Priority}}
 Architecture: {{ if ne .Info.Platform "linux"}}{{ .Info.Platform }}-{{ end }}{{.Info.Arch}}
 {{- /* Optional fields */ -}}
+{{- if .Info.Deb.ArchVariant}}
+Architecture-Variant: {{ .Info.Deb.ArchVariant }}
+{{- end }}
 {{- if .Info.Maintainer}}
 Maintainer: {{.Info.Maintainer}}
 {{- end }}
@@ -762,8 +835,20 @@ func writeControl(w io.Writer, data controlData) error {
 			return strings.Trim(strings.Join(strs, ", "), " ")
 		},
 		"multiline": func(strs string) string {
-			ret := strings.ReplaceAll(strs, "\n", "\n ")
-			return strings.Trim(ret, " \n")
+			var b strings.Builder
+			s := bufio.NewScanner(strings.NewReader(strings.TrimSpace(strs)))
+			s.Scan()
+			b.Write(bytes.TrimSpace(s.Bytes()))
+			for s.Scan() {
+				b.WriteString("\n ")
+				l := bytes.TrimSpace(s.Bytes())
+				if len(l) == 0 {
+					b.WriteByte('.')
+				} else {
+					b.Write(l)
+				}
+			}
+			return b.String()
 		},
 		"nonEmpty": func(strs []string) []string {
 			var result []string
@@ -778,4 +863,61 @@ func writeControl(w io.Writer, data controlData) error {
 		},
 	})
 	return template.Must(tmpl.Parse(controlTemplate)).Execute(w, data)
+}
+
+func tarHeader(content *files.Content, preferredModTimes ...time.Time) (*tar.Header, error) {
+	const (
+		ISUID = 0o4000 // Set uid
+		ISGID = 0o2000 // Set gid
+		ISVTX = 0o1000 // Save text (sticky bit)
+	)
+
+	fm := content.Mode()
+
+	h := &tar.Header{
+		Name: content.Name(),
+		ModTime: modtime.Get(
+			append(preferredModTimes, content.ModTime())...,
+		),
+		Mode:   int64(fm & 0o7777),
+		Uname:  content.FileInfo.Owner,
+		Gname:  content.FileInfo.Group,
+		Format: tar.FormatGNU,
+	}
+
+	switch {
+	case content.IsDir() || fm&fs.ModeDir != 0:
+		h.Typeflag = tar.TypeDir
+		h.Name = files.AsExplicitRelativePath(content.Destination)
+	case content.Type == files.TypeSymlink || fm&fs.ModeSymlink != 0:
+		h.Typeflag = tar.TypeSymlink
+		h.Name = files.AsExplicitRelativePath(content.Destination)
+		h.Linkname = content.Source
+	case fm&fs.ModeDevice != 0:
+		if fm&fs.ModeCharDevice != 0 {
+			h.Typeflag = tar.TypeChar
+		} else {
+			h.Typeflag = tar.TypeBlock
+		}
+	case fm&fs.ModeNamedPipe != 0:
+		h.Typeflag = tar.TypeFifo
+	case fm&fs.ModeSocket != 0:
+		return nil, fmt.Errorf("archive/tar: sockets not supported")
+	default:
+		h.Typeflag = tar.TypeReg
+		h.Name = files.AsExplicitRelativePath(content.Destination)
+		h.Size = content.Size()
+	}
+
+	if fm&fs.ModeSetuid != 0 {
+		h.Mode |= ISUID
+	}
+	if fm&fs.ModeSetgid != 0 {
+		h.Mode |= ISGID
+	}
+	if fm&fs.ModeSticky != 0 {
+		h.Mode |= ISVTX
+	}
+
+	return h, nil
 }

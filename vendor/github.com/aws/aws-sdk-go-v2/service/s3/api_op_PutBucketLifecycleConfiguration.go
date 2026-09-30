@@ -4,15 +4,12 @@ package s3
 
 import (
 	"context"
-	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	internalChecksum "github.com/aws/aws-sdk-go-v2/service/internal/checksum"
 	s3cust "github.com/aws/aws-sdk-go-v2/service/s3/internal/customizations"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
 	"github.com/aws/smithy-go/ptr"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // Creates a new lifecycle configuration for the bucket or replaces an existing
@@ -28,10 +25,10 @@ import (
 // prefix, which is supported for backward compatibility. For the related API
 // description, see [PutBucketLifecycle].
 //
-// Rules Permissions HTTP Host header syntax You specify the lifecycle
-// configuration in your request body. The lifecycle configuration is specified as
-// XML consisting of one or more rules. An Amazon S3 Lifecycle configuration can
-// have up to 1,000 rules. This limit is not adjustable.
+// Rules You specify the lifecycle configuration in your request body. The
+// lifecycle configuration is specified as XML consisting of one or more rules. An
+// Amazon S3 Lifecycle configuration can have up to 1,000 rules. This limit is not
+// adjustable.
 //
 // Bucket lifecycle configuration supports specifying a lifecycle rule using an
 // object key name prefix, one or more object tags, object size, or any combination
@@ -61,6 +58,7 @@ import (
 //
 // For more information, see [Object Lifecycle Management] and [Lifecycle Configuration Elements].
 //
+// Permissions
 //   - General purpose bucket permissions - By default, all Amazon S3 resources
 //     are private, including buckets, objects, and related subresources (for example,
 //     lifecycle configuration and website configuration). Only the resource owner
@@ -100,9 +98,9 @@ import (
 //	in the format https://s3express-control.region-code.amazonaws.com/bucket-name
 //	. Virtual-hosted-style requests aren't supported. For more information about
 //	endpoints in Availability Zones, see [Regional and Zonal endpoints for directory buckets in Availability Zones]in the Amazon S3 User Guide. For more
-//	information about endpoints in Local Zones, see [Available Local Zone for directory buckets]in the Amazon S3 User Guide.
+//	information about endpoints in Local Zones, see [Concepts for directory buckets in Local Zones]in the Amazon S3 User Guide.
 //
-// Directory buckets - The HTTP Host header syntax is
+// HTTP Host header syntax  Directory buckets - The HTTP Host header syntax is
 // s3express-control.region.amazonaws.com .
 //
 // The following operations are related to PutBucketLifecycleConfiguration :
@@ -110,6 +108,10 @@ import (
 // [GetBucketLifecycleConfiguration]
 //
 // [DeleteBucketLifecycle]
+//
+// You must URL encode any signed header values that contain spaces. For example,
+// if your header value is my file.txt , containing two spaces after my , you must
+// URL encode this value to my%20%20file.txt .
 //
 // [Object Lifecycle Management]: https://docs.aws.amazon.com/AmazonS3/latest/dev/object-lifecycle-mgmt.html
 // [Lifecycle Configuration Elements]: https://docs.aws.amazon.com/AmazonS3/latest/dev/intro-lifecycle-rules.html
@@ -120,8 +122,8 @@ import (
 // [DeleteBucketLifecycle]: https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketLifecycle.html
 // [Managing your storage lifecycle]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html
 //
-// [Regional and Zonal endpoints for directory buckets in Availability Zones]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-express-Regions-and-Zones.html
-// [Available Local Zone for directory buckets]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-lzs-for-directory-buckets.html
+// [Concepts for directory buckets in Local Zones]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-lzs-for-directory-buckets.html
+// [Regional and Zonal endpoints for directory buckets in Availability Zones]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/endpoint-directory-buckets-AZ.html
 func (c *Client) PutBucketLifecycleConfiguration(ctx context.Context, params *PutBucketLifecycleConfigurationInput, optFns ...func(*Options)) (*PutBucketLifecycleConfigurationOutput, error) {
 	if params == nil {
 		params = &PutBucketLifecycleConfigurationInput{}
@@ -144,9 +146,9 @@ type PutBucketLifecycleConfigurationInput struct {
 	// This member is required.
 	Bucket *string
 
-	// Indicates the algorithm used to create the checksum for the object when you use
-	// the SDK. This header will not provide any additional functionality if you don't
-	// use the SDK. When you send this header, there must be a corresponding
+	// Indicates the algorithm used to create the checksum for the request when you
+	// use the SDK. This header will not provide any additional functionality if you
+	// don't use the SDK. When you send this header, there must be a corresponding
 	// x-amz-checksum or x-amz-trailer header sent. Otherwise, Amazon S3 fails the
 	// request with the HTTP status code 400 Bad Request . For more information, see [Checking object integrity]
 	// in the Amazon S3 User Guide.
@@ -224,9 +226,6 @@ type PutBucketLifecycleConfigurationOutput struct {
 }
 
 func (c *Client) addOperationPutBucketLifecycleConfigurationMiddlewares(stack *middleware.Stack, options Options) (err error) {
-	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
-		return err
-	}
 	err = stack.Serialize.Add(&awsRestxml_serializeOpPutBucketLifecycleConfiguration{}, middleware.After)
 	if err != nil {
 		return err
@@ -235,59 +234,17 @@ func (c *Client) addOperationPutBucketLifecycleConfigurationMiddlewares(stack *m
 	if err != nil {
 		return err
 	}
-	if err := addProtocolFinalizerMiddlewares(stack, options, "PutBucketLifecycleConfiguration"); err != nil {
-		return fmt.Errorf("add protocol finalizers: %v", err)
-	}
 
-	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
-		return err
-	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = addClientRequestID(stack); err != nil {
-		return err
-	}
-	if err = addComputeContentLength(stack); err != nil {
-		return err
-	}
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
 	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetry(stack, options); err != nil {
-		return err
-	}
-	if err = addRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = addRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addSpanRetryLoop(stack, options); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack, options); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
 	if err = addPutBucketContextMiddleware(stack); err != nil {
-		return err
-	}
-	if err = addTimeOffsetBuild(stack, c); err != nil {
-		return err
-	}
-	if err = addUserAgentRetryMode(stack, options); err != nil {
 		return err
 	}
 	if err = addIsExpressUserAgent(stack); err != nil {
@@ -296,16 +253,13 @@ func (c *Client) addOperationPutBucketLifecycleConfigurationMiddlewares(stack *m
 	if err = addRequestChecksumMetricsTracking(stack, options); err != nil {
 		return err
 	}
+	if err = addCredentialSource(stack, options); err != nil {
+		return err
+	}
 	if err = addOpPutBucketLifecycleConfigurationValidationMiddleware(stack); err != nil {
 		return err
 	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opPutBucketLifecycleConfiguration(options.Region), middleware.Before); err != nil {
-		return err
-	}
 	if err = addMetadataRetrieverMiddleware(stack); err != nil {
-		return err
-	}
-	if err = addRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addPutBucketLifecycleConfigurationInputChecksumMiddlewares(stack, options); err != nil {
@@ -323,6 +277,9 @@ func (c *Client) addOperationPutBucketLifecycleConfigurationMiddlewares(stack *m
 	if err = disableAcceptEncodingGzip(stack); err != nil {
 		return err
 	}
+	if err = s3cust.HandleResponseErrorWith200Status(stack); err != nil {
+		return err
+	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
@@ -335,16 +292,7 @@ func (c *Client) addOperationPutBucketLifecycleConfigurationMiddlewares(stack *m
 	if err = s3cust.AddExpressDefaultChecksumMiddleware(stack); err != nil {
 		return err
 	}
-	if err = addSpanInitializeStart(stack); err != nil {
-		return err
-	}
-	if err = addSpanInitializeEnd(stack); err != nil {
-		return err
-	}
-	if err = addSpanBuildRequestStart(stack); err != nil {
-		return err
-	}
-	if err = addSpanBuildRequestEnd(stack); err != nil {
+	if err = addInterceptors(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -355,14 +303,6 @@ func (v *PutBucketLifecycleConfigurationInput) bucket() (string, bool) {
 		return "", false
 	}
 	return *v.Bucket, true
-}
-
-func newServiceMetadataMiddleware_opPutBucketLifecycleConfiguration(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		OperationName: "PutBucketLifecycleConfiguration",
-	}
 }
 
 // getPutBucketLifecycleConfigurationRequestAlgorithmMember gets the request

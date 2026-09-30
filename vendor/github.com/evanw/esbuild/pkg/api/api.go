@@ -132,6 +132,9 @@ const (
 	ES2020
 	ES2021
 	ES2022
+	ES2023
+	ES2024
+	ES2025
 )
 
 type Loader uint16
@@ -178,6 +181,7 @@ type Packages uint8
 
 const (
 	PackagesDefault Packages = iota
+	PackagesBundle
 	PackagesExternal
 )
 
@@ -232,6 +236,13 @@ const (
 	LogLevelError
 )
 
+type LogStyle uint8
+
+const (
+	LogStyleDefault LogStyle = iota
+	LogStyleVisualStudio
+)
+
 type Charset uint8
 
 const (
@@ -262,14 +273,24 @@ const (
 	MangleQuotedTrue
 )
 
+type AbsPaths uint8
+
+const (
+	CodeAbsPath AbsPaths = 1 << iota
+	LogAbsPath
+	MetafileAbsPath
+)
+
 ////////////////////////////////////////////////////////////////////////////////
 // Build API
 
 type BuildOptions struct {
 	Color       StderrColor         // Documentation: https://esbuild.github.io/api/#color
 	LogLevel    LogLevel            // Documentation: https://esbuild.github.io/api/#log-level
+	LogStyle    LogStyle            // Documentation: https://esbuild.github.io/api/#log-style
 	LogLimit    int                 // Documentation: https://esbuild.github.io/api/#log-limit
 	LogOverride map[string]LogLevel // Documentation: https://esbuild.github.io/api/#log-override
+	AbsPaths    AbsPaths            // Documentation: https://esbuild.github.io/api/#abs-path
 
 	Sourcemap      SourceMap      // Documentation: https://esbuild.github.io/api/#sourcemap
 	SourceRoot     string         // Documentation: https://esbuild.github.io/api/#source-root
@@ -399,8 +420,10 @@ func Build(options BuildOptions) BuildResult {
 type TransformOptions struct {
 	Color       StderrColor         // Documentation: https://esbuild.github.io/api/#color
 	LogLevel    LogLevel            // Documentation: https://esbuild.github.io/api/#log-level
+	LogStyle    LogStyle            // Documentation: https://esbuild.github.io/api/#log-style
 	LogLimit    int                 // Documentation: https://esbuild.github.io/api/#log-limit
 	LogOverride map[string]LogLevel // Documentation: https://esbuild.github.io/api/#log-override
+	AbsPaths    AbsPaths            // Documentation: https://esbuild.github.io/api/#abs-path
 
 	Sourcemap      SourceMap      // Documentation: https://esbuild.github.io/api/#sourcemap
 	SourceRoot     string         // Documentation: https://esbuild.github.io/api/#source-root
@@ -469,13 +492,19 @@ func Transform(input string, options TransformOptions) TransformResult {
 
 // Documentation: https://esbuild.github.io/api/#serve-arguments
 type ServeOptions struct {
-	Port      uint16
+	Port      int
 	Host      string
 	Servedir  string
 	Keyfile   string
 	Certfile  string
 	Fallback  string
+	CORS      CORSOptions
 	OnRequest func(ServeOnRequestArgs)
+}
+
+// Documentation: https://esbuild.github.io/api/#cors
+type CORSOptions struct {
+	Origin []string
 }
 
 type ServeOnRequestArgs struct {
@@ -488,11 +517,13 @@ type ServeOnRequestArgs struct {
 
 // Documentation: https://esbuild.github.io/api/#serve-return-values
 type ServeResult struct {
-	Port uint16
-	Host string
+	Port  uint16
+	Hosts []string
 }
 
+// Documentation: https://esbuild.github.io/api/#watch-arguments
 type WatchOptions struct {
+	Delay int // In milliseconds
 }
 
 type BuildContext interface {
@@ -575,6 +606,7 @@ type ResolveOptions struct {
 	ResolveDir string
 	Kind       ResolveKind
 	PluginData interface{}
+	With       map[string]string
 }
 
 // Documentation: https://esbuild.github.io/plugins/#resolve-results
@@ -614,6 +646,7 @@ type OnResolveArgs struct {
 	ResolveDir string
 	Kind       ResolveKind
 	PluginData interface{}
+	With       map[string]string
 }
 
 // Documentation: https://esbuild.github.io/plugins/#on-resolve-results
@@ -693,6 +726,7 @@ type FormatMessagesOptions struct {
 	TerminalWidth int
 	Kind          MessageKind
 	Color         bool
+	LogStyle      LogStyle
 }
 
 func FormatMessages(msgs []Message, opts FormatMessagesOptions) []string {

@@ -9,7 +9,7 @@ By participating to this project, you agree to abide our [code of conduct](https
 Prerequisites:
 
 - [Task](https://taskfile.dev/#/installation)
-- [Go 1.19+](https://golang.org/doc/install)
+- [Go 1.26+](https://golang.org/doc/install)
 - [Docker](https://www.docker.com/)
 - `gpg` (probably already installed on your system)
 
@@ -36,6 +36,16 @@ If on the ARM tests you are seeing `standard_init_linux.go:211: exec user proces
 
 ```console
 sudo docker run --rm --privileged hypriot/qemu-register
+```
+
+### A note about Docker multi-arch builds
+
+If you want to properly run the Docker tests, or run `goreleaser release
+--snapshot` locally, you might need to setup Docker for it.
+You can do so by running:
+
+```sh
+task docker:setup
 ```
 
 ## Test your change

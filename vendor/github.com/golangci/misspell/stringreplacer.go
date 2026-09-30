@@ -99,10 +99,10 @@ func (t *trieNode) add(key, val string, priority int, r *genericReplacer) {
 			t.value = val
 			t.priority = priority
 		}
+
 		return
 	}
 
-	//nolint:nestif // TODO(ldez) must be fixed.
 	if t.prefix != "" {
 		// Need to split the prefix among multiple nodes.
 		var n int // length of the longest common prefix
@@ -111,9 +111,11 @@ func (t *trieNode) add(key, val string, priority int, r *genericReplacer) {
 				break
 			}
 		}
-		if n == len(t.prefix) {
+
+		switch n {
+		case len(t.prefix):
 			t.next.add(key[n:], val, priority, r)
-		} else if n == 0 {
+		case 0:
 			// First byte differs, start a new lookup table here. Looking up
 			// what is currently t.prefix[0] will lead to prefixNode, and
 			// looking up key[0] will lead to keyNode.
@@ -126,14 +128,16 @@ func (t *trieNode) add(key, val string, priority int, r *genericReplacer) {
 					next:   t.next,
 				}
 			}
+
 			keyNode := new(trieNode)
 			t.table = make([]*trieNode, r.tableSize)
 			t.table[r.mapping[t.prefix[0]]] = prefixNode
 			t.table[r.mapping[key[0]]] = keyNode
 			t.prefix = ""
 			t.next = nil
+
 			keyNode.add(key[1:], val, priority, r)
-		} else {
+		default:
 			// Insert new node after the common section of the prefix.
 			next := &trieNode{
 				prefix: t.prefix[n:],
@@ -143,18 +147,25 @@ func (t *trieNode) add(key, val string, priority int, r *genericReplacer) {
 			t.next = next
 			next.add(key[n:], val, priority, r)
 		}
-	} else if t.table != nil {
+
+		return
+	}
+
+	if t.table != nil {
 		// Insert into existing table.
 		m := r.mapping[key[0]]
 		if t.table[m] == nil {
 			t.table[m] = new(trieNode)
 		}
+
 		t.table[m].add(key[1:], val, priority, r)
-	} else {
-		t.prefix = key
-		t.next = new(trieNode)
-		t.next.add("", val, priority, r)
+
+		return
 	}
+
+	t.prefix = key
+	t.next = new(trieNode)
+	t.next.add("", val, priority, r)
 }
 
 // genericReplacer is the fully generic algorithm.
@@ -173,7 +184,7 @@ func makeGenericReplacer(oldnew []string) *genericReplacer {
 	// Find each byte used, then assign them each an index.
 	for i := 0; i < len(oldnew); i += 2 {
 		key := strings.ToLower(oldnew[i])
-		for j := 0; j < len(key); j++ {
+		for j := range len(key) {
 			r.mapping[key[j]] = 1
 		}
 	}
@@ -183,6 +194,7 @@ func makeGenericReplacer(oldnew []string) *genericReplacer {
 	}
 
 	var index byte
+
 	for i, b := range r.mapping {
 		if b == 0 {
 			r.mapping[i] = byte(r.tableSize)
@@ -197,56 +209,25 @@ func makeGenericReplacer(oldnew []string) *genericReplacer {
 	for i := 0; i < len(oldnew); i += 2 {
 		r.root.add(strings.ToLower(oldnew[i]), oldnew[i+1], len(oldnew)-i, r)
 	}
+
 	return r
-}
-
-func (r *genericReplacer) lookup(s string, ignoreRoot bool) (val string, keylen int, found bool) {
-	// Iterate down the trie to the end, and grab the value and keylen with
-	// the highest priority.
-	bestPriority := 0
-	node := &r.root
-	n := 0
-	for node != nil {
-		if node.priority > bestPriority && !(ignoreRoot && node == &r.root) {
-			bestPriority = node.priority
-			val = node.value
-			keylen = n
-			found = true
-		}
-
-		if s == "" {
-			break
-		}
-		if node.table != nil {
-			index := r.mapping[ByteToLower(s[0])]
-			if int(index) == r.tableSize {
-				break
-			}
-			node = node.table[index]
-			s = s[1:]
-			n++
-		} else if node.prefix != "" && StringHasPrefixFold(s, node.prefix) {
-			n += len(node.prefix)
-			s = s[len(node.prefix):]
-			node = node.next
-		} else {
-			break
-		}
-	}
-	return
 }
 
 func (r *genericReplacer) Replace(s string) string {
 	buf := make(appendSliceWriter, 0, len(s))
 	r.WriteString(&buf, s)
+
 	return string(buf)
 }
 
-//nolint:gocognit // TODO(ldez) must be fixed.
 func (r *genericReplacer) WriteString(w io.Writer, s string) (n int, err error) {
 	sw := getStringWriter(w)
-	var last, wn int
-	var prevMatchEmpty bool
+
+	var (
+		last, wn       int
+		prevMatchEmpty bool
+	)
+
 	for i := 0; i <= len(s); {
 		// Fast path: s[i] is not a prefix of any pattern.
 		if i != len(s) && r.root.priority == 0 {
@@ -259,6 +240,7 @@ func (r *genericReplacer) WriteString(w io.Writer, s string) (n int, err error) 
 
 		// Ignore the empty match iff the previous loop found the empty match.
 		val, keylen, match := r.lookup(s[i:], prevMatchEmpty)
+
 		prevMatchEmpty = match && keylen == 0
 		if match {
 			orig := s[i : i+keylen]
@@ -278,28 +260,77 @@ func (r *genericReplacer) WriteString(w io.Writer, s string) (n int, err error) 
 					val = strings.ToUpper(val[:1]) + strings.ToLower(val[1:])
 				}
 			}
+
 			wn, err = sw.WriteString(s[last:i])
 			n += wn
+
 			if err != nil {
-				return
+				return n, err
 			}
+
 			// debug helper: log.Printf("%d: Going to correct %q with %q", i, s[i:i+keylen], val)
 			wn, err = sw.WriteString(val)
 			n += wn
+
 			if err != nil {
-				return
+				return n, err
 			}
+
 			i += keylen
 			last = i
+
 			continue
 		}
+
 		i++
 	}
+
 	if last != len(s) {
 		wn, err = sw.WriteString(s[last:])
 		n += wn
 	}
-	return
+
+	return n, err
+}
+
+func (r *genericReplacer) lookup(s string, ignoreRoot bool) (val string, keylen int, found bool) {
+	// Iterate down the trie to the end, and grab the value and keylen with
+	// the highest priority.
+	bestPriority := 0
+	node := &r.root
+	n := 0
+
+	for node != nil {
+		if node.priority > bestPriority && (!ignoreRoot || node != &r.root) {
+			bestPriority = node.priority
+			val = node.value
+			keylen = n
+			found = true
+		}
+
+		if s == "" {
+			break
+		}
+
+		if node.table != nil {
+			index := r.mapping[ByteToLower(s[0])]
+			if int(index) == r.tableSize {
+				break
+			}
+
+			node = node.table[index]
+			s = s[1:]
+			n++
+		} else if node.prefix != "" && StringHasPrefixFold(s, node.prefix) {
+			n += len(node.prefix)
+			s = s[len(node.prefix):]
+			node = node.next
+		} else {
+			break
+		}
+	}
+
+	return val, keylen, found
 }
 
 type appendSliceWriter []byte
@@ -329,5 +360,6 @@ func getStringWriter(w io.Writer) io.StringWriter {
 	if !ok {
 		sw = stringWriter{w}
 	}
+
 	return sw
 }

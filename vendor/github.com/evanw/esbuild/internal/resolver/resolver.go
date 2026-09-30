@@ -243,22 +243,39 @@ func NewResolver(call config.APICall, fs fs.FS, log logger.Log, caches *cache.Ca
 	// Filter out non-CSS extensions for CSS "@import" imports
 	cssExtensionOrder := make([]string, 0, len(options.ExtensionOrder))
 	for _, ext := range options.ExtensionOrder {
-		if loader, ok := options.ExtensionToLoader[ext]; !ok || loader.IsCSS() {
+		if loader := config.LoaderFromFileExtension(options.ExtensionToLoader, ext); loader == config.LoaderNone || loader.IsCSS() {
 			cssExtensionOrder = append(cssExtensionOrder, ext)
 		}
 	}
 
-	// Sort all JavaScript file extensions after TypeScript file extensions
-	// for imports of files inside of "node_modules" directories
+	// Sort all TypeScript file extensions after all JavaScript file extensions
+	// for imports of files inside of "node_modules" directories. But insert
+	// the TypeScript file extensions right after the last JavaScript file
+	// extension instead of at the end so that they might come before the
+	// first CSS file extension, which is important to people that publish
+	// TypeScript and CSS code to npm with the same file names for both.
 	nodeModulesExtensionOrder := make([]string, 0, len(options.ExtensionOrder))
-	for _, ext := range options.ExtensionOrder {
-		if loader, ok := options.ExtensionToLoader[ext]; !ok || !loader.IsTypeScript() {
-			nodeModulesExtensionOrder = append(nodeModulesExtensionOrder, ext)
+	split := 0
+	for i, ext := range options.ExtensionOrder {
+		if loader := config.LoaderFromFileExtension(options.ExtensionToLoader, ext); loader == config.LoaderJS || loader == config.LoaderJSX {
+			split = i + 1 // Split after the last JavaScript extension
 		}
 	}
-	for _, ext := range options.ExtensionOrder {
-		if loader, ok := options.ExtensionToLoader[ext]; ok && loader.IsTypeScript() {
-			nodeModulesExtensionOrder = append(nodeModulesExtensionOrder, ext)
+	if split != 0 { // Only do this if there are any JavaScript extensions
+		for _, ext := range options.ExtensionOrder[:split] { // Non-TypeScript extensions before the split
+			if loader := config.LoaderFromFileExtension(options.ExtensionToLoader, ext); !loader.IsTypeScript() {
+				nodeModulesExtensionOrder = append(nodeModulesExtensionOrder, ext)
+			}
+		}
+		for _, ext := range options.ExtensionOrder { // All TypeScript extensions
+			if loader := config.LoaderFromFileExtension(options.ExtensionToLoader, ext); loader.IsTypeScript() {
+				nodeModulesExtensionOrder = append(nodeModulesExtensionOrder, ext)
+			}
+		}
+		for _, ext := range options.ExtensionOrder[split:] { // Non-TypeScript extensions after the split
+			if loader := config.LoaderFromFileExtension(options.ExtensionToLoader, ext); !loader.IsTypeScript() {
+				nodeModulesExtensionOrder = append(nodeModulesExtensionOrder, ext)
+			}
 		}
 	}
 
@@ -311,23 +328,30 @@ func NewResolver(call config.APICall, fs fs.FS, log logger.Log, caches *cache.Ca
 			visited = make(map[string]bool)
 		}
 		if options.TSConfigPath != "" {
-			res.tsConfigOverride, err = r.parseTSConfig(options.TSConfigPath, visited)
+			if r.log.Level <= logger.LevelDebug {
+				r.debugLogs = &debugLogs{what: fmt.Sprintf("Resolving tsconfig file %q", options.TSConfigPath)}
+			}
+			res.tsConfigOverride, err = r.parseTSConfig(options.TSConfigPath, visited, fs.Dir(options.TSConfigPath))
 		} else {
 			source := logger.Source{
-				KeyPath:    logger.Path{Text: fs.Join(fs.Cwd(), "<tsconfig.json>"), Namespace: "file"},
-				PrettyPath: "<tsconfig.json>",
-				Contents:   options.TSConfigRaw,
+				KeyPath:     logger.Path{Text: fs.Join(fs.Cwd(), "<tsconfig.json>"), Namespace: "file"},
+				PrettyPaths: logger.PrettyPaths{Abs: "<tsconfig.json>", Rel: "<tsconfig.json>"},
+				Contents:    options.TSConfigRaw,
 			}
-			res.tsConfigOverride, err = r.parseTSConfigFromSource(source, visited)
+			res.tsConfigOverride, err = r.parseTSConfigFromSource(source, visited, fs.Cwd())
 		}
 		if err != nil {
 			if err == syscall.ENOENT {
+				prettyPaths := MakePrettyPaths(r.fs, logger.Path{Text: options.TSConfigPath, Namespace: "file"})
 				r.log.AddError(nil, logger.Range{}, fmt.Sprintf("Cannot find tsconfig file %q",
-					PrettyPath(r.fs, logger.Path{Text: options.TSConfigPath, Namespace: "file"})))
+					prettyPaths.Select(options.LogPathStyle)))
 			} else if err != errParseErrorAlreadyLogged {
+				prettyPaths := MakePrettyPaths(r.fs, logger.Path{Text: options.TSConfigPath, Namespace: "file"})
 				r.log.AddError(nil, logger.Range{}, fmt.Sprintf("Cannot read file %q: %s",
-					PrettyPath(r.fs, logger.Path{Text: options.TSConfigPath, Namespace: "file"}), err.Error()))
+					prettyPaths.Select(options.LogPathStyle), err.Error()))
 			}
+		} else {
+			r.flushDebugLogs(flushDueToSuccess)
 		}
 	}
 
@@ -487,7 +511,6 @@ func (res *Resolver) Resolve(sourceDir string, importPath string, kind ast.Impor
 
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	sourceDirInfo := r.dirInfoCached(sourceDir)
 
 	// Check for the Yarn PnP manifest if it hasn't already been checked for
 	if !r.pnpManifestWasChecked {
@@ -514,6 +537,12 @@ func (res *Resolver) Resolve(sourceDir string, importPath string, kind ast.Impor
 				break
 			}
 		}
+	}
+
+	sourceDirInfo := r.dirInfoCached(sourceDir)
+	if sourceDirInfo == nil {
+		// Bail if the directory is missing for some reason
+		return nil, debugMeta
 	}
 
 	result := r.resolveWithoutSymlinks(sourceDir, sourceDirInfo, importPath)
@@ -661,6 +690,11 @@ func (res *Resolver) ResolveGlob(sourceDir string, importPathPattern []helpers.G
 	visit = func(dirInfo *dirInfo, dir string) {
 		for _, key := range dirInfo.entries.SortedKeys() {
 			entry, _ := dirInfo.entries.Get(key)
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("Considering entry %q", r.fs.Join(dirInfo.absPath, key)))
+				r.debugLogs.increaseIndent()
+			}
+
 			switch entry.Kind(r.fs) {
 			case fs.DirEntry:
 				// To avoid infinite loops, don't follow any symlinks
@@ -688,6 +722,10 @@ func (res *Resolver) ResolveGlob(sourceDir string, importPathPattern []helpers.G
 					r.finalizeResolve(&result)
 					results[relPath] = result
 				}
+			}
+
+			if r.debugLogs != nil {
+				r.debugLogs.decreaseIndent()
 			}
 		}
 	}
@@ -964,6 +1002,18 @@ func (r resolverQuery) resolveWithoutSymlinks(sourceDir string, sourceDirInfo *d
 			return &ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: absPath, Namespace: "file"}, IsExternal: true}}
 		}
 
+		// Node's actual behavior deviates from its published algorithm by not
+		// running the "LOAD_AS_FILE" step if the import path looks like it
+		// resolves to a directory instead of a file. Attempt to replicate that
+		// behavior here. This really only matters for intentionally confusing
+		// edge cases where a directory is named the same thing as a file.
+		// Unfortunately people actually create situations like this.
+		hasTrailingSlash := importPath == "." ||
+			importPath == ".." ||
+			strings.HasSuffix(importPath, "/") ||
+			strings.HasSuffix(importPath, "/.") ||
+			strings.HasSuffix(importPath, "/..")
+
 		// Check the "browser" map
 		if importDirInfo := r.dirInfoCached(r.fs.Dir(absPath)); importDirInfo != nil {
 			if remapped, ok := r.checkBrowserMap(importDirInfo, absPath, absolutePathKind); ok {
@@ -972,28 +1022,33 @@ func (r resolverQuery) resolveWithoutSymlinks(sourceDir string, sourceDirInfo *d
 				}
 				if remappedResult, ok, diffCase, sideEffects := r.resolveWithoutRemapping(importDirInfo.enclosingBrowserScope, *remapped); ok {
 					result = ResolveResult{PathPair: remappedResult, DifferentCase: diffCase, PrimarySideEffectsData: sideEffects}
+					hasTrailingSlash = false
 					checkRelative = false
 					checkPackage = false
 				}
 			}
 		}
 
-		if checkRelative {
-			if absolute, ok, diffCase := r.loadAsFileOrDirectory(absPath); ok {
+		if hasTrailingSlash {
+			if absolute, ok, diffCase := r.loadAsDirectory(absPath); ok {
 				checkPackage = false
 				result = ResolveResult{PathPair: absolute, DifferentCase: diffCase}
 			} else if !checkPackage {
 				return nil
 			}
+		} else {
+			if checkRelative {
+				if absolute, ok, diffCase := r.loadAsFileOrDirectory(absPath); ok {
+					checkPackage = false
+					result = ResolveResult{PathPair: absolute, DifferentCase: diffCase}
+				} else if !checkPackage {
+					return nil
+				}
+			}
 		}
 	}
 
 	if checkPackage {
-		if sourceDirInfo == nil {
-			// Bail if the directory is missing for some reason
-			return nil
-		}
-
 		// Support remapping one package path to another via the "browser" field
 		if remapped, ok := r.checkBrowserMap(sourceDirInfo, importPath, packagePathKind); ok {
 			if remapped == nil {
@@ -1035,10 +1090,13 @@ func (r resolverQuery) resolveWithoutRemapping(sourceDirInfo *dirInfo, importPat
 	}
 }
 
-func PrettyPath(fs fs.FS, path logger.Path) string {
+func MakePrettyPaths(fs fs.FS, path logger.Path) logger.PrettyPaths {
+	absPath := path.Text
+	relPath := path.Text
+
 	if path.Namespace == "file" {
-		if rel, ok := fs.Rel(fs.Cwd(), path.Text); ok {
-			path.Text = rel
+		if rel, ok := fs.Rel(fs.Cwd(), relPath); ok {
+			relPath = rel
 		}
 
 		// These human-readable paths are used in error messages, comments in output
@@ -1046,16 +1104,21 @@ func PrettyPath(fs fs.FS, path logger.Path) string {
 		// These should be platform-independent so our output doesn't depend on which
 		// operating system it was run. Replace Windows backward slashes with standard
 		// forward slashes.
-		path.Text = strings.ReplaceAll(path.Text, "\\", "/")
+		relPath = strings.ReplaceAll(relPath, "\\", "/")
 	} else if path.Namespace != "" {
-		path.Text = fmt.Sprintf("%s:%s", path.Namespace, path.Text)
+		absPath = fmt.Sprintf("%s:%s", path.Namespace, absPath)
+		relPath = fmt.Sprintf("%s:%s", path.Namespace, relPath)
 	}
 
 	if path.IsDisabled() {
-		path.Text = "(disabled):" + path.Text
+		absPath = "(disabled):" + absPath
+		relPath = "(disabled):" + relPath
 	}
 
-	return path.Text + path.IgnoredSuffix
+	return logger.PrettyPaths{
+		Abs: absPath + path.IgnoredSuffix,
+		Rel: relPath + path.IgnoredSuffix,
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1101,12 +1164,19 @@ func (r resolverQuery) dirInfoCached(path string) *dirInfo {
 
 	// Cache hit: stop now
 	if !ok {
+		// Update the cache to indicate failure. Even if the read failed, we don't
+		// want to retry again later. The directory is inaccessible so trying again
+		// is wasted. Doing this before calling "dirInfoUncached" prevents stack
+		// overflow in case this directory is recursively encountered again.
+		r.dirCache[path] = nil
+
 		// Cache miss: read the info
 		cached = r.dirInfoUncached(path)
 
-		// Update the cache unconditionally. Even if the read failed, we don't want to
-		// retry again later. The directory is inaccessible so trying again is wasted.
-		r.dirCache[path] = cached
+		// Only update the cache again on success
+		if cached != nil {
+			r.dirCache[path] = cached
+		}
 	}
 
 	if r.debugLogs != nil {
@@ -1133,15 +1203,17 @@ var errParseErrorAlreadyLogged = errors.New("(error already logged)")
 //
 // Nested calls may also return "parseErrorImportCycle". In that case the
 // caller is responsible for logging an appropriate error message.
-func (r resolverQuery) parseTSConfig(file string, visited map[string]bool) (*TSConfigJSON, error) {
+func (r resolverQuery) parseTSConfig(file string, visited map[string]bool, configDir string) (*TSConfigJSON, error) {
+	// Resolve any symlinks first before parsing the file
+	if !r.options.PreserveSymlinks {
+		if real, ok := r.fs.EvalSymlinks(file); ok {
+			file = real
+		}
+	}
+
 	// Don't infinite loop if a series of "extends" links forms a cycle
 	if visited[file] {
 		return nil, errParseErrorImportCycle
-	}
-	if visited != nil {
-		// This is only non-nil for "build" API calls. This is nil for "transform"
-		// API calls, which tells us to not process "extends" fields.
-		visited[file] = true
 	}
 
 	contents, err, originalError := r.caches.FSCache.ReadFile(r.fs, file)
@@ -1157,19 +1229,32 @@ func (r resolverQuery) parseTSConfig(file string, visited map[string]bool) (*TSC
 
 	keyPath := logger.Path{Text: file, Namespace: "file"}
 	source := logger.Source{
-		KeyPath:    keyPath,
-		PrettyPath: PrettyPath(r.fs, keyPath),
-		Contents:   contents,
+		KeyPath:     keyPath,
+		PrettyPaths: MakePrettyPaths(r.fs, keyPath),
+		Contents:    contents,
 	}
-	return r.parseTSConfigFromSource(source, visited)
+	if visited != nil {
+		// This is only non-nil for "build" API calls. This is nil for "transform"
+		// API calls, which tells us to not process "extends" fields.
+		visited[file] = true
+	}
+	result, err := r.parseTSConfigFromSource(source, visited, configDir)
+	if visited != nil {
+		// Reset this to back false in case something uses TypeScript 5.0's multiple
+		// inheritance feature for "tsconfig.json" files. It should be valid to visit
+		// the same base "tsconfig.json" file multiple times from different multiple
+		// inheritance subtrees.
+		visited[file] = false
+	}
+	return result, err
 }
 
-func (r resolverQuery) parseTSConfigFromSource(source logger.Source, visited map[string]bool) (*TSConfigJSON, error) {
+func (r resolverQuery) parseTSConfigFromSource(source logger.Source, visited map[string]bool, configDir string) (*TSConfigJSON, error) {
 	tracker := logger.MakeLineColumnTracker(&source)
 	fileDir := r.fs.Dir(source.KeyPath.Text)
 	isExtends := len(visited) > 1
 
-	result := ParseTSConfigJSON(r.log, source, &r.caches.JSONCache, func(extends string, extendsRange logger.Range) *TSConfigJSON {
+	result := ParseTSConfigJSON(r.log, source, &r.caches.JSONCache, r.fs, fileDir, configDir, func(extends string, extendsRange logger.Range) *TSConfigJSON {
 		if visited == nil {
 			// If this is nil, then we're in a "transform" API call. In that case we
 			// deliberately skip processing "extends" fields. This is because the
@@ -1196,9 +1281,9 @@ func (r resolverQuery) parseTSConfigFromSource(source logger.Source, visited map
 				r.log.AddID(logger.MsgID_TSConfigJSON_Cycle, logger.Warning, &tracker, extendsRange,
 					fmt.Sprintf("Base config file %q forms cycle", extends))
 			} else if err != errParseErrorAlreadyLogged {
-				r.log.AddError(&tracker, extendsRange,
-					fmt.Sprintf("Cannot read file %q: %s",
-						PrettyPath(r.fs, logger.Path{Text: extendsFile, Namespace: "file"}), err.Error()))
+				prettyPaths := MakePrettyPaths(r.fs, logger.Path{Text: extendsFile, Namespace: "file"})
+				r.log.AddError(&tracker, extendsRange, fmt.Sprintf("Cannot read file %q: %s",
+					prettyPaths.Select(r.options.LogPathStyle), err.Error()))
 			}
 			return nil, true
 		}
@@ -1247,6 +1332,27 @@ func (r resolverQuery) parseTSConfigFromSource(source logger.Source, visited map
 					}
 					goto pnpError
 				} else if result.status == pnpSuccess {
+					// If Yarn PnP path resolution succeeded, run a custom abbreviated
+					// version of node's module resolution algorithm. The Yarn PnP
+					// specification says to use node's module resolution algorithm verbatim
+					// but that isn't what Yarn actually does. See this for more info:
+					// https://github.com/evanw/esbuild/issues/2473#issuecomment-1216774461
+					if entries, _, dirErr := r.fs.ReadDirectory(result.pkgDirPath); dirErr == nil {
+						if entry, _ := entries.Get("package.json"); entry != nil && entry.Kind(r.fs) == fs.FileEntry {
+							// Check the "exports" map
+							if packageJSON := r.parsePackageJSON(result.pkgDirPath); packageJSON != nil && packageJSON.exportsMap != nil {
+								if absolute, ok, _ := r.esmResolveAlgorithm(finalizeImportsExportsYarnPnPTSConfigExtends,
+									result.pkgIdent, "."+result.pkgSubpath, packageJSON, result.pkgDirPath, source.KeyPath.Text); ok {
+									base, err := r.parseTSConfig(absolute.Primary.Text, visited, configDir)
+									if result, shouldReturn := maybeFinishOurSearch(base, err, absolute.Primary.Text); shouldReturn {
+										return result
+									}
+								}
+								goto pnpError
+							}
+						}
+					}
+
 					// Continue with the module resolution algorithm from node.js
 					extends = r.fs.Join(result.pkgDirPath, result.pkgSubpath)
 				}
@@ -1297,7 +1403,7 @@ func (r resolverQuery) parseTSConfigFromSource(source logger.Source, visited map
 								// This is a very abbreviated version of our ESM resolution
 								if status == pjStatusExact || status == pjStatusExactEndsWithStar {
 									fileToCheck := r.fs.Join(pkgDir, resolvedPath)
-									base, err := r.parseTSConfig(fileToCheck, visited)
+									base, err := r.parseTSConfig(fileToCheck, visited, configDir)
 
 									if result, shouldReturn := maybeFinishOurSearch(base, err, fileToCheck); shouldReturn {
 										return result
@@ -1311,7 +1417,7 @@ func (r resolverQuery) parseTSConfigFromSource(source logger.Source, visited map
 
 					filesToCheck := []string{r.fs.Join(join, "tsconfig.json"), join, join + ".json"}
 					for _, fileToCheck := range filesToCheck {
-						base, err := r.parseTSConfig(fileToCheck, visited)
+						base, err := r.parseTSConfig(fileToCheck, visited, configDir)
 
 						// Explicitly ignore matches if they are directories instead of files
 						if err != nil && err != syscall.ENOENT {
@@ -1359,7 +1465,7 @@ func (r resolverQuery) parseTSConfigFromSource(source logger.Source, visited map
 			if !r.fs.IsAbs(extendsFile) {
 				extendsFile = r.fs.Join(fileDir, extendsFile)
 			}
-			base, err := r.parseTSConfig(extendsFile, visited)
+			base, err := r.parseTSConfig(extendsFile, visited, configDir)
 
 			// TypeScript's handling of "extends" has some specific edge cases. We
 			// must only try adding ".json" if it's not already present, which is
@@ -1371,7 +1477,7 @@ func (r resolverQuery) parseTSConfigFromSource(source logger.Source, visited map
 					extendsBase := r.fs.Base(extendsFile)
 					if entry, _ := entries.Get(extendsBase); entry == nil || entry.Kind(r.fs) != fs.FileEntry {
 						if entry, _ := entries.Get(extendsBase + ".json"); entry != nil && entry.Kind(r.fs) == fs.FileEntry {
-							base, err = r.parseTSConfig(extendsFile+".json", visited)
+							base, err = r.parseTSConfig(extendsFile+".json", visited, configDir)
 						}
 					}
 				}
@@ -1385,8 +1491,12 @@ func (r resolverQuery) parseTSConfigFromSource(source logger.Source, visited map
 		// Suppress warnings about missing base config files inside "node_modules"
 	pnpError:
 		if !helpers.IsInsideNodeModules(source.KeyPath.Text) {
-			r.log.AddID(logger.MsgID_TSConfigJSON_Missing, logger.Warning, &tracker, extendsRange,
-				fmt.Sprintf("Cannot find base config file %q", extends))
+			var notes []logger.MsgData
+			if r.debugLogs != nil {
+				notes = r.debugLogs.notes
+			}
+			r.log.AddIDWithNotes(logger.MsgID_TSConfigJSON_Missing, logger.Warning, &tracker, extendsRange,
+				fmt.Sprintf("Cannot find base config file %q", extends), notes)
 		}
 
 		return nil
@@ -1394,14 +1504,6 @@ func (r resolverQuery) parseTSConfigFromSource(source logger.Source, visited map
 
 	if result == nil {
 		return nil, errParseErrorAlreadyLogged
-	}
-
-	if result.BaseURL != nil && !r.fs.IsAbs(*result.BaseURL) {
-		*result.BaseURL = r.fs.Join(fileDir, *result.BaseURL)
-	}
-
-	if result.Paths != nil && !r.fs.IsAbs(result.BaseURLForPaths) {
-		result.BaseURLForPaths = r.fs.Join(fileDir, result.BaseURLForPaths)
 	}
 
 	// Now that we have parsed the entire "tsconfig.json" file, filter out any
@@ -1463,9 +1565,9 @@ func (r resolverQuery) dirInfoUncached(path string) *dirInfo {
 		// list which contains such paths and treating them as missing means we just
 		// ignore them during path resolution.
 		if err != syscall.ENOENT && err != syscall.ENOTDIR {
-			r.log.AddError(nil, logger.Range{},
-				fmt.Sprintf("Cannot read directory %q: %s",
-					PrettyPath(r.fs, logger.Path{Text: path, Namespace: "file"}), err.Error()))
+			prettyPaths := MakePrettyPaths(r.fs, logger.Path{Text: path, Namespace: "file"})
+			r.log.AddError(nil, logger.Range{}, fmt.Sprintf("Cannot read directory %q: %s",
+				prettyPaths.Select(r.options.LogPathStyle), err.Error()))
 		}
 		return nil
 	}
@@ -1550,15 +1652,16 @@ func (r resolverQuery) dirInfoUncached(path string) *dirInfo {
 		// many other tools anyway. So now these files are ignored.
 		if tsConfigPath != "" && !info.isInsideNodeModules {
 			var err error
-			info.enclosingTSConfigJSON, err = r.parseTSConfig(tsConfigPath, make(map[string]bool))
+			info.enclosingTSConfigJSON, err = r.parseTSConfig(tsConfigPath, make(map[string]bool), r.fs.Dir(tsConfigPath))
 			if err != nil {
 				if err == syscall.ENOENT {
+					prettyPaths := MakePrettyPaths(r.fs, logger.Path{Text: tsConfigPath, Namespace: "file"})
 					r.log.AddError(nil, logger.Range{}, fmt.Sprintf("Cannot find tsconfig file %q",
-						PrettyPath(r.fs, logger.Path{Text: tsConfigPath, Namespace: "file"})))
+						prettyPaths.Select(r.options.LogPathStyle)))
 				} else if err != errParseErrorAlreadyLogged {
+					prettyPaths := MakePrettyPaths(r.fs, logger.Path{Text: tsConfigPath, Namespace: "file"})
 					r.log.AddID(logger.MsgID_TSConfigJSON_Missing, logger.Debug, nil, logger.Range{},
-						fmt.Sprintf("Cannot read file %q: %s",
-							PrettyPath(r.fs, logger.Path{Text: tsConfigPath, Namespace: "file"}), err.Error()))
+						fmt.Sprintf("Cannot read file %q: %s", prettyPaths.Select(r.options.LogPathStyle), err.Error()))
 				}
 			}
 		}
@@ -1641,9 +1744,9 @@ func (r resolverQuery) loadAsFile(path string, extensionOrder []string) (string,
 	}
 	if err != nil {
 		if err != syscall.ENOENT {
-			r.log.AddError(nil, logger.Range{},
-				fmt.Sprintf("Cannot read directory %q: %s",
-					PrettyPath(r.fs, logger.Path{Text: dirPath, Namespace: "file"}), err.Error()))
+			prettyPaths := MakePrettyPaths(r.fs, logger.Path{Text: dirPath, Namespace: "file"})
+			r.log.AddError(nil, logger.Range{}, fmt.Sprintf("Cannot read directory %q: %s",
+				prettyPaths.Select(r.options.LogPathStyle), err.Error()))
 		}
 		return "", false, nil
 	}
@@ -1827,6 +1930,19 @@ func (r resolverQuery) loadAsFileOrDirectory(path string) (PathPair, bool, *fs.D
 	absolute, ok, diffCase := r.loadAsFile(path, extensionOrder)
 	if ok {
 		return PathPair{Primary: logger.Path{Text: absolute, Namespace: "file"}}, true, diffCase
+	}
+
+	return r.loadAsDirectory(path)
+}
+
+func (r resolverQuery) loadAsDirectory(path string) (PathPair, bool, *fs.DifferentCase) {
+	extensionOrder := r.options.ExtensionOrder
+	if r.kind.MustResolveToCSS() {
+		// Use a special import order for CSS "@import" imports
+		extensionOrder = r.cssExtensionOrder
+	} else if helpers.IsInsideNodeModules(path) {
+		// Use a special import order for imports inside "node_modules"
+		extensionOrder = r.nodeModulesExtensionOrder
 	}
 
 	// Is this a directory?
@@ -2032,7 +2148,7 @@ func (r resolverQuery) matchTSConfigPaths(tsConfigJSON *TSConfigJSON, path strin
 	}
 
 	if r.debugLogs != nil {
-		r.debugLogs.addNote(fmt.Sprintf("Using %q as \"baseURL\"", absBaseURL))
+		r.debugLogs.addNote(fmt.Sprintf("Using %q as \"baseUrl\"", absBaseURL))
 	}
 
 	// Check for exact matches first
@@ -2139,10 +2255,10 @@ func (r resolverQuery) loadPackageImports(importPath string, dirInfoPackageJSON 
 	}
 
 	// Filter out invalid module specifiers now where we have more information for
-	// a better error message instead of later when we're inside the algorithm
-	if importPath == "#" || strings.HasPrefix(importPath, "#/") {
+	// a better error message instead of later when we're inside the algorithm.
+	if importPath == "#" {
 		if r.debugLogs != nil {
-			r.debugLogs.addNote(fmt.Sprintf("The path %q must not equal \"#\" and must not start with \"#/\".", importPath))
+			r.debugLogs.addNote(fmt.Sprintf("The path %q must not equal \"#\".", importPath))
 		}
 		tracker := logger.MakeLineColumnTracker(&packageJSON.source)
 		r.debugMeta.notes = append(r.debugMeta.notes, tracker.MsgData(packageJSON.importsMap.root.firstToken,
@@ -2182,6 +2298,7 @@ func (r resolverQuery) loadPackageImports(importPath string, dirInfoPackageJSON 
 	}
 
 	absolute, ok, diffCase := r.finalizeImportsExportsResult(
+		finalizeImportsExportsNormal,
 		dirInfoPackageJSON.absPath, conditions, *packageJSON.importsMap, packageJSON,
 		resolvedPath, status, debug,
 		"", "", "",
@@ -2189,7 +2306,14 @@ func (r resolverQuery) loadPackageImports(importPath string, dirInfoPackageJSON 
 	return absolute, ok, diffCase, nil
 }
 
-func (r resolverQuery) esmResolveAlgorithm(esmPackageName string, esmPackageSubpath string, packageJSON *packageJSON, absPkgPath string, absPath string) (PathPair, bool, *fs.DifferentCase) {
+func (r resolverQuery) esmResolveAlgorithm(
+	kind finalizeImportsExportsKind,
+	esmPackageName string,
+	esmPackageSubpath string,
+	packageJSON *packageJSON,
+	absPkgPath string,
+	absPath string,
+) (PathPair, bool, *fs.DifferentCase) {
 	if r.debugLogs != nil {
 		r.debugLogs.addNote(fmt.Sprintf("Looking for %q in \"exports\" map in %q", esmPackageSubpath, packageJSON.source.KeyPath.Text))
 		r.debugLogs.increaseIndent()
@@ -2224,6 +2348,7 @@ func (r resolverQuery) esmResolveAlgorithm(esmPackageName string, esmPackageSubp
 	resolvedPath, status, debug = r.esmHandlePostConditions(resolvedPath, status, debug)
 
 	return r.finalizeImportsExportsResult(
+		kind,
 		absPkgPath, conditions, *packageJSON.exportsMap, packageJSON,
 		resolvedPath, status, debug,
 		esmPackageName, esmPackageSubpath, absPath,
@@ -2304,7 +2429,7 @@ func (r resolverQuery) loadNodeModules(importPath string, dirInfo *dirInfo, forb
 			if pkgDirInfo := r.dirInfoCached(result.pkgDirPath); pkgDirInfo != nil {
 				// Check the "exports" map
 				if packageJSON := pkgDirInfo.packageJSON; packageJSON != nil && packageJSON.exportsMap != nil {
-					absolute, ok, diffCase := r.esmResolveAlgorithm(result.pkgIdent, "."+result.pkgSubpath, packageJSON, pkgDirInfo.absPath, absPath)
+					absolute, ok, diffCase := r.esmResolveAlgorithm(finalizeImportsExportsNormal, result.pkgIdent, "."+result.pkgSubpath, packageJSON, pkgDirInfo.absPath, absPath)
 					return absolute, ok, diffCase, nil
 				}
 
@@ -2339,7 +2464,7 @@ func (r resolverQuery) loadNodeModules(importPath string, dirInfo *dirInfo, forb
 	// Check for self-references
 	if dirInfoPackageJSON != nil {
 		if packageJSON := dirInfoPackageJSON.packageJSON; packageJSON.name == esmPackageName && packageJSON.exportsMap != nil {
-			absolute, ok, diffCase := r.esmResolveAlgorithm(esmPackageName, esmPackageSubpath, packageJSON,
+			absolute, ok, diffCase := r.esmResolveAlgorithm(finalizeImportsExportsNormal, esmPackageName, esmPackageSubpath, packageJSON,
 				dirInfoPackageJSON.absPath, r.fs.Join(dirInfoPackageJSON.absPath, esmPackageSubpath))
 			return absolute, ok, diffCase, nil
 		}
@@ -2358,7 +2483,7 @@ func (r resolverQuery) loadNodeModules(importPath string, dirInfo *dirInfo, forb
 			if pkgDirInfo := r.dirInfoCached(absPkgPath); pkgDirInfo != nil {
 				// Check the "exports" map
 				if packageJSON := pkgDirInfo.packageJSON; packageJSON != nil && packageJSON.exportsMap != nil {
-					absolute, ok, diffCase := r.esmResolveAlgorithm(esmPackageName, esmPackageSubpath, packageJSON, absPkgPath, absPath)
+					absolute, ok, diffCase := r.esmResolveAlgorithm(finalizeImportsExportsNormal, esmPackageName, esmPackageSubpath, packageJSON, absPkgPath, absPath)
 					return absolute, ok, diffCase, nil, true
 				}
 
@@ -2470,7 +2595,15 @@ func (r resolverQuery) checkForBuiltInNodeModules(importPath string) (PathPair, 
 	return PathPair{}, false, nil
 }
 
+type finalizeImportsExportsKind uint8
+
+const (
+	finalizeImportsExportsNormal finalizeImportsExportsKind = iota
+	finalizeImportsExportsYarnPnPTSConfigExtends
+)
+
 func (r resolverQuery) finalizeImportsExportsResult(
+	kind finalizeImportsExportsKind,
 	absDirPath string,
 	conditions map[string]bool,
 	importExportMap pjMap,
@@ -2495,6 +2628,14 @@ func (r resolverQuery) finalizeImportsExportsResult(
 		case pjStatusExact, pjStatusExactEndsWithStar:
 			if r.debugLogs != nil {
 				r.debugLogs.addNote(fmt.Sprintf("The resolved path %q is exact", absResolvedPath))
+			}
+
+			// Avoid calling "dirInfoCached" recursively for "tsconfig.json" extends with Yarn PnP
+			if kind == finalizeImportsExportsYarnPnPTSConfigExtends {
+				if r.debugLogs != nil {
+					r.debugLogs.addNote(fmt.Sprintf("Resolved to %q", absResolvedPath))
+				}
+				return PathPair{Primary: logger.Path{Text: absResolvedPath, Namespace: "file"}}, true, nil
 			}
 
 			resolvedDirInfo := r.dirInfoCached(r.fs.Dir(absResolvedPath))
@@ -2640,10 +2781,11 @@ func (r resolverQuery) finalizeImportsExportsResult(
 						fmt.Sprintf("The file %q is exported at path %q:", query, subpath)))
 
 					// Provide an inline suggestion message with the correct import path
+					prettyPaths := MakePrettyPaths(r.fs, absolute.Primary)
 					actualImportPath := path.Join(esmPackageName, subpath)
 					r.debugMeta.suggestionText = string(helpers.QuoteForJSON(actualImportPath, false))
 					r.debugMeta.suggestionMessage = fmt.Sprintf("Import from %q to get the file %q:",
-						actualImportPath, PrettyPath(r.fs, absolute.Primary))
+						actualImportPath, prettyPaths.Select(r.options.LogPathStyle))
 				}
 			}
 		}
@@ -2658,11 +2800,12 @@ func (r resolverQuery) finalizeImportsExportsResult(
 
 		// Provide an inline suggestion message with the correct import path
 		if status == pjStatusModuleNotFoundMissingExtension {
+			prettyPaths := MakePrettyPaths(r.fs, logger.Path{Text: r.fs.Join(absDirPath, resolvedPath+missingSuffix), Namespace: "file"})
 			actualImportPath := path.Join(esmPackageName, esmPackageSubpath+missingSuffix)
 			r.debugMeta.suggestionRange = suggestionRangeEnd
 			r.debugMeta.suggestionText = missingSuffix
 			r.debugMeta.suggestionMessage = fmt.Sprintf("Import from %q to get the file %q:",
-				actualImportPath, PrettyPath(r.fs, logger.Path{Text: r.fs.Join(absDirPath, resolvedPath+missingSuffix), Namespace: "file"}))
+				actualImportPath, prettyPaths.Select(r.options.LogPathStyle))
 		}
 
 	case pjStatusUnsupportedDirectoryImport, pjStatusUnsupportedDirectoryImportMissingIndex:
@@ -2674,11 +2817,12 @@ func (r resolverQuery) finalizeImportsExportsResult(
 
 		// Provide an inline suggestion message with the correct import path
 		if status == pjStatusUnsupportedDirectoryImportMissingIndex {
+			prettyPaths := MakePrettyPaths(r.fs, logger.Path{Text: r.fs.Join(absDirPath, resolvedPath+missingSuffix), Namespace: "file"})
 			actualImportPath := path.Join(esmPackageName, esmPackageSubpath+missingSuffix)
 			r.debugMeta.suggestionRange = suggestionRangeEnd
 			r.debugMeta.suggestionText = missingSuffix
 			r.debugMeta.suggestionMessage = fmt.Sprintf("Import from %q to get the file %q:",
-				actualImportPath, PrettyPath(r.fs, logger.Path{Text: r.fs.Join(absDirPath, resolvedPath+missingSuffix), Namespace: "file"}))
+				actualImportPath, prettyPaths.Select(r.options.LogPathStyle))
 		}
 
 	case pjStatusUndefinedNoConditionsMatch:

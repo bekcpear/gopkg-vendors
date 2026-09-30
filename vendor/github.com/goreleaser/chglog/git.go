@@ -30,11 +30,23 @@ func GitHashFotTag(gitRepo *git.Repository, tagName string) (hash plumbing.Hash,
 		return plumbing.ZeroHash, fmt.Errorf("error getting commit for tag %s: %w", tagName, err)
 	}
 
-	return ref.Hash(), nil
+	// If the tag is annotated, we need to grab the actual commit hash.
+	obj, err := gitRepo.TagObject(ref.Hash())
+	if err != nil {
+		// Not an annotated tag
+		return ref.Hash(), nil
+	}
+
+	commit, err := obj.Commit()
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("error getting commit for tag %s: %w", tagName, err)
+	}
+
+	return commit.Hash, nil
 }
 
 // CommitsBetween return the list of commits between two commits.
-func CommitsBetween(gitRepo *git.Repository, start, end plumbing.Hash) (commits []*object.Commit, err error) {
+func CommitsBetween(gitRepo *git.Repository, start, end plumbing.Hash, excludeMergeCommits bool) (commits []*object.Commit, err error) {
 	var commitIter object.CommitIter
 	if commitIter, err = gitRepo.Log(&git.LogOptions{
 		From:  start,
@@ -51,6 +63,10 @@ func CommitsBetween(gitRepo *git.Repository, start, end plumbing.Hash) (commits 
 		if c.Hash == end {
 			return errReachedToCommit
 		}
+		if excludeMergeCommits && len(c.ParentHashes) > 1 {
+			return nil
+		}
+
 		commits = append(commits, c)
 
 		return nil

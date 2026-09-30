@@ -107,6 +107,10 @@ message Histogram {
   // timestamp is in ms format, see model/timestamp/timestamp.go for
   // conversion from time.Time to Prometheus timestamp.
   int64 timestamp = 15;
+
+  // custom_values are not part of the specification, DO NOT use in remote write clients.
+  // Used only for converting from OpenTelemetry to Prometheus internally.
+  repeated double custom_values = 16;
 }
 
 // A BucketSpan defines a number of consecutive buckets with their
@@ -169,10 +173,13 @@ message Chunk {
 
   // We require this to match chunkenc.Encoding.
   enum Encoding {
-    UNKNOWN         = 0;
-    XOR             = 1;
-    HISTOGRAM       = 2;
-    FLOAT_HISTOGRAM = 3;
+    UNKNOWN            = 0;
+    XOR                = 1;
+    HISTOGRAM          = 2;
+    FLOAT_HISTOGRAM    = 3;
+    XOR2               = 4;
+    HISTOGRAM_ST       = 5;
+    FLOAT_HISTOGRAM_ST = 6;
   }
   Encoding type  = 3;
   bytes data     = 4;

@@ -501,7 +501,7 @@ func ConvertBindingToExpr(binding Binding, wrapIdentifier func(logger.Loc, ast.R
 		properties := make([]Property, len(b.Properties))
 		for i, property := range b.Properties {
 			value := ConvertBindingToExpr(property.Value, wrapIdentifier)
-			kind := PropertyNormal
+			kind := PropertyField
 			if property.IsSpread {
 				kind = PropertySpread
 			}
@@ -705,6 +705,12 @@ func (ctx HelperContext) SimplifyUnusedExpr(expr Expr, unsupportedFeatures compa
 		// such as "toString" or "valueOf". They must also never throw any exceptions.
 		case UnOpVoid, UnOpNot:
 			return ctx.SimplifyUnusedExpr(e.Value, unsupportedFeatures)
+
+		case UnOpNeg:
+			if _, ok := e.Value.Data.(*EBigInt); ok {
+				// Consider negated bigints to have no side effects
+				return Expr{}
+			}
 
 		case UnOpTypeof:
 			if _, ok := e.Value.Data.(*EIdentifier); ok && e.WasOriginallyTypeofIdentifier {
@@ -929,6 +935,11 @@ func ToInt32(f float64) int32 {
 		return i
 	}
 
+	// Special-case non-finite numbers (casting them is unspecified behavior in Go)
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0
+	}
+
 	// The hard way
 	i = int32(uint32(math.Mod(math.Abs(f), 4294967296)))
 	if math.Signbit(f) {
@@ -941,14 +952,12 @@ func ToUint32(f float64) uint32 {
 	return uint32(ToInt32(f))
 }
 
+// If this returns true, we know the result can't be NaN
 func isInt32OrUint32(data E) bool {
 	switch e := data.(type) {
-	case *EUnary:
-		return e.Op == UnOpCpl
-
 	case *EBinary:
 		switch e.Op {
-		case BinOpBitwiseAnd, BinOpBitwiseOr, BinOpBitwiseXor, BinOpShl, BinOpShr, BinOpUShr:
+		case BinOpUShr: // This is the only bitwise operator that can't return a bigint (because it throws instead)
 			return true
 
 		case BinOpLogicalOr, BinOpLogicalAnd:
@@ -1081,6 +1090,45 @@ func extractNumericValues(left Expr, right Expr) (float64, float64, bool) {
 	return 0, 0, false
 }
 
+func extractStringValue(data E) ([]uint16, bool) {
+	switch e := data.(type) {
+	case *EAnnotation:
+		return extractStringValue(e.Value.Data)
+
+	case *EInlinedEnum:
+		return extractStringValue(e.Value.Data)
+
+	case *EString:
+		return e.Value, true
+	}
+
+	return nil, false
+}
+
+func extractStringValues(left Expr, right Expr) ([]uint16, []uint16, bool) {
+	if a, ok := extractStringValue(left.Data); ok {
+		if b, ok := extractStringValue(right.Data); ok {
+			return a, b, true
+		}
+	}
+	return nil, nil, false
+}
+
+func stringCompareUCS2(a []uint16, b []uint16) int {
+	var n int
+	if len(a) < len(b) {
+		n = len(a)
+	} else {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		if delta := int(a[i]) - int(b[i]); delta != 0 {
+			return delta
+		}
+	}
+	return len(a) - len(b)
+}
+
 func approximatePrintedIntCharCount(intValue float64) int {
 	count := 1 + (int)(math.Max(0, math.Floor(math.Log10(math.Abs(intValue)))))
 	if intValue < 0 {
@@ -1089,9 +1137,15 @@ func approximatePrintedIntCharCount(intValue float64) int {
 	return count
 }
 
-func ShouldFoldBinaryArithmeticWhenMinifying(binary *EBinary) bool {
+func ShouldFoldBinaryOperatorWhenMinifying(binary *EBinary) bool {
 	switch binary.Op {
 	case
+		// Equality tests should always result in smaller code when folded
+		BinOpLooseEq,
+		BinOpLooseNe,
+		BinOpStrictEq,
+		BinOpStrictNe,
+
 		// Minification always folds right signed shift operations since they are
 		// unlikely to result in larger output. Note: ">>>" could result in
 		// bigger output such as "-1 >>> 0" becoming "4294967295".
@@ -1101,7 +1155,11 @@ func ShouldFoldBinaryArithmeticWhenMinifying(binary *EBinary) bool {
 		// are unlikely to result in larger output.
 		BinOpBitwiseAnd,
 		BinOpBitwiseOr,
-		BinOpBitwiseXor:
+		BinOpBitwiseXor,
+		BinOpLt,
+		BinOpGt,
+		BinOpLe,
+		BinOpGe:
 		return true
 
 	case BinOpAdd:
@@ -1113,12 +1171,26 @@ func ShouldFoldBinaryArithmeticWhenMinifying(binary *EBinary) bool {
 			return true
 		}
 
+		// String addition should pretty much always be more compact when folded
+		if _, _, ok := extractStringValues(binary.Left, binary.Right); ok {
+			return true
+		}
+
 	case BinOpSub:
 		// Subtraction of small-ish integers can definitely be folded without issues
 		// "3 - 1" => "2"
 		if left, right, ok := extractNumericValues(binary.Left, binary.Right); ok &&
 			left == math.Trunc(left) && math.Abs(left) <= 0xFFFF_FFFF &&
 			right == math.Trunc(right) && math.Abs(right) <= 0xFFFF_FFFF {
+			return true
+		}
+
+	case BinOpMul:
+		// Allow multiplication of small-ish integers to be folded
+		// "1 * 2" => "3"
+		if left, right, ok := extractNumericValues(binary.Left, binary.Right); ok &&
+			left == math.Trunc(left) && math.Abs(left) <= 0xFF &&
+			right == math.Trunc(right) && math.Abs(right) <= 0xFF {
 			return true
 		}
 
@@ -1149,17 +1221,25 @@ func ShouldFoldBinaryArithmeticWhenMinifying(binary *EBinary) bool {
 			resultLen := approximatePrintedIntCharCount(float64(ToUint32(left) >> (ToUint32(right) & 31)))
 			return resultLen <= leftLen+3+rightLen
 		}
+
+	case BinOpLogicalAnd, BinOpLogicalOr, BinOpNullishCoalescing:
+		if IsPrimitiveLiteral(binary.Left.Data) {
+			return true
+		}
 	}
 	return false
 }
 
 // This function intentionally avoids mutating the input AST so it can be
 // called after the AST has been frozen (i.e. after parsing ends).
-func FoldBinaryArithmetic(loc logger.Loc, e *EBinary) Expr {
+func FoldBinaryOperator(loc logger.Loc, e *EBinary) Expr {
 	switch e.Op {
 	case BinOpAdd:
 		if left, right, ok := extractNumericValues(e.Left, e.Right); ok {
 			return Expr{Loc: loc, Data: &ENumber{Value: left + right}}
+		}
+		if left, right, ok := extractStringValues(e.Left, e.Right); ok {
+			return Expr{Loc: loc, Data: &EString{Value: joinStrings(left, right)}}
 		}
 
 	case BinOpSub:
@@ -1215,6 +1295,81 @@ func FoldBinaryArithmetic(loc logger.Loc, e *EBinary) Expr {
 	case BinOpBitwiseXor:
 		if left, right, ok := extractNumericValues(e.Left, e.Right); ok {
 			return Expr{Loc: loc, Data: &ENumber{Value: float64(ToInt32(left) ^ ToInt32(right))}}
+		}
+
+	case BinOpLt:
+		if left, right, ok := extractNumericValues(e.Left, e.Right); ok {
+			return Expr{Loc: loc, Data: &EBoolean{Value: left < right}}
+		}
+		if left, right, ok := extractStringValues(e.Left, e.Right); ok {
+			return Expr{Loc: loc, Data: &EBoolean{Value: stringCompareUCS2(left, right) < 0}}
+		}
+
+	case BinOpGt:
+		if left, right, ok := extractNumericValues(e.Left, e.Right); ok {
+			return Expr{Loc: loc, Data: &EBoolean{Value: left > right}}
+		}
+		if left, right, ok := extractStringValues(e.Left, e.Right); ok {
+			return Expr{Loc: loc, Data: &EBoolean{Value: stringCompareUCS2(left, right) > 0}}
+		}
+
+	case BinOpLe:
+		if left, right, ok := extractNumericValues(e.Left, e.Right); ok {
+			return Expr{Loc: loc, Data: &EBoolean{Value: left <= right}}
+		}
+		if left, right, ok := extractStringValues(e.Left, e.Right); ok {
+			return Expr{Loc: loc, Data: &EBoolean{Value: stringCompareUCS2(left, right) <= 0}}
+		}
+
+	case BinOpGe:
+		if left, right, ok := extractNumericValues(e.Left, e.Right); ok {
+			return Expr{Loc: loc, Data: &EBoolean{Value: left >= right}}
+		}
+		if left, right, ok := extractStringValues(e.Left, e.Right); ok {
+			return Expr{Loc: loc, Data: &EBoolean{Value: stringCompareUCS2(left, right) >= 0}}
+		}
+
+	case BinOpLooseEq, BinOpStrictEq:
+		if left, right, ok := extractNumericValues(e.Left, e.Right); ok {
+			return Expr{Loc: loc, Data: &EBoolean{Value: left == right}}
+		}
+		if left, right, ok := extractStringValues(e.Left, e.Right); ok {
+			return Expr{Loc: loc, Data: &EBoolean{Value: stringCompareUCS2(left, right) == 0}}
+		}
+
+	case BinOpLooseNe, BinOpStrictNe:
+		if left, right, ok := extractNumericValues(e.Left, e.Right); ok {
+			return Expr{Loc: loc, Data: &EBoolean{Value: left != right}}
+		}
+		if left, right, ok := extractStringValues(e.Left, e.Right); ok {
+			return Expr{Loc: loc, Data: &EBoolean{Value: stringCompareUCS2(left, right) != 0}}
+		}
+
+	case BinOpLogicalAnd:
+		if boolean, sideEffects, ok := ToBooleanWithSideEffects(e.Left.Data); ok {
+			if !boolean {
+				return e.Left
+			} else if sideEffects == NoSideEffects {
+				return e.Right
+			}
+		}
+
+	case BinOpLogicalOr:
+		if boolean, sideEffects, ok := ToBooleanWithSideEffects(e.Left.Data); ok {
+			if boolean {
+				return e.Left
+			} else if sideEffects == NoSideEffects {
+				return e.Right
+			}
+		}
+
+	case BinOpNullishCoalescing:
+		if isNullOrUndefined, sideEffects, ok := ToNullOrUndefinedWithSideEffects(e.Left.Data); ok {
+			if !isNullOrUndefined {
+				return e.Left
+			} else if sideEffects == NoSideEffects {
+				return e.Right
+			}
 		}
 	}
 
@@ -1354,6 +1509,12 @@ func CheckEqualityIfNoSideEffects(left E, right E, kind EqualityKind) (equal boo
 		case *ENull, *EUndefined:
 			// "(not null or undefined) == undefined" is false
 			return false, true
+
+		default:
+			if kind == StrictEquality && IsPrimitiveLiteral(right) {
+				// "boolean === (not boolean)" is false
+				return false, true
+			}
 		}
 
 	case *ENumber:
@@ -1381,6 +1542,12 @@ func CheckEqualityIfNoSideEffects(left E, right E, kind EqualityKind) (equal boo
 		case *ENull, *EUndefined:
 			// "(not null or undefined) == undefined" is false
 			return false, true
+
+		default:
+			if kind == StrictEquality && IsPrimitiveLiteral(right) {
+				// "number === (not number)" is false
+				return false, true
+			}
 		}
 
 	case *EBigInt:
@@ -1393,6 +1560,12 @@ func CheckEqualityIfNoSideEffects(left E, right E, kind EqualityKind) (equal boo
 		case *ENull, *EUndefined:
 			// "(not null or undefined) == undefined" is false
 			return false, true
+
+		default:
+			if kind == StrictEquality && IsPrimitiveLiteral(right) {
+				// "bigint === (not bigint)" is false
+				return false, true
+			}
 		}
 
 	case *EString:
@@ -1405,6 +1578,12 @@ func CheckEqualityIfNoSideEffects(left E, right E, kind EqualityKind) (equal boo
 		case *ENull, *EUndefined:
 			// "(not null or undefined) == undefined" is false
 			return false, true
+
+		default:
+			if kind == StrictEquality && IsPrimitiveLiteral(right) {
+				// "string === (not string)" is false
+				return false, true
+			}
 		}
 	}
 
@@ -1939,10 +2118,10 @@ func (ctx HelperContext) SimplifyBooleanExpr(expr Expr) Expr {
 				// in a boolean context is unnecessary because the value is
 				// only truthy if it's not zero.
 				if e.Op == BinOpStrictNe || e.Op == BinOpLooseNe {
-					// "if ((a | b) !== 0)" => "if (a | b)"
+					// "if ((a >>> b) !== 0)" => "if (a >>> b)"
 					return left
 				} else {
-					// "if ((a | b) === 0)" => "if (!(a | b))"
+					// "if ((a >>> b) === 0)" => "if (!(a >>> b))"
 					return Not(left)
 				}
 			}
@@ -2188,7 +2367,7 @@ func (ctx HelperContext) ClassCanBeRemovedIfUnused(class Class) bool {
 			return false
 		}
 
-		if property.Flags.Has(PropertyIsMethod) {
+		if property.Kind.IsMethodDefinition() {
 			if fn, ok := property.ValueOrNil.Data.(*EFunction); ok {
 				for _, arg := range fn.Fn.Args {
 					if len(arg.Decorators) > 0 {
@@ -2241,7 +2420,7 @@ func (ctx HelperContext) ClassCanBeRemovedIfUnused(class Class) bool {
 			//     static foo = 1
 			//   }
 			//
-			if !class.UseDefineForClassFields && !property.Flags.Has(PropertyIsMethod) {
+			if property.Kind == PropertyField && !class.UseDefineForClassFields {
 				return false
 			}
 		}
@@ -2382,6 +2561,12 @@ func (ctx HelperContext) ExprCanBeRemovedIfUnused(expr Expr) bool {
 		// such as "toString" or "valueOf". They must also never throw any exceptions.
 		case UnOpVoid, UnOpNot:
 			return ctx.ExprCanBeRemovedIfUnused(e.Value)
+
+		case UnOpNeg:
+			if _, ok := e.Value.Data.(*EBigInt); ok {
+				// Consider negated bigints to have no side effects
+				return true
+			}
 
 		// The "typeof" operator doesn't do any type conversions so it can be removed
 		// if the result is unused and the operand has no side effects. However, it
@@ -2565,7 +2750,7 @@ func MangleObjectSpread(properties []Property) []Property {
 					// descriptor is not inlined into the caller. Since we are not
 					// evaluating code at compile time, just bail if we hit one
 					// and preserve the spread with the remaining properties.
-					if p.Kind == PropertyGet || p.Kind == PropertySet {
+					if p.Kind == PropertyGetter || p.Kind == PropertySetter {
 						// Don't mutate the original AST
 						clone := *v
 						clone.Properties = v.Properties[i:]
@@ -2577,7 +2762,7 @@ func MangleObjectSpread(properties []Property) []Property {
 					// Also bail if we hit a verbatim "__proto__" key. This will
 					// actually set the prototype of the object being spread so
 					// inlining it is not correct.
-					if p.Kind == PropertyNormal && !p.Flags.Has(PropertyIsComputed) && !p.Flags.Has(PropertyIsMethod) {
+					if p.Kind == PropertyField && !p.Flags.Has(PropertyIsComputed) {
 						if str, ok := p.Key.Data.(*EString); ok && helpers.UTF16EqualsString(str.Value, "__proto__") {
 							// Don't mutate the original AST
 							clone := *v

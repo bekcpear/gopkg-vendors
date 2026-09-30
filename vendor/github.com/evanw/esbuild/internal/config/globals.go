@@ -2,7 +2,6 @@ package config
 
 import (
 	"math"
-	"strings"
 	"sync"
 
 	"github.com/evanw/esbuild/internal/ast"
@@ -28,20 +27,23 @@ var processedGlobals *ProcessedDefines
 // these functions has any side effects. It only says something about
 // referencing these function without calling them.
 var knownGlobals = [][]string{
-	// These global identifiers should exist in all JavaScript environments. This
-	// deliberately omits "NaN", "Infinity", and "undefined" because these are
-	// treated as automatically-inlined constants instead of identifiers.
-	{"Array"},
-	{"Boolean"},
-	{"Function"},
-	{"Math"},
-	{"Number"},
-	{"Object"},
-	{"RegExp"},
-	{"String"},
+	// Array: Static methods
+	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array#static_methods
+	{"Array", "from"},
+	{"Array", "fromAsync"},
+	{"Array", "isArray"},
+	{"Array", "of"},
+
+	// RegExp: Static methods
+	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp#static_methods
+	{"RegExp", "escape"},
+
+	// Map: Static methods
+	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map#static_methods
+	{"Map", "groupBy"},
 
 	// Object: Static methods
-	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object#Static_methods
+	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object#static_methods
 	{"Object", "assign"},
 	{"Object", "create"},
 	{"Object", "defineProperties"},
@@ -65,7 +67,7 @@ var knownGlobals = [][]string{
 	{"Object", "values"},
 
 	// Object: Instance methods
-	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object#Instance_methods
+	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object#instance_methods
 	{"Object", "prototype", "__defineGetter__"},
 	{"Object", "prototype", "__defineSetter__"},
 	{"Object", "prototype", "__lookupGetter__"},
@@ -98,7 +100,7 @@ var knownGlobals = [][]string{
 	{"Symbol", "unscopables"},
 
 	// Math: Static properties
-	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math#Static_properties
+	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math#static_properties
 	{"Math", "E"},
 	{"Math", "LN10"},
 	{"Math", "LN2"},
@@ -109,7 +111,7 @@ var knownGlobals = [][]string{
 	{"Math", "SQRT2"},
 
 	// Math: Static methods
-	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math#Static_methods
+	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math#static_methods
 	{"Math", "abs"},
 	{"Math", "acos"},
 	{"Math", "acosh"},
@@ -162,41 +164,91 @@ var knownGlobals = [][]string{
 	{"Reflect", "set"},
 	{"Reflect", "setPrototypeOf"},
 
-	// JSON: Static Methods
+	// JSON: Static methods
 	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON#static_methods
 	{"JSON", "parse"},
 	{"JSON", "stringify"},
 
-	// Other globals present in both the browser and node (except "eval" because
-	// it has special behavior)
+	// TypedArray: Static methods
+	// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypedArray#static_methods
+	{"BigInt64Array", "from"},
+	{"BigInt64Array", "of"},
+	{"BigUint64Array", "from"},
+	{"BigUint64Array", "of"},
+	{"Float16Array", "from"},
+	{"Float16Array", "of"},
+	{"Float32Array", "from"},
+	{"Float32Array", "of"},
+	{"Float64Array", "from"},
+	{"Float64Array", "of"},
+	{"Int16Array", "from"},
+	{"Int16Array", "of"},
+	{"Int32Array", "from"},
+	{"Int32Array", "of"},
+	{"Int8Array", "from"},
+	{"Int8Array", "of"},
+	{"Uint16Array", "from"},
+	{"Uint16Array", "of"},
+	{"Uint32Array", "from"},
+	{"Uint32Array", "of"},
+	{"Uint8Array", "from"},
+	{"Uint8Array", "fromBase64"},
+	{"Uint8Array", "fromHex"},
+	{"Uint8Array", "of"},
+	{"Uint8ClampedArray", "from"},
+	{"Uint8ClampedArray", "of"},
+
+	// Other globals present in both the browser and node. This should include at
+	// least the following properties:
+	// https://tc39.es/ecma262/multipage/global-object.html#sec-constructor-properties-of-the-global-object
+	//
+	// Exceptions:
+	// - Don't include "eval" because it has special behavior
+	// - Don't include "NaN", "Infinity", and "undefined" because esbuild treats
+	//   these as automatically-inlined constants instead of identifiers
 	{"AbortController"},
 	{"AbortSignal"},
 	{"AggregateError"},
+	{"Array"},
 	{"ArrayBuffer"},
+	{"Atomics"},
 	{"BigInt"},
+	{"BigInt64Array"},
+	{"BigUint64Array"},
+	{"Boolean"},
 	{"DataView"},
 	{"Date"},
 	{"Error"},
 	{"EvalError"},
 	{"Event"},
 	{"EventTarget"},
+	{"FinalizationRegistry"},
+	{"Float16Array"},
 	{"Float32Array"},
 	{"Float64Array"},
+	{"Function"},
 	{"Int16Array"},
 	{"Int32Array"},
 	{"Int8Array"},
 	{"Intl"},
+	{"Iterator"},
 	{"JSON"},
 	{"Map"},
+	{"Math"},
 	{"MessageChannel"},
 	{"MessageEvent"},
 	{"MessagePort"},
+	{"Number"},
+	{"Object"},
 	{"Promise"},
 	{"Proxy"},
 	{"RangeError"},
 	{"ReferenceError"},
 	{"Reflect"},
+	{"RegExp"},
 	{"Set"},
+	{"SharedArrayBuffer"},
+	{"String"},
 	{"Symbol"},
 	{"SyntaxError"},
 	{"TextDecoder"},
@@ -210,6 +262,7 @@ var knownGlobals = [][]string{
 	{"Uint8Array"},
 	{"Uint8ClampedArray"},
 	{"WeakMap"},
+	{"WeakRef"},
 	{"WeakSet"},
 	{"WebAssembly"},
 	{"clearInterval"},
@@ -868,6 +921,7 @@ type DefineExpr struct {
 }
 
 type DefineData struct {
+	KeyParts   []string
 	DefineExpr *DefineExpr
 	Flags      DefineFlags
 }
@@ -905,14 +959,9 @@ func mergeDefineData(old DefineData, new DefineData) DefineData {
 	return new
 }
 
-type DotDefine struct {
-	Data  DefineData
-	Parts []string
-}
-
 type ProcessedDefines struct {
 	IdentifierDefines map[string]DefineData
-	DotDefines        map[string][]DotDefine
+	DotDefines        map[string][]DefineData
 }
 
 // This transformation is expensive, so we only want to do it once. Make sure
@@ -920,7 +969,7 @@ type ProcessedDefines struct {
 // doesn't have an efficient way to copy a map and the overhead of copying
 // all of the properties into a new map once for every new parser noticeably
 // slows down our benchmarks.
-func ProcessDefines(userDefines map[string]DefineData) ProcessedDefines {
+func ProcessDefines(userDefines []DefineData) ProcessedDefines {
 	// Optimization: reuse known globals if there are no user-specified defines
 	hasUserDefines := len(userDefines) != 0
 	if !hasUserDefines {
@@ -934,7 +983,7 @@ func ProcessDefines(userDefines map[string]DefineData) ProcessedDefines {
 
 	result := ProcessedDefines{
 		IdentifierDefines: make(map[string]DefineData),
-		DotDefines:        make(map[string][]DotDefine),
+		DotDefines:        make(map[string][]DefineData),
 	}
 
 	// Mark these property accesses as free of side effects. That means they can
@@ -956,7 +1005,7 @@ func ProcessDefines(userDefines map[string]DefineData) ProcessedDefines {
 				flags |= IsSymbolInstance
 			}
 
-			result.DotDefines[tail] = append(result.DotDefines[tail], DotDefine{Parts: parts, Data: DefineData{Flags: flags}})
+			result.DotDefines[tail] = append(result.DotDefines[tail], DefineData{KeyParts: parts, Flags: flags})
 		}
 	}
 
@@ -973,31 +1022,29 @@ func ProcessDefines(userDefines map[string]DefineData) ProcessedDefines {
 
 	// Then copy the user-specified defines in afterwards, which will overwrite
 	// any known globals above.
-	for key, data := range userDefines {
-		parts := strings.Split(key, ".")
-
+	for _, data := range userDefines {
 		// Identifier defines are special-cased
-		if len(parts) == 1 {
-			result.IdentifierDefines[key] = mergeDefineData(result.IdentifierDefines[key], data)
+		if len(data.KeyParts) == 1 {
+			name := data.KeyParts[0]
+			result.IdentifierDefines[name] = mergeDefineData(result.IdentifierDefines[name], data)
 			continue
 		}
 
-		tail := parts[len(parts)-1]
+		tail := data.KeyParts[len(data.KeyParts)-1]
 		dotDefines := result.DotDefines[tail]
 		found := false
 
 		// Try to merge with existing dot defines first
 		for i, define := range dotDefines {
-			if helpers.StringArraysEqual(parts, define.Parts) {
-				define := &dotDefines[i]
-				define.Data = mergeDefineData(define.Data, data)
+			if helpers.StringArraysEqual(data.KeyParts, define.KeyParts) {
+				dotDefines[i] = mergeDefineData(dotDefines[i], data)
 				found = true
 				break
 			}
 		}
 
 		if !found {
-			dotDefines = append(dotDefines, DotDefine{Parts: parts, Data: data})
+			dotDefines = append(dotDefines, data)
 		}
 		result.DotDefines[tail] = dotDefines
 	}

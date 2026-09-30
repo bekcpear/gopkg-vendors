@@ -169,7 +169,7 @@ func validateLegalComments(value LegalComments, bundle bool) config.LegalComment
 	case LegalCommentsExternal:
 		return config.LegalCommentsExternalWithoutComment
 	default:
-		panic("Invalid source map")
+		panic("Invalid legal comments")
 	}
 }
 
@@ -205,6 +205,17 @@ func validateLogLevel(value LogLevel) logger.LogLevel {
 	}
 }
 
+func validateLogStyle(value LogStyle) logger.LogStyle {
+	switch value {
+	case LogStyleDefault:
+		return logger.StyleDefault
+	case LogStyleVisualStudio:
+		return logger.StyleVisualStudio
+	default:
+		panic("Invalid log style")
+	}
+}
+
 func validateASCIIOnly(value Charset) bool {
 	switch value {
 	case CharsetDefault, CharsetASCII:
@@ -213,6 +224,17 @@ func validateASCIIOnly(value Charset) bool {
 		return false
 	default:
 		panic("Invalid charset")
+	}
+}
+
+func validateExternalPackages(value Packages) bool {
+	switch value {
+	case PackagesDefault, PackagesBundle:
+		return false
+	case PackagesExternal:
+		return true
+	default:
+		panic("Invalid packages")
 	}
 }
 
@@ -276,22 +298,11 @@ func validateLoader(value Loader) config.Loader {
 	}
 }
 
-func validateEngine(value EngineName) compat.Engine {
-	switch value {
-	case EngineChrome:
-		return compat.Chrome
-	case EngineEdge:
-		return compat.Edge
-	case EngineFirefox:
-		return compat.Firefox
-	case EngineIOS:
-		return compat.IOS
-	case EngineNode:
-		return compat.Node
-	case EngineSafari:
-		return compat.Safari
-	default:
-		panic("Invalid loader")
+func extractPathStyle(absPaths AbsPaths, flag AbsPaths) logger.PathStyle {
+	if (absPaths & flag) != 0 {
+		return logger.AbsPath
+	} else {
+		return logger.RelPath
 	}
 }
 
@@ -324,6 +335,12 @@ func validateFeatures(log logger.Log, target Target, engines []Engine) (compat.J
 		constraints[compat.ES] = compat.Semver{Parts: []int{2021}}
 	case ES2022:
 		constraints[compat.ES] = compat.Semver{Parts: []int{2022}}
+	case ES2023:
+		constraints[compat.ES] = compat.Semver{Parts: []int{2023}}
+	case ES2024:
+		constraints[compat.ES] = compat.Semver{Parts: []int{2024}}
+	case ES2025:
+		constraints[compat.ES] = compat.Semver{Parts: []int{2025}}
 	case ESNext, DefaultTarget:
 	default:
 		panic("Invalid target")
@@ -339,10 +356,15 @@ func validateFeatures(log logger.Log, target Target, engines []Engine) (compat.J
 						parts = append(parts, patch)
 					}
 				}
-				constraints[convertEngineName(engine.Name)] = compat.Semver{
+				name := convertEngineName(engine.Name)
+				new := compat.Semver{
 					Parts:      parts,
 					PreRelease: match[4],
 				}
+				if old, ok := constraints[name]; ok && compat.CompareSemver(old, new) < 0 {
+					continue
+				}
+				constraints[name] = new
 				continue
 			}
 		}
@@ -390,12 +412,12 @@ func validateSupported(log logger.Log, supported map[string]bool) (
 	return
 }
 
-func validateGlobalName(log logger.Log, text string) []string {
+func validateGlobalName(log logger.Log, text string, path string) []string {
 	if text != "" {
 		source := logger.Source{
-			KeyPath:    logger.Path{Text: "(global path)"},
-			PrettyPath: "(global name)",
-			Contents:   text,
+			KeyPath:     logger.Path{Text: path},
+			PrettyPaths: logger.PrettyPaths{Abs: path, Rel: path},
+			Contents:    text,
 		}
 
 		if result, ok := js_parser.ParseGlobalName(log, source); ok {
@@ -452,37 +474,6 @@ func validateExternals(log logger.Log, fs fs.FS, paths []string) config.External
 	}
 
 	return result
-}
-
-func esmParsePackageName(packageSpecifier string) (packageName string, packageSubpath string, ok bool) {
-	if packageSpecifier == "" {
-		return
-	}
-
-	slash := strings.IndexByte(packageSpecifier, '/')
-	if !strings.HasPrefix(packageSpecifier, "@") {
-		if slash == -1 {
-			slash = len(packageSpecifier)
-		}
-		packageName = packageSpecifier[:slash]
-	} else {
-		if slash == -1 {
-			return
-		}
-		slash2 := strings.IndexByte(packageSpecifier[slash+1:], '/')
-		if slash2 == -1 {
-			slash2 = len(packageSpecifier[slash+1:])
-		}
-		packageName = packageSpecifier[:slash+1+slash2]
-	}
-
-	if strings.HasPrefix(packageName, ".") || strings.ContainsAny(packageName, "\\%") {
-		return
-	}
-
-	packageSubpath = "." + packageSpecifier[len(packageName):]
-	ok = true
-	return
 }
 
 func validateAlias(log logger.Log, fs fs.FS, alias map[string]string) map[string]string {
@@ -551,12 +542,24 @@ func validateLoaders(log logger.Log, loaders map[string]Loader) map[string]confi
 
 func validateJSXExpr(log logger.Log, text string, name string) config.DefineExpr {
 	if text != "" {
-		if expr, _ := js_parser.ParseDefineExprOrJSON(text); len(expr.Parts) > 0 || (name == "fragment" && expr.Constant != nil) {
+		if expr, _ := js_parser.ParseDefineExpr(text); len(expr.Parts) > 0 || (name == "fragment" && expr.Constant != nil) {
 			return expr
 		}
 		log.AddError(nil, logger.Range{}, fmt.Sprintf("Invalid JSX %s: %q", name, text))
 	}
 	return config.DefineExpr{}
+}
+
+// This returns an arbitrary but unique key for each unique array of strings
+func mapKeyForDefine(parts []string) string {
+	var sb strings.Builder
+	var n [4]byte
+	for _, part := range parts {
+		binary.LittleEndian.PutUint32(n[:], uint32(len(part)))
+		sb.Write(n[:])
+		sb.WriteString(part)
+	}
+	return sb.String()
 }
 
 func validateDefines(
@@ -568,32 +571,36 @@ func validateDefines(
 	minify bool,
 	drop Drop,
 ) (*config.ProcessedDefines, []config.InjectedDefine) {
-	rawDefines := make(map[string]config.DefineData)
-	var valueToInject map[string]config.InjectedDefine
-	var definesToInject []string
+	// Sort injected defines for determinism, since the imports will be injected
+	// into every file in the order that we return them from this function
+	sortedKeys := make([]string, 0, len(defines))
+	for key := range defines {
+		sortedKeys = append(sortedKeys, key)
+	}
+	sort.Strings(sortedKeys)
 
-	for key, value := range defines {
-		// The key must be a dot-separated identifier list
-		for _, part := range strings.Split(key, ".") {
-			if !js_ast.IsIdentifier(part) {
-				if part == key {
-					log.AddError(nil, logger.Range{}, fmt.Sprintf("The define key %q must be a valid identifier", key))
-				} else {
-					log.AddError(nil, logger.Range{}, fmt.Sprintf("The define key %q contains invalid identifier %q", key, part))
-				}
-				continue
-			}
+	rawDefines := make(map[string]config.DefineData)
+	nodeEnvParts := []string{"process", "env", "NODE_ENV"}
+	nodeEnvMapKey := mapKeyForDefine(nodeEnvParts)
+	var injectedDefines []config.InjectedDefine
+
+	for _, key := range sortedKeys {
+		value := defines[key]
+		keyParts := validateGlobalName(log, key, "(define name)")
+		if keyParts == nil {
+			continue
 		}
+		mapKey := mapKeyForDefine(keyParts)
 
 		// Parse the value
-		defineExpr, injectExpr := js_parser.ParseDefineExprOrJSON(value)
+		defineExpr, injectExpr := js_parser.ParseDefineExpr(value)
 
 		// Define simple expressions
 		if defineExpr.Constant != nil || len(defineExpr.Parts) > 0 {
-			rawDefines[key] = config.DefineData{DefineExpr: &defineExpr}
+			rawDefines[mapKey] = config.DefineData{KeyParts: keyParts, DefineExpr: &defineExpr}
 
 			// Try to be helpful for common mistakes
-			if len(defineExpr.Parts) == 1 && key == "process.env.NODE_ENV" {
+			if len(defineExpr.Parts) == 1 && mapKey == nodeEnvMapKey {
 				data := logger.MsgData{
 					Text: fmt.Sprintf("%q is defined as an identifier instead of a string (surround %q with quotes to get a string)", key, value),
 				}
@@ -602,7 +609,7 @@ func validateDefines(
 				switch logger.API {
 				case logger.CLIAPI:
 					data.Location = &logger.MsgLocation{
-						File:       "<cli>",
+						File:       logger.PrettyPaths{Abs: "<cli>", Rel: "<cli>"},
 						Line:       1,
 						Column:     30,
 						Length:     len(part),
@@ -612,7 +619,7 @@ func validateDefines(
 
 				case logger.JSAPI:
 					data.Location = &logger.MsgLocation{
-						File:       "<js>",
+						File:       logger.PrettyPaths{Abs: "<js>", Rel: "<js>"},
 						Line:       1,
 						Column:     34,
 						Length:     len(part) + 2,
@@ -622,7 +629,7 @@ func validateDefines(
 
 				case logger.GoAPI:
 					data.Location = &logger.MsgLocation{
-						File:       "<go>",
+						File:       logger.PrettyPaths{Abs: "<go>", Rel: "<go>"},
 						Line:       1,
 						Column:     50,
 						Length:     len(part) + 2,
@@ -641,32 +648,18 @@ func validateDefines(
 
 		// Inject complex expressions
 		if injectExpr != nil {
-			definesToInject = append(definesToInject, key)
-			if valueToInject == nil {
-				valueToInject = make(map[string]config.InjectedDefine)
-			}
-			valueToInject[key] = config.InjectedDefine{
+			index := ast.MakeIndex32(uint32(len(injectedDefines)))
+			injectedDefines = append(injectedDefines, config.InjectedDefine{
 				Source: logger.Source{Contents: value},
 				Data:   injectExpr,
 				Name:   key,
-			}
+			})
+			rawDefines[mapKey] = config.DefineData{KeyParts: keyParts, DefineExpr: &config.DefineExpr{InjectedDefineIndex: index}}
 			continue
 		}
 
 		// Anything else is unsupported
-		log.AddError(nil, logger.Range{}, fmt.Sprintf("Invalid define value (must be an entity name or valid JSON syntax): %s", value))
-	}
-
-	// Sort injected defines for determinism, since the imports will be injected
-	// into every file in the order that we return them from this function
-	var injectedDefines []config.InjectedDefine
-	if len(definesToInject) > 0 {
-		injectedDefines = make([]config.InjectedDefine, len(definesToInject))
-		sort.Strings(definesToInject)
-		for i, key := range definesToInject {
-			injectedDefines[i] = valueToInject[key]
-			rawDefines[key] = config.DefineData{DefineExpr: &config.DefineExpr{InjectedDefineIndex: ast.MakeIndex32(uint32(i))}}
-		}
+		log.AddError(nil, logger.Range{}, fmt.Sprintf("Invalid define value (must be an entity name or JS literal): %s", value))
 	}
 
 	// If we're bundling for the browser, add a special-cased define for
@@ -676,16 +669,16 @@ func validateDefines(
 	// is only done if it's not already defined so that you can override it if
 	// necessary.
 	if isBuildAPI && platform == config.PlatformBrowser {
-		if _, process := rawDefines["process"]; !process {
-			if _, processEnv := rawDefines["process.env"]; !processEnv {
-				if _, processEnvNodeEnv := rawDefines["process.env.NODE_ENV"]; !processEnvNodeEnv {
+		if _, process := rawDefines[mapKeyForDefine([]string{"process"})]; !process {
+			if _, processEnv := rawDefines[mapKeyForDefine([]string{"process.env"})]; !processEnv {
+				if _, processEnvNodeEnv := rawDefines[nodeEnvMapKey]; !processEnvNodeEnv {
 					var value []uint16
 					if minify {
 						value = helpers.StringToUTF16("production")
 					} else {
 						value = helpers.StringToUTF16("development")
 					}
-					rawDefines["process.env.NODE_ENV"] = config.DefineData{DefineExpr: &config.DefineExpr{Constant: &js_ast.EString{Value: value}}}
+					rawDefines[nodeEnvMapKey] = config.DefineData{KeyParts: nodeEnvParts, DefineExpr: &config.DefineExpr{Constant: &js_ast.EString{Value: value}}}
 				}
 			}
 		}
@@ -693,29 +686,35 @@ func validateDefines(
 
 	// If we're dropping all console API calls, replace each one with undefined
 	if (drop & DropConsole) != 0 {
-		define := rawDefines["console"]
+		consoleParts := []string{"console"}
+		consoleMapKey := mapKeyForDefine(consoleParts)
+		define := rawDefines[consoleMapKey]
+		define.KeyParts = consoleParts
 		define.Flags |= config.MethodCallsMustBeReplacedWithUndefined
-		rawDefines["console"] = define
+		rawDefines[consoleMapKey] = define
 	}
 
 	for _, key := range pureFns {
-		// The key must be a dot-separated identifier list
-		for _, part := range strings.Split(key, ".") {
-			if !js_ast.IsIdentifier(part) {
-				log.AddError(nil, logger.Range{}, fmt.Sprintf("Invalid pure function: %q", key))
-				continue
-			}
+		keyParts := validateGlobalName(log, key, "(pure name)")
+		if keyParts == nil {
+			continue
 		}
+		mapKey := mapKeyForDefine(keyParts)
 
 		// Merge with any previously-specified defines
-		define := rawDefines[key]
+		define := rawDefines[mapKey]
+		define.KeyParts = keyParts
 		define.Flags |= config.CallCanBeUnwrappedIfUnused
-		rawDefines[key] = define
+		rawDefines[mapKey] = define
 	}
 
 	// Processing defines is expensive. Process them once here so the same object
 	// can be shared between all parsers we create using these arguments.
-	processed := config.ProcessDefines(rawDefines)
+	definesArray := make([]config.DefineData, 0, len(rawDefines))
+	for _, define := range rawDefines {
+		definesArray = append(definesArray, define)
+	}
+	processed := config.ProcessDefines(definesArray)
 	return &processed, injectedDefines
 }
 
@@ -778,10 +777,10 @@ func validateKeepNames(log logger.Log, options *config.Options) {
 	}
 }
 
-func convertLocationToPublic(loc *logger.MsgLocation) *Location {
+func convertLocationToPublic(loc *logger.MsgLocation, pathStyle logger.PathStyle) *Location {
 	if loc != nil {
 		return &Location{
-			File:       loc.File,
+			File:       loc.File.Select(pathStyle),
 			Namespace:  loc.Namespace,
 			Line:       loc.Line,
 			Column:     loc.Column,
@@ -793,7 +792,7 @@ func convertLocationToPublic(loc *logger.MsgLocation) *Location {
 	return nil
 }
 
-func convertMessagesToPublic(kind logger.MsgKind, msgs []logger.Msg) []Message {
+func convertMessagesToPublic(kind logger.MsgKind, msgs []logger.Msg, pathStyle logger.PathStyle) []Message {
 	var filtered []Message
 	for _, msg := range msgs {
 		if msg.Kind == kind {
@@ -801,14 +800,14 @@ func convertMessagesToPublic(kind logger.MsgKind, msgs []logger.Msg) []Message {
 			for _, note := range msg.Notes {
 				notes = append(notes, Note{
 					Text:     note.Text,
-					Location: convertLocationToPublic(note.Location),
+					Location: convertLocationToPublic(note.Location, pathStyle),
 				})
 			}
 			filtered = append(filtered, Message{
 				ID:         logger.MsgIDToString(msg.ID),
 				PluginName: msg.PluginName,
 				Text:       msg.Data.Text,
-				Location:   convertLocationToPublic(msg.Data.Location),
+				Location:   convertLocationToPublic(msg.Data.Location, pathStyle),
 				Notes:      notes,
 				Detail:     msg.Data.UserDetail,
 			})
@@ -824,7 +823,7 @@ func convertLocationToInternal(loc *Location) *logger.MsgLocation {
 			namespace = "file"
 		}
 		return &logger.MsgLocation{
-			File:       loc.File,
+			File:       logger.PrettyPaths{Abs: loc.File, Rel: loc.File},
 			Namespace:  namespace,
 			Line:       loc.Line,
 			Column:     loc.Column,
@@ -901,6 +900,8 @@ func contextImpl(buildOpts BuildOptions) (*internalContext, []Message) {
 		MessageLimit:  buildOpts.LogLimit,
 		Color:         validateColor(buildOpts.Color),
 		LogLevel:      validateLogLevel(buildOpts.LogLevel),
+		LogStyle:      validateLogStyle(buildOpts.LogStyle),
+		PathStyle:     extractPathStyle(buildOpts.AbsPaths, LogAbsPath),
 		Overrides:     validateLogOverrides(buildOpts.LogOverride),
 	}
 
@@ -917,7 +918,7 @@ func contextImpl(buildOpts BuildOptions) (*internalContext, []Message) {
 	if err != nil {
 		log := logger.NewStderrLog(logOptions)
 		log.AddError(nil, logger.Range{}, err.Error())
-		return nil, convertMessagesToPublic(logger.Error, log.Done())
+		return nil, convertMessagesToPublic(logger.Error, log.Done(), logOptions.PathStyle)
 	}
 
 	// Do not re-evaluate plugins when rebuilding. Also make sure the working
@@ -947,7 +948,7 @@ func contextImpl(buildOpts BuildOptions) (*internalContext, []Message) {
 			}
 			stderr.Done()
 		}
-		return nil, convertMessagesToPublic(logger.Error, msgs)
+		return nil, convertMessagesToPublic(logger.Error, msgs, options.LogPathStyle)
 	}
 
 	args := rebuildArgs{
@@ -1105,9 +1106,11 @@ func (ctx *internalContext) Watch(options WatchOptions) error {
 		fs:        ctx.realFS,
 		shouldLog: logLevel == logger.LevelInfo || logLevel == logger.LevelDebug || logLevel == logger.LevelVerbose,
 		useColor:  ctx.args.logOptions.Color,
+		pathStyle: ctx.args.logOptions.PathStyle,
 		rebuild: func() fs.WatchData {
 			return ctx.rebuild().watchData
 		},
+		delayInMS: time.Duration(options.Delay),
 	}
 
 	// All subsequent builds will be watch mode builds
@@ -1298,7 +1301,7 @@ func validateBuildOptions(
 		ASCIIOnly:             validateASCIIOnly(buildOpts.Charset),
 		IgnoreDCEAnnotations:  buildOpts.IgnoreAnnotations,
 		TreeShaking:           validateTreeShaking(buildOpts.TreeShaking, buildOpts.Bundle, buildOpts.Format),
-		GlobalName:            validateGlobalName(log, buildOpts.GlobalName),
+		GlobalName:            validateGlobalName(log, buildOpts.GlobalName, "(global name)"),
 		CodeSplitting:         buildOpts.Splitting,
 		OutputFormat:          validateFormat(buildOpts.Format),
 		AbsOutputFile:         validatePath(log, realFS, buildOpts.Outfile, "outfile path"),
@@ -1313,13 +1316,16 @@ func validateBuildOptions(
 		ExtensionToLoader:     validateLoaders(log, buildOpts.Loader),
 		ExtensionOrder:        validateResolveExtensions(log, buildOpts.ResolveExtensions),
 		ExternalSettings:      validateExternals(log, realFS, buildOpts.External),
-		ExternalPackages:      buildOpts.Packages == PackagesExternal,
+		ExternalPackages:      validateExternalPackages(buildOpts.Packages),
 		PackageAliases:        validateAlias(log, realFS, buildOpts.Alias),
 		TSConfigPath:          validatePath(log, realFS, buildOpts.Tsconfig, "tsconfig path"),
 		TSConfigRaw:           buildOpts.TsconfigRaw,
 		MainFields:            buildOpts.MainFields,
 		PublicPath:            buildOpts.PublicPath,
 		KeepNames:             buildOpts.KeepNames,
+		CodePathStyle:         extractPathStyle(buildOpts.AbsPaths, CodeAbsPath),
+		LogPathStyle:          extractPathStyle(buildOpts.AbsPaths, LogAbsPath),
+		MetafilePathStyle:     extractPathStyle(buildOpts.AbsPaths, MetafileAbsPath),
 		InjectPaths:           append([]string{}, buildOpts.Inject...),
 		AbsNodePaths:          make([]string, len(buildOpts.NodePaths)),
 		JSBanner:              bannerJS,
@@ -1505,16 +1511,15 @@ func rebuildImpl(args rebuildArgs, oldHashes map[string]string) (rebuildState, m
 	// Scan over the bundle
 	bundle := bundler.ScanBundle(config.BuildCall, log, realFS, args.caches, args.entryPoints, args.options, timer)
 	watchData = realFS.WatchData()
-
-	// The new build summary remains the same as the old one when there are
-	// errors. A failed build shouldn't erase the previous successful build.
-	newHashes := oldHashes
+	newHashes := make(map[string]string)
 
 	// Stop now if there were errors
+	var results []graph.OutputFile
+	var metafile string
 	if !log.HasErrors() {
 		// Compile the bundle
 		result.MangleCache = cloneMangleCache(log, args.mangleCache)
-		results, metafile := bundle.Compile(log, timer, result.MangleCache, linker.Link)
+		results, metafile = bundle.Compile(log, timer, result.MangleCache, linker.Link)
 
 		// Canceling a build generates a single error at the end of the build
 		if args.options.CancelFlag.DidCancel() {
@@ -1528,7 +1533,6 @@ func rebuildImpl(args rebuildArgs, oldHashes map[string]string) (rebuildState, m
 			// Populate the results to return
 			var hashBytes [8]byte
 			result.OutputFiles = make([]OutputFile, len(results))
-			newHashes = make(map[string]string)
 			for i, item := range results {
 				if args.options.WriteToStdout {
 					item.AbsPath = "<stdout>"
@@ -1544,72 +1548,81 @@ func rebuildImpl(args rebuildArgs, oldHashes map[string]string) (rebuildState, m
 				}
 				newHashes[item.AbsPath] = hash
 			}
+		}
+	}
 
-			// Write output files before "OnEnd" callbacks run so they can expect
-			// output files to exist on the file system. "OnEnd" callbacks can be
-			// used to move output files to a different location after the build.
-			if args.write {
-				timer.Begin("Write output files")
-				if args.options.WriteToStdout {
-					// Special-case writing to stdout
-					if len(results) != 1 {
-						log.AddError(nil, logger.Range{}, fmt.Sprintf(
-							"Internal error: did not expect to generate %d files when writing to stdout", len(results)))
-					} else {
-						// Print this later on, at the end of the current function
-						toWriteToStdout = results[0].Contents
+	// Write output files before "OnEnd" callbacks run so they can expect
+	// output files to exist on the file system. "OnEnd" callbacks can be
+	// used to move output files to a different location after the build.
+	if args.write {
+		timer.Begin("Write output files")
+		if args.options.WriteToStdout {
+			// Special-case writing to stdout
+			if log.HasErrors() {
+				// No output is printed if there were any build errors
+			} else if len(results) != 1 {
+				log.AddError(nil, logger.Range{}, fmt.Sprintf(
+					"Internal error: did not expect to generate %d files when writing to stdout", len(results)))
+			} else {
+				// Print this later on, at the end of the current function
+				toWriteToStdout = results[0].Contents
+			}
+		} else {
+			// Delete old files that are no longer relevant
+			var toDelete []string
+			for absPath := range oldHashes {
+				if _, ok := newHashes[absPath]; !ok {
+					toDelete = append(toDelete, absPath)
+				}
+			}
+
+			// Only write output files if there were no errors. See this issue
+			// for why: https://github.com/evanw/esbuild/issues/3643
+			shouldWriteFiles := !log.HasErrors()
+
+			// Process all file operations in parallel
+			waitGroup := sync.WaitGroup{}
+			waitGroup.Add(len(results) + len(toDelete))
+			for _, result := range results {
+				go func(result graph.OutputFile) {
+					defer waitGroup.Done()
+					if !shouldWriteFiles {
+						return
 					}
-				} else {
-					// Delete old files that are no longer relevant
-					var toDelete []string
-					for absPath := range oldHashes {
-						if _, ok := newHashes[absPath]; !ok {
-							toDelete = append(toDelete, absPath)
+					fs.BeforeFileOpen()
+					defer fs.AfterFileClose()
+					if oldHash, ok := oldHashes[result.AbsPath]; ok && oldHash == newHashes[result.AbsPath] {
+						if contents, err := ioutil.ReadFile(result.AbsPath); err == nil && bytes.Equal(contents, result.Contents) {
+							// Skip writing out files that haven't changed since last time
+							return
 						}
 					}
-
-					// Process all file operations in parallel
-					waitGroup := sync.WaitGroup{}
-					waitGroup.Add(len(results) + len(toDelete))
-					for _, result := range results {
-						go func(result graph.OutputFile) {
-							defer waitGroup.Done()
-							fs.BeforeFileOpen()
-							defer fs.AfterFileClose()
-							if oldHash, ok := oldHashes[result.AbsPath]; ok && oldHash == newHashes[result.AbsPath] {
-								if contents, err := ioutil.ReadFile(result.AbsPath); err == nil && bytes.Equal(contents, result.Contents) {
-									// Skip writing out files that haven't changed since last time
-									return
-								}
-							}
-							if err := fs.MkdirAll(realFS, realFS.Dir(result.AbsPath), 0755); err != nil {
-								log.AddError(nil, logger.Range{}, fmt.Sprintf(
-									"Failed to create output directory: %s", err.Error()))
-							} else {
-								var mode os.FileMode = 0666
-								if result.IsExecutable {
-									mode = 0777
-								}
-								if err := ioutil.WriteFile(result.AbsPath, result.Contents, mode); err != nil {
-									log.AddError(nil, logger.Range{}, fmt.Sprintf(
-										"Failed to write to output file: %s", err.Error()))
-								}
-							}
-						}(result)
+					if err := fs.MkdirAll(realFS, realFS.Dir(result.AbsPath), 0755); err != nil {
+						log.AddError(nil, logger.Range{}, fmt.Sprintf(
+							"Failed to create output directory: %s", err.Error()))
+					} else {
+						var mode os.FileMode = 0666
+						if result.IsExecutable {
+							mode = 0777
+						}
+						if err := ioutil.WriteFile(result.AbsPath, result.Contents, mode); err != nil {
+							log.AddError(nil, logger.Range{}, fmt.Sprintf(
+								"Failed to write to output file: %s", err.Error()))
+						}
 					}
-					for _, absPath := range toDelete {
-						go func(absPath string) {
-							defer waitGroup.Done()
-							fs.BeforeFileOpen()
-							defer fs.AfterFileClose()
-							os.Remove(absPath)
-						}(absPath)
-					}
-					waitGroup.Wait()
-				}
-				timer.End("Write output files")
+				}(result)
 			}
+			for _, absPath := range toDelete {
+				go func(absPath string) {
+					defer waitGroup.Done()
+					fs.BeforeFileOpen()
+					defer fs.AfterFileClose()
+					os.Remove(absPath)
+				}(absPath)
+			}
+			waitGroup.Wait()
 		}
+		timer.End("Write output files")
 	}
 
 	// Only return the mangle cache for a successful build
@@ -1619,8 +1632,8 @@ func rebuildImpl(args rebuildArgs, oldHashes map[string]string) (rebuildState, m
 
 	// Populate the result object with the messages so far
 	msgs := log.Peek()
-	result.Errors = convertMessagesToPublic(logger.Error, msgs)
-	result.Warnings = convertMessagesToPublic(logger.Warning, msgs)
+	result.Errors = convertMessagesToPublic(logger.Error, msgs, args.options.LogPathStyle)
+	result.Warnings = convertMessagesToPublic(logger.Warning, msgs, args.options.LogPathStyle)
 
 	// Run any registered "OnEnd" callbacks now. These always run regardless of
 	// whether the current build has bee canceled or not. They can check for
@@ -1697,6 +1710,8 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 		MessageLimit:  transformOpts.LogLimit,
 		Color:         validateColor(transformOpts.Color),
 		LogLevel:      validateLogLevel(transformOpts.LogLevel),
+		LogStyle:      validateLogStyle(transformOpts.LogStyle),
+		PathStyle:     extractPathStyle(transformOpts.AbsPaths, LogAbsPath),
 		Overrides:     validateLogOverrides(transformOpts.LogOverride),
 	})
 	caches := cache.MakeCacheSet()
@@ -1742,7 +1757,7 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 		SourceRoot:            transformOpts.SourceRoot,
 		ExcludeSourcesContent: transformOpts.SourcesContent == SourcesContentExclude,
 		OutputFormat:          validateFormat(transformOpts.Format),
-		GlobalName:            validateGlobalName(log, transformOpts.GlobalName),
+		GlobalName:            validateGlobalName(log, transformOpts.GlobalName, "(global name)"),
 		MinifySyntax:          transformOpts.MinifySyntax,
 		MinifyWhitespace:      transformOpts.MinifyWhitespace,
 		MinifyIdentifiers:     transformOpts.MinifyIdentifiers,
@@ -1757,6 +1772,9 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 		TreeShaking:           validateTreeShaking(transformOpts.TreeShaking, false /* bundle */, transformOpts.Format),
 		AbsOutputFile:         transformOpts.Sourcefile + "-out",
 		KeepNames:             transformOpts.KeepNames,
+		CodePathStyle:         extractPathStyle(transformOpts.AbsPaths, CodeAbsPath),
+		LogPathStyle:          extractPathStyle(transformOpts.AbsPaths, LogAbsPath),
+		MetafilePathStyle:     extractPathStyle(transformOpts.AbsPaths, MetafileAbsPath),
 		Stdin: &config.StdinInfo{
 			Loader:     validateLoader(transformOpts.Loader),
 			Contents:   input,
@@ -1845,8 +1863,8 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 
 	msgs := log.Done()
 	return TransformResult{
-		Errors:        convertMessagesToPublic(logger.Error, msgs),
-		Warnings:      convertMessagesToPublic(logger.Warning, msgs),
+		Errors:        convertMessagesToPublic(logger.Error, msgs, options.LogPathStyle),
+		Warnings:      convertMessagesToPublic(logger.Warning, msgs, options.LogPathStyle),
 		Code:          code,
 		Map:           sourceMap,
 		LegalComments: legalComments,
@@ -1946,6 +1964,7 @@ func (impl *pluginImpl) onResolve(options OnResolveOptions, callback func(OnReso
 				ResolveDir: args.ResolveDir,
 				Kind:       importKindToResolveKind(args.Kind),
 				PluginData: args.PluginData,
+				With:       args.With.DecodeIntoMap(),
 			})
 			result.PluginName = response.PluginName
 			result.AbsWatchFiles = impl.validatePathsArray(response.WatchFiles, "watch file")
@@ -1972,6 +1991,33 @@ func (impl *pluginImpl) onResolve(options OnResolveOptions, callback func(OnReso
 
 			// Convert log messages
 			result.Msgs = convertErrorsAndWarningsToInternal(response.Errors, response.Warnings)
+
+			// Warn if the plugin returned things without resolving the path
+			if response.Path == "" && !response.External {
+				var what string
+				if response.Namespace != "" {
+					what = "namespace"
+				} else if response.Suffix != "" {
+					what = "suffix"
+				} else if response.PluginData != nil {
+					what = "pluginData"
+				} else if response.WatchFiles != nil {
+					what = "watchFiles"
+				} else if response.WatchDirs != nil {
+					what = "watchDirs"
+				}
+				if what != "" {
+					path := "path"
+					if logger.API == logger.GoAPI {
+						what = strings.Title(what)
+						path = strings.Title(path)
+					}
+					result.Msgs = append(result.Msgs, logger.Msg{
+						Kind: logger.Warning,
+						Data: logger.MsgData{Text: fmt.Sprintf("Returning %q doesn't do anything when %q is empty", what, path)},
+					})
+				}
+			}
 			return
 		},
 	})
@@ -1988,16 +2034,12 @@ func (impl *pluginImpl) onLoad(options OnLoadOptions, callback func(OnLoadArgs) 
 		Filter:    filter,
 		Namespace: options.Namespace,
 		Callback: func(args config.OnLoadArgs) (result config.OnLoadResult) {
-			with := make(map[string]string)
-			for _, attr := range args.Path.ImportAttributes.Decode() {
-				with[attr.Key] = attr.Value
-			}
 			response, err := callback(OnLoadArgs{
 				Path:       args.Path.Text,
 				Namespace:  args.Path.Namespace,
 				PluginData: args.PluginData,
 				Suffix:     args.Path.IgnoredSuffix,
-				With:       with,
+				With:       args.Path.ImportAttributes.DecodeIntoMap(),
 			})
 			result.PluginName = response.PluginName
 			result.AbsWatchFiles = impl.validatePathsArray(response.WatchFiles, "watch file")
@@ -2085,8 +2127,8 @@ func loadPlugins(initialOptions *BuildOptions, fs fs.FS, log logger.Log, caches 
 			absResolveDir := validatePath(log, fs, options.ResolveDir, "resolve directory")
 			if log.HasErrors() {
 				msgs := log.Done()
-				result.Errors = convertMessagesToPublic(logger.Error, msgs)
-				result.Warnings = convertMessagesToPublic(logger.Warning, msgs)
+				result.Errors = convertMessagesToPublic(logger.Error, msgs, optionsClone.LogPathStyle)
+				result.Warnings = convertMessagesToPublic(logger.Warning, msgs, optionsClone.LogPathStyle)
 				return
 			}
 
@@ -2102,15 +2144,17 @@ func loadPlugins(initialOptions *BuildOptions, fs fs.FS, log logger.Log, caches 
 				logger.Range{}, // importPathRange
 				logger.Path{Text: options.Importer, Namespace: options.Namespace},
 				path,
+				logger.EncodeImportAttributes(options.With),
 				kind,
 				absResolveDir,
 				options.PluginData,
+				optionsClone.LogPathStyle,
 			)
 			msgs := log.Done()
 
 			// Populate the result
-			result.Errors = convertMessagesToPublic(logger.Error, msgs)
-			result.Warnings = convertMessagesToPublic(logger.Warning, msgs)
+			result.Errors = convertMessagesToPublic(logger.Error, msgs, optionsClone.LogPathStyle)
+			result.Warnings = convertMessagesToPublic(logger.Warning, msgs, optionsClone.LogPathStyle)
 			if resolveResult != nil {
 				result.Path = resolveResult.PathPair.Primary.Text
 				result.External = resolveResult.PathPair.IsExternal
@@ -2124,11 +2168,13 @@ func loadPlugins(initialOptions *BuildOptions, fs fs.FS, log logger.Log, caches 
 				if options.PluginName != "" {
 					pluginName = options.PluginName
 				}
-				text, _, notes := bundler.ResolveFailureErrorTextSuggestionNotes(resolver, path, kind, pluginName, fs, absResolveDir, optionsForResolve.Platform, "", "")
+				text, _, notes := bundler.ResolveFailureErrorTextSuggestionNotes(
+					resolver, path, kind, pluginName, fs, absResolveDir, optionsForResolve.Platform,
+					logger.PrettyPaths{}, "", optionsClone.LogPathStyle)
 				result.Errors = append(result.Errors, convertMessagesToPublic(logger.Error, []logger.Msg{{
 					Data:  logger.MsgData{Text: text},
 					Notes: notes,
-				}})...)
+				}}, optionsClone.LogPathStyle)...)
 			}
 			return
 		}
@@ -2174,6 +2220,7 @@ func formatMsgsImpl(msgs []Message, opts FormatMessagesOptions) []string {
 		strings[i] = msg.String(
 			logger.OutputOptions{
 				IncludeSource: true,
+				LogStyle:      validateLogStyle(opts.LogStyle),
 			},
 			logger.TerminalInfo{
 				UseColorEscapes: opts.Color,
@@ -2371,11 +2418,11 @@ func analyzeMetafileImpl(metafile string, opts AnalyzeMetafileOptions) string {
 				third := "100.0%"
 
 				table = append(table, tableEntry{
-					first:      fmt.Sprintf("%s%s%s", colors.Bold, entry.name, colors.Reset),
+					first:      entry.name,
 					firstLen:   utf8.RuneCountInString(entry.name),
-					second:     fmt.Sprintf("%s%s%s", colors.Bold, second, colors.Reset),
+					second:     second,
 					secondLen:  len(second),
-					third:      fmt.Sprintf("%s%s%s", colors.Bold, third, colors.Reset),
+					third:      third,
 					thirdLen:   len(third),
 					isTopLevel: true,
 				})
@@ -2452,8 +2499,10 @@ func analyzeMetafileImpl(metafile string, opts AnalyzeMetafileOptions) string {
 			// Render the columns now that we know the widths
 			for _, entry := range table {
 				prefix := "\n"
+				color := colors.Bold
 				if !entry.isTopLevel {
 					prefix = ""
+					color = ""
 				}
 
 				// Import paths don't have second and third columns
@@ -2475,17 +2524,23 @@ func analyzeMetafileImpl(metafile string, opts AnalyzeMetafileOptions) string {
 					extraSpace = 1
 				}
 
-				sb.WriteString(fmt.Sprintf("%s  %s %s%s%s %s %s%s%s %s\n",
+				sb.WriteString(fmt.Sprintf("%s  %s%s%s %s%s%s %s%s%s %s%s%s %s%s%s\n",
 					prefix,
+					color,
 					entry.first,
+					colors.Reset,
 					colors.Dim,
 					strings.Repeat(lineChar, extraSpace+maxFirstLen-entry.firstLen+maxSecondLen-entry.secondLen),
 					colors.Reset,
+					color,
 					secondTrimmed,
+					colors.Reset,
 					colors.Dim,
 					strings.Repeat(lineChar, extraSpace+maxThirdLen-entry.thirdLen+len(second)-len(secondTrimmed)),
 					colors.Reset,
+					color,
 					entry.third,
+					colors.Reset,
 				))
 			}
 

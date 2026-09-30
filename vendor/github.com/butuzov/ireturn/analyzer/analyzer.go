@@ -8,28 +8,21 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/butuzov/ireturn/analyzer/internal/config"
-	"github.com/butuzov/ireturn/analyzer/internal/types"
-
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
+
+	"github.com/butuzov/ireturn/analyzer/internal/config"
+	"github.com/butuzov/ireturn/analyzer/internal/types"
 )
 
 const name string = "ireturn" // linter name
 
-type validator interface {
-	IsValid(types.IFace) bool
-}
-
 type analyzer struct {
-	once          sync.Once
-	mu            sync.RWMutex
-	handler       validator
-	err           error
-	diabledNolint bool
-
-	found []analysis.Diagnostic
+	once           sync.Once
+	handler        config.Validator
+	err            error
+	disabledNolint bool
 }
 
 func (a *analyzer) run(pass *analysis.Pass) (interface{}, error) {
@@ -63,7 +56,7 @@ func (a *analyzer) run(pass *analysis.Pass) (interface{}, error) {
 		}
 
 		// 003. Is it allowed to be checked?
-		if !a.diabledNolint && hasDisallowDirective(f.Doc) {
+		if !a.disabledNolint && hasDisallowDirective(f.Doc) {
 			return
 		}
 
@@ -84,25 +77,11 @@ func (a *analyzer) run(pass *analysis.Pass) (interface{}, error) {
 			}
 			seen[key] = true
 
-			a.addDiagnostic(issue.ExportDiagnostic())
+			pass.Report(issue.ExportDiagnostic())
 		}
 	})
 
-	// 02. Printing reports.
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	for i := range a.found {
-		pass.Report(a.found[i])
-	}
-
 	return nil, nil
-}
-
-func (a *analyzer) addDiagnostic(d analysis.Diagnostic) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	a.found = append(a.found, d)
 }
 
 func (a *analyzer) readConfiguration(fs *flag.FlagSet) {
@@ -115,20 +94,14 @@ func (a *analyzer) readConfiguration(fs *flag.FlagSet) {
 	// First: checking nonolint directive
 	val := fs.Lookup("nonolint")
 	if val != nil {
-		a.diabledNolint = fs.Lookup("nonolint").Value.String() == "true"
+		a.disabledNolint = fs.Lookup("nonolint").Value.String() == "true"
 	}
 
-	// Second: validators implementation next
-	if validatorImpl, ok := cnf.(validator); ok {
-		a.handler = validatorImpl
-		return
-	}
-
-	a.handler = config.DefaultValidatorConfig()
+	a.handler = cnf
 }
 
 func NewAnalyzer() *analysis.Analyzer {
-	a := analyzer{} //nolint: exhaustivestruct
+	a := analyzer{}
 
 	return &analysis.Analyzer{
 		Name:     name,
@@ -196,13 +169,14 @@ func filterInterfaces(p *analysis.Pass, ft *ast.FuncType, di map[string]struct{}
 
 				typeParams := val.String()
 				prefix, suffix := "interface{", "}"
-				if strings.HasPrefix(typeParams, prefix) { // nolint: gosimple
+				if strings.HasPrefix(typeParams, prefix) { //nolint:staticcheck
 					typeParams = typeParams[len(prefix):]
 				}
 				if strings.HasSuffix(typeParams, suffix) {
 					typeParams = typeParams[:len(typeParams)-1]
 				}
 
+				// todo: write test for this (1.18&1.19 only?)
 				goVersion := runtime.Version()
 				if strings.HasPrefix(goVersion, "go1.18") || strings.HasPrefix(goVersion, "go1.19") {
 					typeParams = strings.ReplaceAll(typeParams, "|", " | ")

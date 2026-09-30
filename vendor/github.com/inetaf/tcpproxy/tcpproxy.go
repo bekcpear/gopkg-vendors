@@ -293,6 +293,12 @@ type Target interface {
 	HandleConn(net.Conn)
 }
 
+type srcAddrContextKey struct{}
+
+// SourceAddrContextKey is the context key used by DialProxy.HandleConn to
+// pass the incoming connection's remote address (net.Addr) to DialContext.
+var SourceAddrContextKey srcAddrContextKey
+
 // To is shorthand way of writing &tcpproxy.DialProxy{Addr: addr}.
 func To(addr string) *DialProxy {
 	return &DialProxy{Addr: addr}
@@ -358,8 +364,6 @@ func tcpConn(c net.Conn) (t *net.TCPConn, ok bool) {
 type closeReader interface{ CloseRead() error }
 type closeWriter interface{ CloseWrite() error }
 
-func goCloseConn(c net.Conn) { go c.Close() }
-
 func closeRead(c net.Conn) {
 	// prefer the interfaces, for compatibility with e.g. gvisor/netstack.
 	if c, ok := UnderlyingConn(c).(closeReader); ok {
@@ -376,7 +380,7 @@ func closeWrite(c net.Conn) {
 
 // HandleConn implements the Target interface.
 func (dp *DialProxy) HandleConn(src net.Conn) {
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), SourceAddrContextKey, src.RemoteAddr())
 	var cancel context.CancelFunc
 	if dp.DialTimeout >= 0 {
 		ctx, cancel = context.WithTimeout(ctx, dp.dialTimeout())
@@ -389,13 +393,13 @@ func (dp *DialProxy) HandleConn(src net.Conn) {
 		dp.onDialError()(src, err)
 		return
 	}
-	defer goCloseConn(dst)
+	defer dst.Close()
 
 	if err = dp.sendProxyHeader(dst, src); err != nil {
 		dp.onDialError()(src, err)
 		return
 	}
-	defer goCloseConn(src)
+	defer src.Close()
 
 	if ka := dp.keepAlivePeriod(); ka > 0 {
 		for _, c := range []net.Conn{src, dst} {

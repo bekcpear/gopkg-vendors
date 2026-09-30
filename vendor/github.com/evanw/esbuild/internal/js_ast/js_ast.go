@@ -250,14 +250,31 @@ type Decorator struct {
 type PropertyKind uint8
 
 const (
-	PropertyNormal PropertyKind = iota
-	PropertyGet
-	PropertySet
+	PropertyField PropertyKind = iota
+	PropertyMethod
+	PropertyGetter
+	PropertySetter
 	PropertyAutoAccessor
 	PropertySpread
-	PropertyDeclare
+	PropertyDeclareOrAbstract
 	PropertyClassStaticBlock
 )
+
+// This returns true if and only if this property matches the "MethodDefinition"
+// grammar from the specification. That means it's one of the following forms:
+//
+//	foo() {}
+//	*foo() {}
+//	async foo() {}
+//	async *foo() {}
+//	get foo() {}
+//	set foo(_) {}
+//
+// If this returns true, the "ValueOrNil" field of the property is always an
+// "EFunction" expression and it is always printed as a method.
+func (kind PropertyKind) IsMethodDefinition() bool {
+	return kind == PropertyMethod || kind == PropertyGetter || kind == PropertySetter
+}
 
 type ClassStaticBlock struct {
 	Block SBlock
@@ -268,7 +285,6 @@ type PropertyFlags uint8
 
 const (
 	PropertyIsComputed PropertyFlags = 1 << iota
-	PropertyIsMethod
 	PropertyIsStatic
 	PropertyWasShorthand
 	PropertyPreferQuotedKey
@@ -357,6 +373,15 @@ type Class struct {
 	ClassKeyword  logger.Range
 	BodyLoc       logger.Loc
 	CloseBraceLoc logger.Loc
+
+	// If true, JavaScript decorators (i.e. not TypeScript experimental
+	// decorators) should be lowered. This is the case either if JavaScript
+	// decorators are not supported in the configured target environment, or
+	// if "useDefineForClassFields" is set to false and this class has
+	// decorators on it. Note that this flag is not necessarily set to true if
+	// "useDefineForClassFields" is false and a class has an "accessor" even
+	// though the accessor feature comes from the decorator specification.
+	ShouldLowerStandardDecorators bool
 
 	// If true, property field initializers cannot be assumed to have no side
 	// effects. For example:
@@ -449,6 +474,7 @@ func (*EImportIdentifier) isExpr()     {}
 func (*EPrivateIdentifier) isExpr()    {}
 func (*ENameOfSymbol) isExpr()         {}
 func (*EJSXElement) isExpr()           {}
+func (*EJSXText) isExpr()              {}
 func (*EMissing) isExpr()              {}
 func (*ENumber) isExpr()               {}
 func (*EBigInt) isExpr()               {}
@@ -514,9 +540,10 @@ type EUnary struct {
 }
 
 type EBinary struct {
-	Left  Expr
-	Right Expr
-	Op    OpCode
+	Left            Expr
+	Right           Expr
+	Op              OpCode
+	IsParenthesized bool
 }
 
 type EBoolean struct{ Value bool }
@@ -672,11 +699,19 @@ type EArrow struct {
 	HasRestArg bool
 	PreferExpr bool // Use shorthand if true and "Body" is a single return statement
 
+	// V8 uses parentheses as an optimization hint: https://v8.dev/blog/preparser#pife
+	IsParenthesized bool
+
 	// See: https://github.com/rollup/rollup/pull/5024
 	HasNoSideEffectsComment bool
 }
 
-type EFunction struct{ Fn Fn }
+type EFunction struct {
+	Fn Fn
+
+	// V8 uses parentheses as an optimization hint: https://v8.dev/blog/preparser#pife
+	IsParenthesized bool
+}
 
 type EClass struct{ Class Class }
 
@@ -768,6 +803,16 @@ type EJSXElement struct {
 
 	CloseLoc        logger.Loc
 	IsTagSingleLine bool
+}
+
+// The JSX specification doesn't say how JSX text is supposed to be interpreted
+// so our "preserve" JSX transform should reproduce the original source code
+// verbatim. One reason why this matters is because there is no canonical way
+// to interpret JSX text (Babel and TypeScript differ in what newlines mean).
+// Another reason is that some people want to do custom things such as this:
+// https://github.com/evanw/esbuild/issues/3605
+type EJSXText struct {
+	Raw string
 }
 
 type ENumber struct{ Value float64 }
@@ -884,6 +929,7 @@ type EImportCall struct {
 	Expr          Expr
 	OptionsOrNil  Expr
 	CloseParenLoc logger.Loc
+	Phase         ast.ImportPhase
 }
 
 type Stmt struct {
@@ -1040,34 +1086,41 @@ type SClass struct {
 }
 
 type SLabel struct {
-	Stmt Stmt
-	Name ast.LocRef
+	Stmt             Stmt
+	Name             ast.LocRef
+	IsSingleLineStmt bool
 }
 
 type SIf struct {
-	Test    Expr
-	Yes     Stmt
-	NoOrNil Stmt
+	Test            Expr
+	Yes             Stmt
+	NoOrNil         Stmt
+	IsSingleLineYes bool
+	IsSingleLineNo  bool
 }
 
 type SFor struct {
-	InitOrNil   Stmt // May be a SConst, SLet, SVar, or SExpr
-	TestOrNil   Expr
-	UpdateOrNil Expr
-	Body        Stmt
+	InitOrNil         Stmt // May be a SConst, SLet, SVar, or SExpr
+	TestOrNil         Expr
+	UpdateOrNil       Expr
+	Body              Stmt
+	IsSingleLineBody  bool
+	IsLoweredForAwait bool
 }
 
 type SForIn struct {
-	Init  Stmt // May be a SConst, SLet, SVar, or SExpr
-	Value Expr
-	Body  Stmt
+	Init             Stmt // May be a SConst, SLet, SVar, or SExpr
+	Value            Expr
+	Body             Stmt
+	IsSingleLineBody bool
 }
 
 type SForOf struct {
-	Init  Stmt // May be a SConst, SLet, SVar, or SExpr
-	Value Expr
-	Body  Stmt
-	Await logger.Range
+	Init             Stmt // May be a SConst, SLet, SVar, or SExpr
+	Value            Expr
+	Body             Stmt
+	Await            logger.Range
+	IsSingleLineBody bool
 }
 
 type SDoWhile struct {
@@ -1076,14 +1129,16 @@ type SDoWhile struct {
 }
 
 type SWhile struct {
-	Test Expr
-	Body Stmt
+	Test             Expr
+	Body             Stmt
+	IsSingleLineBody bool
 }
 
 type SWith struct {
-	Value   Expr
-	Body    Stmt
-	BodyLoc logger.Loc
+	Value            Expr
+	Body             Stmt
+	BodyLoc          logger.Loc
+	IsSingleLineBody bool
 }
 
 type Catch struct {
@@ -1583,10 +1638,12 @@ const (
 	ConstValueTrue
 	ConstValueFalse
 	ConstValueNumber
+	ConstValueString
 )
 
 type ConstValue struct {
-	Number float64 // Use this for "ConstValueNumber"
+	Number float64  // Use this for "ConstValueNumber"
+	String []uint16 // Use this for "ConstValueString"
 	Kind   ConstValueKind
 }
 
@@ -1614,8 +1671,11 @@ func ExprToConstValue(expr Expr) ConstValue {
 		}
 
 	case *EString:
-		// I'm deliberately not inlining strings here. It seems more likely that
-		// people won't want them to be inlined since they can be arbitrarily long.
+		// Deliberately only inline small strings. We don't want to always
+		// inline all strings because they can be arbitrarily long.
+		if len(v.Value) <= 3 {
+			return ConstValue{Kind: ConstValueString, String: v.Value}
+		}
 
 	case *EBigInt:
 		// I'm deliberately not inlining bigints here for the same reason (they can
@@ -1641,6 +1701,9 @@ func ConstValueToExpr(loc logger.Loc, value ConstValue) Expr {
 
 	case ConstValueNumber:
 		return Expr{Loc: loc, Data: &ENumber{Value: value.Number}}
+
+	case ConstValueString:
+		return Expr{Loc: loc, Data: &EString{Value: value.String}}
 	}
 
 	panic("Internal error: invalid constant value")

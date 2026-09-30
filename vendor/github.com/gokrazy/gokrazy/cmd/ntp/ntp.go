@@ -7,8 +7,10 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,12 +19,30 @@ import (
 
 const timefilePath = "ntp-time-at-last-shutdown" // Our process is started in /perm/home/ntp.
 
-var servers = []string{
+const dhcpNTPServersPath = "/tmp/ntp-servers"
+
+var defaultServers = []string{
 	"0.gokrazy.pool.ntp.org",
 	"1.gokrazy.pool.ntp.org",
 	"2.gokrazy.pool.ntp.org",
 	"3.gokrazy.pool.ntp.org",
 }
+
+var (
+	servers    = defaultServers
+	cliServers bool
+	lastSource string
+
+	dhcpFailures     int
+	dhcpFallbackTill time.Time
+)
+
+// After this many consecutive failed queries to DHCP-provided servers, the
+// default pool is used for dhcpFallbackDuration before they are tried again.
+const (
+	dhcpFailureThreshold = 5
+	dhcpFallbackDuration = 10 * time.Minute
+)
 
 func setTimeOfDay(t time.Time, source string) error {
 	tv := syscall.NsecToTimeval(t.UnixNano())
@@ -33,12 +53,69 @@ func setTimeOfDay(t time.Time, source string) error {
 	return nil
 }
 
+func readDHCPServers() []string {
+	b, err := os.ReadFile(dhcpNTPServersPath)
+	if err != nil {
+		return nil
+	}
+	var servers []string
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if net.ParseIP(line) == nil {
+			continue
+		}
+		servers = append(servers, line)
+	}
+	log.Printf("NTP servers from %s: %v", dhcpNTPServersPath, servers)
+	return servers
+}
+
+// updateServers selects which servers to query next and reports whether the
+// selected servers come from DHCP.
+func updateServers() (fromDHCP bool) {
+	if cliServers {
+		return false
+	}
+	source := "default pool"
+	s := defaultServers
+	if dhcp := readDHCPServers(); len(dhcp) > 0 && time.Now().After(dhcpFallbackTill) {
+		source = "DHCP"
+		s = dhcp
+		fromDHCP = true
+	}
+	if source != lastSource {
+		log.Printf("using NTP servers from %s: %v", source, s)
+		lastSource = source
+	}
+	servers = s
+	return fromDHCP
+}
+
+func dhcpQueryFailed() {
+	dhcpFailures++
+	if dhcpFailures < dhcpFailureThreshold {
+		return
+	}
+	dhcpFailures = 0
+	dhcpFallbackTill = time.Now().Add(dhcpFallbackDuration)
+	log.Printf("DHCP-provided NTP servers unreachable after %d attempts, using default pool for %v",
+		dhcpFailureThreshold, dhcpFallbackDuration)
+}
+
 func set(rtc *os.File) error {
+	fromDHCP := updateServers()
 	server := servers[rand.Intn(len(servers))]
 	r, err := ntp.Query(server)
 	if err != nil {
+		if fromDHCP {
+			dhcpQueryFailed()
+		}
 		return err
 	}
+	dhcpFailures = 0
 
 	if err := setTimeOfDay(r.Time, server); err != nil {
 		return fmt.Errorf("setTimeOfDay: %v", err)
@@ -58,6 +135,15 @@ func loadTime(timefile *os.File) error {
 	var t time.Time
 	if err := t.UnmarshalText(buf); err != nil {
 		return fmt.Errorf("time.UnmarshalText(%v): %v", string(buf), err)
+	}
+	// Only step the clock forwards. Machines without a battery-backed real time
+	// clock boot at the epoch, so the saved time is later and is restored.
+	// Machines that boot with a correct time (PCs, VMs, a Raspberry Pi with an
+	// RTC hat) keep it: stepping them back to the last shutdown would make
+	// every timestamp wrong until the first NTP query succeeds.
+	if now := time.Now().Round(0); !t.After(now) {
+		log.Printf("not setting clock to %v (from %s): system clock (%v) is already at or ahead of it", t, timefilePath, now)
+		return nil
 	}
 	if err := setTimeOfDay(t, timefilePath); err != nil {
 		return fmt.Errorf("setTimeOfDay: %v", err)
@@ -92,6 +178,7 @@ func main() {
 
 	if len(flag.Args()) > 0 {
 		servers = flag.Args()
+		cliServers = true
 		log.Printf("using command line supplied server list: %v", servers)
 	}
 

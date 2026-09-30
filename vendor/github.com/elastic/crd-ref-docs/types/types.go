@@ -110,6 +110,7 @@ type Type struct {
 	ValueType      *Type                    `json:"valueType"`      // for maps
 	Fields         Fields                   `json:"fields"`         // for structs
 	References     []*Type                  `json:"-"`              // other types that refer to this type
+	EnumValues     []EnumValue              `json:"enumValues"`     // for enum values of aliased string types
 }
 
 func (t *Type) IsBasic() bool {
@@ -329,9 +330,10 @@ func Identifier(t *Type) string {
 // GroupVersionDetails encapsulates details about a discovered API group.
 type GroupVersionDetails struct {
 	schema.GroupVersion
-	Doc   string
-	Kinds []string
-	Types TypeMap
+	Doc     string
+	Kinds   []string
+	Types   TypeMap
+	Markers markers.MarkerValues
 }
 
 func (gvd GroupVersionDetails) GroupVersionString() string {
@@ -368,4 +370,10 @@ func (gvd GroupVersionDetails) SortedKinds() []string {
 	sort.Strings(kindsList)
 
 	return kindsList
+}
+
+// EnumValue describes a constant value for enumerations
+type EnumValue struct {
+	Name string
+	Doc  string
 }

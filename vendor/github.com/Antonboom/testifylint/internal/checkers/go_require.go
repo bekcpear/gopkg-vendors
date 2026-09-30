@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	goRequireFnReportFormat   = "%s contains assertions that must only be used in the goroutine running the test function"
-	goRequireCallReportFormat = "%s must only be used in the goroutine running the test function"
+	goRequireFnReportFormat          = "%s contains assertions that must only be used in the goroutine running the test function"
+	goRequireCallReportFormat        = "%s must only be used in the goroutine running the test function"
+	goRequireHTTPHandlerReportFormat = "do not use %s in http handlers"
 )
 
 // GoRequire takes idea from go vet's "testinggoroutine" check
@@ -27,11 +28,18 @@ const (
 //			assert.FailNow(t, msg)
 //		}
 //	}()
-type GoRequire struct{}
+type GoRequire struct {
+	ignoreHTTPHandlers bool
+}
 
 // NewGoRequire constructs GoRequire checker.
-func NewGoRequire() GoRequire  { return GoRequire{} }
+func NewGoRequire() *GoRequire { return new(GoRequire) }
 func (GoRequire) Name() string { return "go-require" }
+
+func (checker *GoRequire) SetIgnoreHTTPHandlers(v bool) *GoRequire {
+	checker.ignoreHTTPHandlers = v
+	return checker
+}
 
 // Check should be consistent with
 // https://cs.opensource.google/go/x/tools/+/master:go/analysis/passes/testinggoroutine/testinggoroutine.go
@@ -49,9 +57,9 @@ func (GoRequire) Name() string { return "go-require" }
 // Other test functions called in the test function are also analyzed to make a verdict about the current function.
 // This leads to recursion, which the cache of processed functions (processedFuncs) helps reduce the impact of.
 // Also, because of this, we have to pre-collect a list of test function declarations (testsDecls).
-func (checker GoRequire) Check(pass *analysis.Pass, inspector *inspector.Inspector) (diagnostics []analysis.Diagnostic) {
+func (checker GoRequire) Check(pass *analysis.Pass, insp *inspector.Inspector) (diagnostics []analysis.Diagnostic) {
 	testsDecls := make(funcDeclarations)
-	inspector.Preorder([]ast.Node{(*ast.FuncDecl)(nil)}, func(node ast.Node) {
+	insp.Preorder([]ast.Node{(*ast.FuncDecl)(nil)}, func(node ast.Node) {
 		fd := node.(*ast.FuncDecl)
 
 		if isTestingFuncOrMethod(pass, fd) {
@@ -70,7 +78,7 @@ func (checker GoRequire) Check(pass *analysis.Pass, inspector *inspector.Inspect
 		(*ast.GoStmt)(nil),
 		(*ast.CallExpr)(nil),
 	}
-	inspector.Nodes(nodesFilter, func(node ast.Node, push bool) bool {
+	insp.Nodes(nodesFilter, func(node ast.Node, push bool) bool {
 		if fd, ok := node.(*ast.FuncDecl); ok {
 			if !isTestingFuncOrMethod(pass, fd) {
 				return false
@@ -134,11 +142,11 @@ func (checker GoRequire) Check(pass *analysis.Pass, inspector *inspector.Inspect
 		if testifyCall != nil {
 			switch checker.checkCall(testifyCall) {
 			case goRequireVerdictRequire:
-				d := newDiagnostic(checker.Name(), testifyCall, fmt.Sprintf(goRequireCallReportFormat, "require"), nil)
+				d := newDiagnostic(checker.Name(), testifyCall, fmt.Sprintf(goRequireCallReportFormat, "require"))
 				diagnostics = append(diagnostics, *d)
 
 			case goRequireVerdictAssertFailNow:
-				d := newDiagnostic(checker.Name(), testifyCall, fmt.Sprintf(goRequireCallReportFormat, testifyCall), nil)
+				d := newDiagnostic(checker.Name(), testifyCall, fmt.Sprintf(goRequireCallReportFormat, testifyCall))
 				diagnostics = append(diagnostics, *d)
 
 			case goRequireVerdictNoExit:
@@ -155,13 +163,52 @@ func (checker GoRequire) Check(pass *analysis.Pass, inspector *inspector.Inspect
 
 			if v := checker.checkFunc(pass, calledFd, testsDecls, processedFuncs); v != goRequireVerdictNoExit {
 				caller := analysisutil.NodeString(pass.Fset, ce.Fun)
-				d := newDiagnostic(checker.Name(), ce, fmt.Sprintf(goRequireFnReportFormat, caller), nil)
+				d := newDiagnostic(checker.Name(), ce, fmt.Sprintf(goRequireFnReportFormat, caller))
 				diagnostics = append(diagnostics, *d)
 			}
 		}
 		return true
 	})
 
+	if !checker.ignoreHTTPHandlers {
+		diagnostics = append(diagnostics, checker.checkHTTPHandlers(pass, insp)...)
+	}
+
+	return diagnostics
+}
+
+func (checker GoRequire) checkHTTPHandlers(pass *analysis.Pass, insp *inspector.Inspector) (diagnostics []analysis.Diagnostic) {
+	insp.WithStack([]ast.Node{(*ast.CallExpr)(nil)}, func(node ast.Node, push bool, stack []ast.Node) bool {
+		if !push {
+			return false
+		}
+		if len(stack) < 3 {
+			return true
+		}
+
+		fID := findSurroundingFunc(pass, stack)
+		if fID == nil || !fID.meta.isHTTPHandler {
+			return true
+		}
+
+		testifyCall := NewCallMeta(pass, node.(*ast.CallExpr))
+		if testifyCall == nil {
+			return true
+		}
+
+		switch checker.checkCall(testifyCall) {
+		case goRequireVerdictRequire:
+			d := newDiagnostic(checker.Name(), testifyCall, fmt.Sprintf(goRequireHTTPHandlerReportFormat, "require"))
+			diagnostics = append(diagnostics, *d)
+
+		case goRequireVerdictAssertFailNow:
+			d := newDiagnostic(checker.Name(), testifyCall, fmt.Sprintf(goRequireHTTPHandlerReportFormat, testifyCall))
+			diagnostics = append(diagnostics, *d)
+
+		case goRequireVerdictNoExit:
+		}
+		return false
+	})
 	return diagnostics
 }
 
@@ -295,33 +342,4 @@ func (s boolStack) Last() bool {
 		return false
 	}
 	return s[n-1]
-}
-
-func isSubTestRun(pass *analysis.Pass, ce *ast.CallExpr) bool {
-	se, ok := ce.Fun.(*ast.SelectorExpr)
-	if !ok || se.Sel == nil {
-		return false
-	}
-	return (isTestingTPtr(pass, se.X) || implementsTestifySuiteIface(pass, se.X)) && se.Sel.Name == "Run"
-}
-
-func isTestingFuncOrMethod(pass *analysis.Pass, fd *ast.FuncDecl) bool {
-	return hasTestingTParam(pass, fd.Type) || isTestifySuiteMethod(pass, fd)
-}
-
-func isTestingAnonymousFunc(pass *analysis.Pass, ft *ast.FuncType) bool {
-	return hasTestingTParam(pass, ft)
-}
-
-func hasTestingTParam(pass *analysis.Pass, ft *ast.FuncType) bool {
-	if ft == nil || ft.Params == nil {
-		return false
-	}
-
-	for _, param := range ft.Params.List {
-		if isTestingTPtr(pass, param.Type) {
-			return true
-		}
-	}
-	return false
 }

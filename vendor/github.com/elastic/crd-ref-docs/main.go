@@ -17,7 +17,9 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -33,11 +35,15 @@ var args = config.Flags{}
 
 func main() {
 	cmd := cobra.Command{
-		Use:          "crd-ref-docs",
-		Short:        "Generate CRD reference documentation",
-		SilenceUsage: true,
-		RunE:         doRun,
+		Use:           "crd-ref-docs",
+		Short:         "Generate CRD reference documentation",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Version:       printVersion(),
+		RunE:          doRun,
 	}
+
+	cmd.SetVersionTemplate("{{ .Version }}\n")
 
 	cmd.Flags().StringVar(&args.LogLevel, "log-level", "INFO", "Log level")
 	cmd.Flags().StringVar(&args.Config, "config", "config.yaml", "Path to config file")
@@ -47,8 +53,11 @@ func main() {
 	cmd.Flags().StringVar(&args.OutputPath, "output-path", ".", "Path to output the rendered result")
 	cmd.Flags().StringVar(&args.OutputMode, "output-mode", "single", "Output mode to generate a single file or one file per group ('group' or 'single')")
 	cmd.Flags().IntVar(&args.MaxDepth, "max-depth", 10, "Maximum recursion level for type discovery")
+	cmd.Flags().Var(&args.TemplateKeyValues, "template-value", "Can be used in template to pass in a version number or similar information. Example: --template-value=key1=value1 and {{ markdownTemplateValue \"k1\" }}")
 
-	cmd.Execute()
+	if err := cmd.Execute(); err != nil {
+		os.Exit(1)
+	}
 }
 
 func doRun(_ *cobra.Command, _ []string) error {
@@ -135,4 +144,58 @@ func initLogging(level string) {
 
 	zap.ReplaceGlobals(logger.Named("crd-ref-docs"))
 	zap.RedirectStdLog(logger.Named("stdlog"))
+}
+
+// Global build information variables defined via ldflags during release.
+var (
+	buildVersion string
+	buildDate    string
+	buildCommit  string
+)
+
+// printVersion prints the version, git commit and build date using global variables defined via ldflags during release,
+// or using values ​​from debug.ReadBuildInfo().
+func printVersion() string {
+	return fmt.Sprintf("Version: %s\nGitCommit: %s\nBuildDate: %s\n", version(), commit(), date())
+}
+
+func version() string {
+	if buildVersion != "" {
+		return buildVersion
+	}
+	bi, ok := debug.ReadBuildInfo()
+	if ok && bi != nil && bi.Main.Version != "" {
+		return bi.Main.Version
+	}
+	return "(unknown)"
+}
+
+func date() string {
+	if buildDate != "" {
+		return buildDate
+	}
+	bi, ok := debug.ReadBuildInfo()
+	if ok {
+		for _, setting := range bi.Settings {
+			if setting.Key == "vcs.time" {
+				return setting.Value
+			}
+		}
+	}
+	return "(unknown)"
+}
+
+func commit() string {
+	if buildCommit != "" {
+		return buildCommit
+	}
+	bi, ok := debug.ReadBuildInfo()
+	if ok {
+		for _, setting := range bi.Settings {
+			if setting.Key == "vcs.revision" {
+				return setting.Value
+			}
+		}
+	}
+	return "(unknown)"
 }

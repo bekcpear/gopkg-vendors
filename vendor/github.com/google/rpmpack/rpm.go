@@ -36,6 +36,15 @@ import (
 	"github.com/ulikunitz/xz/lzma"
 )
 
+const (
+	// NoEpoch skips adding the epoch tag to the RPM.
+	//
+	// We decided to use this approach instead of making epoch a *uint32 to
+	// avoid a breaking change.
+	// For reference, this is the max uint32 value, which is 4294967295.
+	NoEpoch = ^uint32(0)
+)
+
 var (
 	// ErrWriteAfterClose is returned when a user calls Write() on a closed rpm.
 	ErrWriteAfterClose = errors.New("rpm write after close")
@@ -63,7 +72,7 @@ type RPMMetaData struct {
 	BuildTime time.Time
 	// Prefixes is used for relocatable packages, usually with a one item
 	// slice, e.g. `["/opt"]`.
-	Prefixes  []string
+	Prefixes []string
 	Provides,
 	Obsoletes,
 	Suggests,
@@ -98,6 +107,7 @@ type RPM struct {
 	postun            string
 	pretrans          string
 	posttrans         string
+	verifyscript      string
 	customTags        map[int]IndexEntry
 	customSigs        map[int]IndexEntry
 	pgpSigner         func([]byte) ([]byte, error)
@@ -146,9 +156,10 @@ func NewRPM(m RPMMetaData) (*RPM, error) {
 	return rpm, nil
 }
 
-func setupCompressor(compressorSetting string, w io.Writer) (wc io.WriteCloser,
-	compressorType string, err error) {
-
+func setupCompressor(
+	compressorSetting string,
+	w io.Writer,
+) (wc io.WriteCloser, compressorType string, err error) {
 	parts := strings.Split(compressorSetting, ":")
 	if len(parts) > 2 {
 		return nil, "", fmt.Errorf("malformed compressor setting: %s", compressorSetting)
@@ -253,7 +264,7 @@ func (r *RPM) Write(w io.Writer) error {
 		return fmt.Errorf("failed to close cpio payload: %w", err)
 	}
 	if err := r.compressedPayload.Close(); err != nil {
-		return fmt.Errorf("failed to close gzip payload: %w", err)
+		return fmt.Errorf("failed to close %s payload: %w", r.RPMMetaData.Compressor, err)
 	}
 
 	if _, err := w.Write(lead(r.Name, r.FullVersion())); err != nil {
@@ -304,7 +315,6 @@ func (r *RPM) Write(w io.Writer) error {
 		return fmt.Errorf("failed to write payload: %w", err)
 	}
 	return nil
-
 }
 
 // SetPGPSigner registers a function that will accept the header and payload as bytes,
@@ -377,7 +387,9 @@ func (r *RPM) writeGenIndexes(h *index) {
 	h.Add(tagSize, EntryInt32([]int32{int32(r.payloadSize)}))
 	h.Add(tagName, EntryString(r.Name))
 	h.Add(tagVersion, EntryString(r.Version))
-	h.Add(tagEpoch, EntryUint32([]uint32{r.Epoch}))
+	if r.Epoch != NoEpoch {
+		h.Add(tagEpoch, EntryUint32([]uint32{r.Epoch}))
+	}
 	h.Add(tagSummary, EntryString(r.Summary))
 	h.Add(tagDescription, EntryString(r.Description))
 	h.Add(tagBuildHost, EntryString(r.BuildHost))
@@ -395,11 +407,19 @@ func (r *RPM) writeGenIndexes(h *index) {
 	h.Add(tagPayloadFlags, EntryString("9"))
 	h.Add(tagArch, EntryString(r.Arch))
 	h.Add(tagOS, EntryString(r.OS))
-	h.Add(tagVendor, EntryString(r.Vendor))
+	if r.Vendor != "" {
+		h.Add(tagVendor, EntryString(r.Vendor))
+	}
 	h.Add(tagLicence, EntryString(r.Licence))
-	h.Add(tagPackager, EntryString(r.Packager))
-	h.Add(tagGroup, EntryString(r.Group))
-	h.Add(tagURL, EntryString(r.URL))
+	if r.Packager != "" {
+		h.Add(tagPackager, EntryString(r.Packager))
+	}
+	if r.Group != "" {
+		h.Add(tagGroup, EntryString(r.Group))
+	}
+	if r.URL != "" {
+		h.Add(tagURL, EntryString(r.URL))
+	}
 	h.Add(tagPayloadDigest, EntryStringSlice([]string{fmt.Sprintf("%x", sha256.Sum256(r.payload.Bytes()))}))
 	h.Add(tagPayloadDigestAlgo, EntryInt32([]int32{hashAlgoSHA256}))
 
@@ -430,6 +450,10 @@ func (r *RPM) writeGenIndexes(h *index) {
 		h.Add(tagPosttrans, EntryString(r.posttrans))
 		h.Add(tagPosttransProg, EntryString("/bin/sh"))
 	}
+	if r.verifyscript != "" {
+		h.Add(tagVerifyScript, EntryString(r.verifyscript))
+		h.Add(tagVerifyScriptProg, EntryString("/bin/sh"))
+	}
 }
 
 // WriteFileIndexes writes file related index headers to the header
@@ -447,6 +471,7 @@ func (r *RPM) writeFileIndexes(h *index) {
 	h.Add(tagFileFlags, EntryUint32(r.fileflags))
 
 	inodes := make([]int32, len(r.dirindexes))
+	devices := make([]int32, len(r.dirindexes))
 	digestAlgo := make([]int32, len(r.dirindexes))
 	verifyFlags := make([]int32, len(r.dirindexes))
 	fileRDevs := make([]int16, len(r.dirindexes))
@@ -455,12 +480,16 @@ func (r *RPM) writeFileIndexes(h *index) {
 	for ii := range inodes {
 		// is inodes just a range from 1..len(dirindexes)? maybe different with hard links
 		inodes[ii] = int32(ii + 1)
+		// is devices number from which the file was copied
+		// from rpm original tools https://github.com/rpm-software-management/rpm/blob/c167ef8bdaecdd2e306ec896c919607ba9cceb6f/build/files.c#L1226
+		devices[ii] = int32(1)
 		digestAlgo[ii] = hashAlgoSHA256
 		// With regular files, it seems like we can always enable all of the verify flags
 		verifyFlags[ii] = int32(-1)
 		fileRDevs[ii] = int16(1)
 	}
 	h.Add(tagFileINodes, EntryInt32(inodes))
+	h.Add(tagFileDevices, EntryInt32(devices))
 	h.Add(tagFileDigestAlgo, EntryInt32(digestAlgo))
 	h.Add(tagFileVerifyFlags, EntryInt32(verifyFlags))
 	h.Add(tagFileRDevs, EntryInt16(fileRDevs))
@@ -495,6 +524,11 @@ func (r *RPM) AddPostun(s string) {
 // AddPosttrans adds a posttrans scriptlet
 func (r *RPM) AddPosttrans(s string) {
 	r.posttrans = s
+}
+
+// AddVerifyScript adds a verifyscript scriptlet
+func (r *RPM) AddVerifyScript(s string) {
+	r.verifyscript = s
 }
 
 // AddFile adds an RPMFile to an existing rpm.

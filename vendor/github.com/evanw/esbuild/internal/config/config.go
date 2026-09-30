@@ -256,6 +256,30 @@ func (loader Loader) CanHaveSourceMap() bool {
 	return false
 }
 
+func LoaderFromFileExtension(extensionToLoader map[string]Loader, base string) Loader {
+	// Pick the loader with the longest matching extension. So if there's an
+	// extension for ".css" and for ".module.css", we want to match the one for
+	// ".module.css" before the one for ".css".
+	if i := strings.IndexByte(base, '.'); i != -1 {
+		for {
+			if loader, ok := extensionToLoader[base[i:]]; ok {
+				return loader
+			}
+			base = base[i+1:]
+			i = strings.IndexByte(base, '.')
+			if i == -1 {
+				break
+			}
+		}
+	} else {
+		// If there's no extension, explicitly check for an extensionless loader
+		if loader, ok := extensionToLoader[""]; ok {
+			return loader
+		}
+	}
+	return LoaderNone
+}
+
 type Format uint8
 
 const (
@@ -463,8 +487,16 @@ type Options struct {
 	AllowOverwrite    bool
 	LegalComments     LegalComments
 
+	LogPathStyle       logger.PathStyle
+	CodePathStyle      logger.PathStyle
+	MetafilePathStyle  logger.PathStyle
+	SourcemapPathStyle logger.PathStyle
+
 	// If true, make sure to generate a single file that can be written to stdout
 	WriteToStdout bool
+
+	// Large bundles minify the metafile JSON to reduce its size
+	MetafileFormat MetafileFormat
 
 	OmitRuntimeForTests    bool
 	OmitJSXRuntimeForTests bool
@@ -771,6 +803,7 @@ type OnResolveArgs struct {
 	PluginData interface{}
 	Importer   logger.Path
 	Kind       ast.ImportKind
+	With       logger.ImportAttributes
 }
 
 type OnResolveResult struct {
@@ -838,4 +871,31 @@ func PrettyPrintTargetEnvironment(originalTargetEnv string, unsupportedJSFeature
 		where = fmt.Sprintf("%s (%s%s)", where, originalTargetEnv, overrides)
 	}
 	return
+}
+
+type MetafileFormat uint8
+
+const (
+	UnminifiedMetafile MetafileFormat = iota
+	MinifiedMetafile
+)
+
+func (mf MetafileFormat) MaybeRemoveWhitespace(fmt string) string {
+	if mf == MinifiedMetafile {
+		resultLen := 0
+		for i := 0; i < len(fmt); i++ {
+			if c := fmt[i]; c != ' ' && c != '\n' {
+				resultLen++
+			}
+		}
+		var result strings.Builder
+		result.Grow(resultLen)
+		for i := 0; i < len(fmt); i++ {
+			if c := fmt[i]; c != ' ' && c != '\n' {
+				result.WriteByte(c)
+			}
+		}
+		return result.String()
+	}
+	return fmt
 }

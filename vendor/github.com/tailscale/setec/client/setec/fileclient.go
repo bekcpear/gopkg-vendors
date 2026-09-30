@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package setec
@@ -100,4 +100,20 @@ type StoreClient interface {
 	// GetIfChanged fetches a secret value by name, if the active version on the
 	// server is different from oldVersion. See [Client.GetIfChanged].
 	GetIfChanged(ctx context.Context, name string, oldVersion api.SecretVersion) (*api.SecretValue, error)
+}
+
+// VersioningStoreClient is an extension of [StoreClient] that supports operations on versions of secrets.
+type VersioningStoreClient interface {
+	StoreClient
+
+	// Info fetches metadata for a given secret name.
+	Info(ctx context.Context, name string) (*api.SecretInfo, error)
+
+	// GetVersion fetches a secret value by name and version. If version == 0,
+	// GetVersion retrieves the current active version.
+	GetVersion(ctx context.Context, name string, version api.SecretVersion) (*api.SecretValue, error)
+
+	// CreateVersion Creates a specific version of a secret, sets its value and immediately activates that version.
+	// It fails if this version of the secret ever had a value.
+	CreateVersion(ctx context.Context, name string, version api.SecretVersion, value []byte) error
 }

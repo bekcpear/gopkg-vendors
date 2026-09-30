@@ -68,7 +68,7 @@ func (item *MenuItem) String() string {
 
 // newMenuItem returns a populated MenuItem object
 func newMenuItem(title string, tooltip string, parent *MenuItem) *MenuItem {
-	return &MenuItem{
+	item := &MenuItem{
 		ClickedCh:   make(chan struct{}),
 		id:          currentID.Add(1),
 		title:       title,
@@ -78,6 +78,12 @@ func newMenuItem(title string, tooltip string, parent *MenuItem) *MenuItem {
 		isCheckable: false,
 		parent:      parent,
 	}
+
+	menuItemsLock.Lock()
+	menuItems[item.id] = item
+	menuItemsLock.Unlock()
+
+	return item
 }
 
 // Run initializes GUI and starts the event loop, then invokes the onReady
@@ -135,9 +141,13 @@ func Register(onReady func(), onExit func()) {
 func ResetMenu() {
 	menuItemsLock.Lock()
 	id := currentID.Load()
+	items := make([]*MenuItem, 0, len(menuItems))
+	for _, item := range menuItems {
+		items = append(items, item)
+	}
 	menuItemsLock.Unlock()
-	for i, item := range menuItems {
-		if i < id && item.parent == nil {
+	for _, item := range items {
+		if item.id <= id && item.parent == nil {
 			item.Remove()
 		}
 	}
@@ -256,13 +266,19 @@ func (item *MenuItem) Remove() {
 	}
 	removeMenuItem(item)
 	menuItemsLock.Lock()
+	defer menuItemsLock.Unlock()
 	delete(menuItems, item.id)
+	if item.ClickedCh == nil {
+		return
+	}
 	select {
-	case <-item.ClickedCh:
+	case _, ok := <-item.ClickedCh:
+		if !ok {
+			return
+		}
 	default:
 	}
 	close(item.ClickedCh)
-	menuItemsLock.Unlock()
 }
 
 // Show shows a previously hidden menu item
@@ -290,8 +306,12 @@ func (item *MenuItem) Uncheck() {
 // update propagates changes on a menu item to systray
 func (item *MenuItem) update() {
 	menuItemsLock.Lock()
-	menuItems[item.id] = item
+	_, exists := menuItems[item.id]
 	menuItemsLock.Unlock()
+
+	if !exists {
+		return
+	}
 	addOrUpdateMenuItem(item)
 }
 

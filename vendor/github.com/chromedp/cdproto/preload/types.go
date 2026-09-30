@@ -147,10 +147,11 @@ func (t *SpeculationTargetHint) UnmarshalJSON(buf []byte) error {
 //
 // See: https://chromedevtools.github.io/devtools-protocol/tot/Preload#type-PreloadingAttemptKey
 type IngAttemptKey struct {
-	LoaderID   cdp.LoaderID          `json:"loaderId"`
-	Action     SpeculationAction     `json:"action"`
-	URL        string                `json:"url"`
-	TargetHint SpeculationTargetHint `json:"targetHint,omitempty,omitzero"`
+	LoaderID       cdp.LoaderID          `json:"loaderId"`
+	Action         SpeculationAction     `json:"action"`
+	URL            string                `json:"url"`
+	FormSubmission bool                  `json:"formSubmission"`
+	TargetHint     SpeculationTargetHint `json:"targetHint,omitempty,omitzero"`
 }
 
 // IngAttemptSource lists sources for a preloading attempt, specifically the
@@ -266,6 +267,8 @@ const (
 	PrerenderFinalStatusPrerenderFailedDuringPrefetch                              PrerenderFinalStatus = "PrerenderFailedDuringPrefetch"
 	PrerenderFinalStatusBrowsingDataRemoved                                        PrerenderFinalStatus = "BrowsingDataRemoved"
 	PrerenderFinalStatusPrerenderHostReused                                        PrerenderFinalStatus = "PrerenderHostReused"
+	PrerenderFinalStatusFormSubmitWhenPrerendering                                 PrerenderFinalStatus = "FormSubmitWhenPrerendering"
+	PrerenderFinalStatusCrossDocumentRestart                                       PrerenderFinalStatus = "CrossDocumentRestart"
 )
 
 // UnmarshalJSON satisfies [json.Unmarshaler].
@@ -422,6 +425,10 @@ func (t *PrerenderFinalStatus) UnmarshalJSON(buf []byte) error {
 		*t = PrerenderFinalStatusBrowsingDataRemoved
 	case PrerenderFinalStatusPrerenderHostReused:
 		*t = PrerenderFinalStatusPrerenderHostReused
+	case PrerenderFinalStatusFormSubmitWhenPrerendering:
+		*t = PrerenderFinalStatusFormSubmitWhenPrerendering
+	case PrerenderFinalStatusCrossDocumentRestart:
+		*t = PrerenderFinalStatusCrossDocumentRestart
 	default:
 		return fmt.Errorf("unknown PrerenderFinalStatus value: %v", s)
 	}
@@ -500,6 +507,7 @@ const (
 	PrefetchStatusPrefetchIneligibleRetryAfter                                PrefetchStatus = "PrefetchIneligibleRetryAfter"
 	PrefetchStatusPrefetchIsPrivacyDecoy                                      PrefetchStatus = "PrefetchIsPrivacyDecoy"
 	PrefetchStatusPrefetchIsStale                                             PrefetchStatus = "PrefetchIsStale"
+	PrefetchStatusPrefetchNotEligibleBlockedByConnectionAllowlist             PrefetchStatus = "PrefetchNotEligibleBlockedByConnectionAllowlist"
 	PrefetchStatusPrefetchNotEligibleBrowserContextOffTheRecord               PrefetchStatus = "PrefetchNotEligibleBrowserContextOffTheRecord"
 	PrefetchStatusPrefetchNotEligibleDataSaverEnabled                         PrefetchStatus = "PrefetchNotEligibleDataSaverEnabled"
 	PrefetchStatusPrefetchNotEligibleExistingProxy                            PrefetchStatus = "PrefetchNotEligibleExistingProxy"
@@ -521,6 +529,7 @@ const (
 	PrefetchStatusPrefetchResponseUsed                                        PrefetchStatus = "PrefetchResponseUsed"
 	PrefetchStatusPrefetchSuccessfulButNotUsed                                PrefetchStatus = "PrefetchSuccessfulButNotUsed"
 	PrefetchStatusPrefetchNotUsedProbeFailed                                  PrefetchStatus = "PrefetchNotUsedProbeFailed"
+	PrefetchStatusPrefetchCancelledOnUserNavigation                           PrefetchStatus = "PrefetchCancelledOnUserNavigation"
 )
 
 // UnmarshalJSON satisfies [json.Unmarshaler].
@@ -555,6 +564,8 @@ func (t *PrefetchStatus) UnmarshalJSON(buf []byte) error {
 		*t = PrefetchStatusPrefetchIsPrivacyDecoy
 	case PrefetchStatusPrefetchIsStale:
 		*t = PrefetchStatusPrefetchIsStale
+	case PrefetchStatusPrefetchNotEligibleBlockedByConnectionAllowlist:
+		*t = PrefetchStatusPrefetchNotEligibleBlockedByConnectionAllowlist
 	case PrefetchStatusPrefetchNotEligibleBrowserContextOffTheRecord:
 		*t = PrefetchStatusPrefetchNotEligibleBrowserContextOffTheRecord
 	case PrefetchStatusPrefetchNotEligibleDataSaverEnabled:
@@ -597,6 +608,8 @@ func (t *PrefetchStatus) UnmarshalJSON(buf []byte) error {
 		*t = PrefetchStatusPrefetchSuccessfulButNotUsed
 	case PrefetchStatusPrefetchNotUsedProbeFailed:
 		*t = PrefetchStatusPrefetchNotUsedProbeFailed
+	case PrefetchStatusPrefetchCancelledOnUserNavigation:
+		*t = PrefetchStatusPrefetchCancelledOnUserNavigation
 	default:
 		return fmt.Errorf("unknown PrefetchStatus value: %v", s)
 	}

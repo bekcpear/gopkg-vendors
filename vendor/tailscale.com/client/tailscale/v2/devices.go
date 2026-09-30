@@ -73,6 +73,12 @@ type Distro struct {
 	CodeName string `json:"codeName"`
 }
 
+type DevicePostureIdentity struct {
+	SerialNumbers     []string `json:"serialNumbers"`
+	Disabled          bool     `json:"disabled"`
+	HardwareAddresses []string `json:"hardwareAddresses,omitempty"`
+}
+
 type Device struct {
 	Addresses                 []string `json:"addresses"`
 	Name                      string   `json:"name"`
@@ -99,11 +105,12 @@ type Device struct {
 	UpdateAvailable           bool     `json:"updateAvailable"`
 
 	// The below are only included in listings when querying `all` fields.
-	SSHEnabled         bool                `json:"sshEnabled"`
-	AdvertisedRoutes   []string            `json:"AdvertisedRoutes"`
-	EnabledRoutes      []string            `json:"enabledRoutes"`
-	ClientConnectivity *ClientConnectivity `json:"clientConnectivity"`
-	Distro             *Distro             `json:"distro"`
+	PostureIdentity    *DevicePostureIdentity `json:"postureIdentity"`
+	SSHEnabled         bool                   `json:"sshEnabled"`
+	AdvertisedRoutes   []string               `json:"AdvertisedRoutes"`
+	EnabledRoutes      []string               `json:"enabledRoutes"`
+	ClientConnectivity *ClientConnectivity    `json:"clientConnectivity"`
+	Distro             *Distro                `json:"distro"`
 }
 
 type DevicePostureAttributes struct {

@@ -15,19 +15,32 @@
 package gosec
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+var (
+	ErrUnexpectedASTNode     = errors.New("unexpected AST node type")
+	ErrNoProjectRelativePath = errors.New("no project relative path found")
+	ErrNoProjectAbsolutePath = errors.New("no project absolute path found")
+)
+
+// envGoModVersion overrides the Go version detection.
+const envGoModVersion = "GOSECGOVERSION"
 
 // MatchCallByPackage ensures that the specified package is imported,
 // adjusts the name for any aliases and ignores cases that are
@@ -77,7 +90,7 @@ func GetInt(n ast.Node) (int64, error) {
 	if node, ok := n.(*ast.BasicLit); ok && node.Kind == token.INT {
 		return strconv.ParseInt(node.Value, 0, 64)
 	}
-	return 0, fmt.Errorf("Unexpected AST node type: %T", n)
+	return 0, fmt.Errorf("%w: %T", ErrUnexpectedASTNode, n)
 }
 
 // GetFloat will read and return a float value from an ast.BasicLit
@@ -85,7 +98,7 @@ func GetFloat(n ast.Node) (float64, error) {
 	if node, ok := n.(*ast.BasicLit); ok && node.Kind == token.FLOAT {
 		return strconv.ParseFloat(node.Value, 64)
 	}
-	return 0.0, fmt.Errorf("Unexpected AST node type: %T", n)
+	return 0.0, fmt.Errorf("%w: %T", ErrUnexpectedASTNode, n)
 }
 
 // GetChar will read and return a char value from an ast.BasicLit
@@ -93,7 +106,7 @@ func GetChar(n ast.Node) (byte, error) {
 	if node, ok := n.(*ast.BasicLit); ok && node.Kind == token.CHAR {
 		return node.Value[0], nil
 	}
-	return 0, fmt.Errorf("Unexpected AST node type: %T", n)
+	return 0, fmt.Errorf("%w: %T", ErrUnexpectedASTNode, n)
 }
 
 // GetStringRecursive will recursively walk down a tree of *ast.BinaryExpr. It will then concat the results, and return.
@@ -136,7 +149,7 @@ func GetString(n ast.Node) (string, error) {
 		return strconv.Unquote(node.Value)
 	}
 
-	return "", fmt.Errorf("Unexpected AST node type: %T", n)
+	return "", fmt.Errorf("%w: %T", ErrUnexpectedASTNode, n)
 }
 
 // GetCallObject returns the object and call expression and associated
@@ -155,9 +168,35 @@ func GetCallObject(n ast.Node, ctx *Context) (*ast.CallExpr, types.Object) {
 	return nil, nil
 }
 
+type callInfo struct {
+	packageName string
+	funcName    string
+	err         error
+}
+
+var callCachePool = sync.Pool{
+	New: func() any {
+		return make(map[ast.Node]callInfo)
+	},
+}
+
 // GetCallInfo returns the package or type and name  associated with a
 // call expression.
 func GetCallInfo(n ast.Node, ctx *Context) (string, string, error) {
+	if ctx.callCache != nil {
+		if res, ok := ctx.callCache[n]; ok {
+			return res.packageName, res.funcName, res.err
+		}
+	}
+
+	packageName, funcName, err := getCallInfo(n, ctx)
+	if ctx.callCache != nil {
+		ctx.callCache[n] = callInfo{packageName, funcName, err}
+	}
+	return packageName, funcName, err
+}
+
+func getCallInfo(n ast.Node, ctx *Context) (string, string, error) {
 	switch node := n.(type) {
 	case *ast.CallExpr:
 		switch fn := node.Fun.(type) {
@@ -260,7 +299,7 @@ func getIdentStringValues(ident *ast.Ident, stringFinder func(ast.Node) (string,
 	return values
 }
 
-// getIdentStringRecursive returns the string of values of an Ident if they can be resolved
+// GetIdentStringValuesRecursive returns the string of values of an Ident if they can be resolved
 // The difference between this and GetIdentStringValues is that it will attempt to resolve the strings recursively,
 // if it is passed a *ast.BinaryExpr. See GetStringRecursive for details
 func GetIdentStringValuesRecursive(ident *ast.Ident) []string {
@@ -363,7 +402,7 @@ func GetPkgRelativePath(path string) (string, error) {
 			return strings.TrimPrefix(abspath, projectRoot), nil
 		}
 	}
-	return "", errors.New("no project relative path found")
+	return "", ErrNoProjectRelativePath
 }
 
 // GetPkgAbsPath returns the Go package absolute path derived from
@@ -374,34 +413,49 @@ func GetPkgAbsPath(pkgPath string) (string, error) {
 		return "", err
 	}
 	if _, err := os.Stat(absPath); os.IsNotExist(err) {
-		return "", errors.New("no project absolute path found")
+		return "", ErrNoProjectAbsolutePath
 	}
 	return absPath, nil
 }
 
-// ConcatString recursively concatenates strings from a binary expression
-func ConcatString(n *ast.BinaryExpr) (string, bool) {
-	var s string
-	// sub expressions are found in X object, Y object is always last BasicLit
-	if rightOperand, ok := n.Y.(*ast.BasicLit); ok {
-		if str, err := GetString(rightOperand); err == nil {
-			s = str + s
-		}
-	} else {
+// ConcatString recursively concatenates constant strings from an expression
+// if the entire chain is fully constant-derived (using TryResolve).
+// Returns the concatenated string and true if successful.
+func ConcatString(expr ast.Expr, ctx *Context) (string, bool) {
+	if expr == nil || !TryResolve(expr, ctx) {
 		return "", false
 	}
-	if leftOperand, ok := n.X.(*ast.BinaryExpr); ok {
-		if recursion, ok := ConcatString(leftOperand); ok {
-			s = recursion + s
+
+	var build strings.Builder
+	var traverse func(ast.Expr) bool
+	traverse = func(e ast.Expr) bool {
+		switch node := e.(type) {
+		case *ast.BasicLit:
+			if str, err := GetString(node); err == nil {
+				build.WriteString(str)
+				return true
+			}
+			return false
+		case *ast.Ident:
+			values := GetIdentStringValuesRecursive(node)
+			for _, v := range values {
+				build.WriteString(v)
+			}
+			return len(values) > 0
+		case *ast.BinaryExpr:
+			if node.Op != token.ADD {
+				return false
+			}
+			return traverse(node.X) && traverse(node.Y)
+		default:
+			return false
 		}
-	} else if leftOperand, ok := n.X.(*ast.BasicLit); ok {
-		if str, err := GetString(leftOperand); err == nil {
-			s = str + s
-		}
-	} else {
-		return "", false
 	}
-	return s, true
+
+	if traverse(expr) {
+		return build.String(), true
+	}
+	return "", false
 }
 
 // FindVarIdentities returns array of all variable identities in a given binary expression
@@ -432,6 +486,30 @@ func FindVarIdentities(n *ast.BinaryExpr, c *Context) ([]*ast.Ident, bool) {
 	}
 	// if nil or error, return false
 	return nil, false
+}
+
+// FindModuleRoot returns the directory containing the go.mod file that
+// governs the given directory. It walks upward from dir until it finds
+// a go.mod file or reaches the filesystem root.
+// Returns "" if no go.mod is found.
+//
+// This is needed to correctly load packages in multi-module repositories:
+// without setting packages.Config.Dir to the module root, packages.Load
+// uses the current working directory for module resolution, which fails
+// when the CWD belongs to a different module than the package being loaded.
+func FindModuleRoot(dir string) string {
+	dir = filepath.Clean(dir)
+	for {
+		if fi, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil && !fi.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached filesystem root
+			return ""
+		}
+		dir = parent
+	}
 }
 
 // PackagePaths returns a slice with all packages path at given root directory
@@ -493,19 +571,61 @@ func RootPath(root string) (string, error) {
 	return filepath.Abs(root)
 }
 
-// GoVersion returns parsed version of Go from runtime
+var (
+	goVersionCache struct {
+		major, minor, build int
+	}
+	goVersionOnce sync.Once
+)
+
+// GoVersion returns parsed version of Go mod version and fallback to runtime version if not found.
 func GoVersion() (int, int, int) {
-	return parseGoVersion(runtime.Version())
+	goVersionOnce.Do(func() {
+		if env, ok := os.LookupEnv(envGoModVersion); ok {
+			goVersionCache.major, goVersionCache.minor, goVersionCache.build = parseGoVersion(strings.TrimPrefix(env, "go"))
+			return
+		}
+
+		goVersion, err := goModVersion()
+		if err != nil {
+			goVersionCache.major, goVersionCache.minor, goVersionCache.build = parseGoVersion(strings.TrimPrefix(runtime.Version(), "go"))
+			return
+		}
+
+		goVersionCache.major, goVersionCache.minor, goVersionCache.build = parseGoVersion(goVersion)
+	})
+	return goVersionCache.major, goVersionCache.minor, goVersionCache.build
+}
+
+type goListOutput struct {
+	GoVersion string `json:"GoVersion"`
+}
+
+func goModVersion() (string, error) {
+	cmd := exec.Command("go", "list", "-m", "-json")
+
+	raw, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("command go list: %w: %s", err, string(raw))
+	}
+
+	var v goListOutput
+	err = json.NewDecoder(bytes.NewBuffer(raw)).Decode(&v)
+	if err != nil {
+		return "", fmt.Errorf("unmarshaling error: %w: %s", err, string(raw))
+	}
+
+	return v.GoVersion, nil
 }
 
 // parseGoVersion parses Go version.
 // example:
-// - go1.19rc2
-// - go1.19beta2
-// - go1.19.4
-// - go1.19
+// - 1.19rc2
+// - 1.19beta2
+// - 1.19.4
+// - 1.19
 func parseGoVersion(version string) (int, int, int) {
-	exp := regexp.MustCompile(`go(\d+).(\d+)(?:.(\d+))?.*`)
+	exp := regexp.MustCompile(`(\d+).(\d+)(?:.(\d+))?.*`)
 	parts := exp.FindStringSubmatch(version)
 	if len(parts) <= 1 {
 		return 0, 0, 0
@@ -516,4 +636,44 @@ func parseGoVersion(version string) (int, int, int) {
 	build, _ := strconv.Atoi(parts[3])
 
 	return major, minor, build
+}
+
+// CLIBuildTags converts a list of Go build tags into the corresponding CLI
+// build flag (-tags=form) by trimming whitespace, removing empty entries,
+// and joining them into a comma-separated -tags argument for use with go build
+// commands.
+func CLIBuildTags(buildTags []string) []string {
+	var buildFlags []string
+	if len(buildTags) > 0 {
+		for _, tag := range buildTags {
+			// remove empty entries and surrounding whitespace
+			if t := strings.TrimSpace(tag); t != "" {
+				buildFlags = append(buildFlags, t)
+			}
+		}
+		if len(buildFlags) > 0 {
+			buildFlags = []string{"-tags=" + strings.Join(buildFlags, ",")}
+		}
+	}
+
+	return buildFlags
+}
+
+// ContainingFile returns the *ast.File from ctx.PkgFiles that contains the given position provider.
+// A position provider can be an ast.Node, a types.Object, or any type with a Pos() token.Pos method.
+// Returns nil if not found or if the provider is nil/invalid.
+func ContainingFile(p interface{ Pos() token.Pos }, ctx *Context) *ast.File {
+	if p == nil {
+		return nil
+	}
+	pos := p.Pos()
+	if !pos.IsValid() {
+		return nil
+	}
+	for _, f := range ctx.PkgFiles {
+		if f.Pos() <= pos && pos < f.End() {
+			return f
+		}
+	}
+	return nil
 }

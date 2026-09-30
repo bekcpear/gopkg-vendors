@@ -23,7 +23,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/Masterminds/sprig"
+	"github.com/Masterminds/sprig/v3"
 	"github.com/elastic/crd-ref-docs/config"
 	"github.com/elastic/crd-ref-docs/templates"
 	"github.com/elastic/crd-ref-docs/types"
@@ -77,6 +77,7 @@ func (m *MarkdownRenderer) ToFuncMap() template.FuncMap {
 		"TypeID":             m.TypeID,
 		"RenderFieldDoc":     m.RenderFieldDoc,
 		"RenderDefault":      m.RenderDefault,
+		"TemplateValue":      m.TemplateValue,
 	}
 }
 
@@ -132,6 +133,13 @@ func (m *MarkdownRenderer) RenderLocalLink(text string) string {
 	return fmt.Sprintf("[%s](#%s)", text, anchor)
 }
 
+func (m *MarkdownRenderer) TemplateValue(key string) string {
+	if m == nil || m.conf == nil {
+		return ""
+	}
+	return m.conf.TemplateKeyValues.AsMap()[key]
+}
+
 func (m *MarkdownRenderer) RenderExternalLink(link, text string) string {
 	return fmt.Sprintf("[%s](%s)", text, link)
 }
@@ -144,6 +152,10 @@ func (m *MarkdownRenderer) RenderFieldDoc(text string) string {
 	// Escape the pipe character, which has special meaning for Markdown as a way to format tables
 	// so that including | in a comment does not result in wonky tables.
 	out := strings.ReplaceAll(text, "|", "\\|")
+
+	// Escape the curly bracket character.
+	out = strings.ReplaceAll(out, "{", "\\{")
+	out = strings.ReplaceAll(out, "}", "\\}")
 
 	// Replace newlines with 1 line break so that they don't break the Markdown table formatting.
 	out = strings.ReplaceAll(out, "\n", "<br />")

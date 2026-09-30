@@ -14,10 +14,13 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+
 package processor
 
 import (
 	"fmt"
+	"go/ast"
+	"go/token"
 	gotypes "go/types"
 	"regexp"
 	"sort"
@@ -43,9 +46,10 @@ var ignoredCommentRegex = regexp.MustCompile(`\s*^(?i:\+|copyright)`)
 type groupVersionInfo struct {
 	schema.GroupVersion
 	*loader.Package
-	doc   string
-	kinds map[string]struct{}
-	types types.TypeMap
+	doc     string
+	kinds   map[string]struct{}
+	types   types.TypeMap
+	markers markers.MarkerValues
 }
 
 func Process(config *config.Config) ([]types.GroupVersionDetails, error) {
@@ -103,7 +107,7 @@ func Process(config *config.Config) ([]types.GroupVersionDetails, error) {
 				zap.S().Fatalw("Type not loaded", "type", key)
 			}
 		}
-
+		details.Markers = gvi.markers
 		gvDetails = append(gvDetails, details)
 	}
 
@@ -124,7 +128,7 @@ func Process(config *config.Config) ([]types.GroupVersionDetails, error) {
 }
 
 func newProcessor(compiledConfig *compiledConfig, maxDepth int) (*processor, error) {
-	registry, err := mkRegistry()
+	registry, err := mkRegistry(compiledConfig.markers)
 	if err != nil {
 		return nil, err
 	}
@@ -244,8 +248,9 @@ func (p *processor) extractGroupVersionIfExists(collector *markers.Collector, pk
 			Group:   groupName.(string),
 			Version: version,
 		},
-		doc:     p.extractPkgDocumentation(pkg),
 		Package: pkg,
+		doc:     p.extractPkgDocumentation(pkg),
+		markers: markerValues,
 	}
 
 	return gvInfo
@@ -295,7 +300,7 @@ func (p *processor) processType(pkg *loader.Package, parentType *types.Type, t g
 	}
 
 	if depth > p.maxDepth {
-		zap.S().Debugw("Not loading type due to reaching max recursion depth", "type", t.String())
+		zap.S().Warnw("Not loading type due to reaching max recursion depth", "type", t.String())
 		typeDef.Kind = types.UnknownKind
 		return typeDef
 	}
@@ -325,6 +330,9 @@ func (p *processor) processType(pkg *loader.Package, parentType *types.Type, t g
 		info := p.parser.LookupType(pkg, typeDef.Name)
 		if info != nil {
 			underlying = pkg.TypesInfo.TypeOf(info.RawSpec.Type)
+		}
+		if underlying.String() == "string" {
+			typeDef.EnumValues = lookupConstantValuesForAliasedType(pkg, typeDef.Name)
 		}
 		typeDef.UnderlyingType = p.processType(pkg, typeDef, underlying, depth+1)
 		p.addReference(typeDef, typeDef.UnderlyingType)
@@ -485,17 +493,42 @@ func (p *processor) addReference(parent *types.Type, child *types.Type) {
 	}
 }
 
-func mkRegistry() (*markers.Registry, error) {
+func mkRegistry(customMarkers []config.Marker) (*markers.Registry, error) {
 	registry := &markers.Registry{}
-	err := registry.Define(objectRootMarker, markers.DescribesType, true)
-	if err != nil {
+	if err := registry.Define(objectRootMarker, markers.DescribesType, true); err != nil {
 		return nil, err
 	}
 
 	for _, marker := range crdmarkers.AllDefinitions {
-		err = registry.Register(marker.Definition)
-		if err != nil {
+		if err := registry.Register(marker.Definition); err != nil {
 			return nil, err
+		}
+	}
+
+	// Register k8s:* markers - sig apimachinery plans to unify CRD and native types on these.
+	if err := registry.Define("k8s:required", markers.DescribesField, struct{}{}); err != nil {
+		return nil, err
+	}
+	if err := registry.Define("k8s:optional", markers.DescribesField, struct{}{}); err != nil {
+		return nil, err
+	}
+
+	for _, marker := range customMarkers {
+		t := markers.DescribesField
+		switch marker.Target {
+		case config.TargetTypePackage:
+			t = markers.DescribesPackage
+		case config.TargetTypeType:
+			t = markers.DescribesType
+		case config.TargetTypeField:
+			t = markers.DescribesField
+		default:
+			zap.S().Warnf("Skipping custom marker %s with unknown target type %s", marker.Name, marker.Target)
+			continue
+		}
+
+		if err := registry.Define(marker.Name, t, struct{}{}); err != nil {
+			return nil, fmt.Errorf("failed to define custom marker %s: %w", marker.Name, err)
 		}
 	}
 
@@ -519,7 +552,7 @@ func parseMarkers(markers markers.MarkerValues) (string, []string) {
 			name := strings.TrimPrefix(name, "kubebuilder:validation:")
 
 			switch name {
-			case "Pattern":
+			case "items:Pattern", "Pattern":
 				value = fmt.Sprintf("`%s`", value)
 			// FIXME: XValidation currently removed due to being long and difficult to read.
 			// E.g. "XValidation: {self.page < 200 Please start a new book.}"
@@ -529,16 +562,29 @@ func parseMarkers(markers markers.MarkerValues) (string, []string) {
 			validation = append(validation, fmt.Sprintf("%s: %v", name, value))
 		}
 
-		if name == "kubebuilder:default" {
-			if value, ok := value.(crdmarkers.Default); ok {
-				defaultValue = fmt.Sprintf("%v", value.Value)
-				if strings.HasPrefix(defaultValue, "map[") {
-					defaultValue = strings.TrimPrefix(defaultValue, "map[")
-					defaultValue = strings.TrimSuffix(defaultValue, "]")
-					defaultValue = fmt.Sprintf("{ %s }", defaultValue)
-				}
-			}
+		switch v := value.(type) {
+		case crdmarkers.KubernetesDefault:
+			defaultValue = fmt.Sprintf("%v", v.Value)
+		case crdmarkers.Default:
+			defaultValue = fmt.Sprintf("%v", v.Value)
 		}
+
+    // Handle standalone +required and +k8s:required marker
+		// This is equivalent to +kubebuilder:validation:Required
+		if name == "required" || name == "k8s:required" {
+			validation = append(validation, "Required: {}")
+		}
+		// Handle standalone +optional and +k8s:optional marker
+		// This is equivalent to +kubebuilder:validation:Optional
+		if name == "optional" || name == "k8s:optional" {
+			validation = append(validation, "Optional: {}")
+		}
+	}
+
+	if strings.HasPrefix(defaultValue, "map[") {
+		defaultValue = strings.TrimPrefix(defaultValue, "map[")
+		defaultValue = strings.TrimSuffix(defaultValue, "]")
+		defaultValue = fmt.Sprintf("{ %s }", defaultValue)
 	}
 
 	return defaultValue, validation
@@ -551,4 +597,38 @@ func (p *processor) parseMarkers() {
 			f.Default, f.Validation = parseMarkers(f.Markers)
 		}
 	}
+}
+
+func lookupConstantValuesForAliasedType(pkg *loader.Package, aliasTypeName string) []types.EnumValue {
+	values := []types.EnumValue{}
+	for _, file := range pkg.Syntax {
+		for _, decl := range file.Decls {
+			node, ok := decl.(*ast.GenDecl)
+			if !ok || node.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range node.Specs {
+				// look for constant declaration
+				v, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				// value type must match the alias type name and have exactly one value
+				if id, ok := v.Type.(*ast.Ident); !ok || id.String() != aliasTypeName || len(v.Values) != 1 {
+					continue
+				}
+				// convert to a basic type to access to the value
+				b, ok := v.Values[0].(*ast.BasicLit)
+				if !ok {
+					continue
+				}
+				values = append(values, types.EnumValue{
+					// remove the '"' signs from the start and end of the value
+					Name: b.Value[1 : len(b.Value)-1],
+					Doc:  v.Doc.Text(),
+				})
+			}
+		}
+	}
+	return values
 }

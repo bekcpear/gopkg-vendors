@@ -9,12 +9,12 @@ import (
 	"strings"
 )
 
-// Checker will perform standart check on package and its methods.
+// Checker will perform standard check on package and its methods.
 type Checker struct {
 	Violations []Violation           // List of available violations
 	Packages   map[string][]int      // Storing indexes of Violations per pkg/kg.Struct
 	Type       func(ast.Expr) string // Type Checker closure.
-	Print      func(ast.Node) []byte // String representation of the expresion.
+	Print      func(ast.Node) []byte // String representation of the expression.
 }
 
 func New(violations ...[]Violation) Checker {
@@ -76,7 +76,7 @@ func (c *Checker) Handle(v *Violation, ce *ast.CallExpr) (map[int]ast.Expr, bool
 			continue
 		}
 
-		// is it convertsion call
+		// is it conversion call
 		if !c.callConverts(call) {
 			continue
 		}
@@ -109,7 +109,7 @@ func (c *Checker) callConverts(ce *ast.CallExpr) bool {
 
 // register violations.
 func (c *Checker) register(violations []Violation) {
-	for _, v := range violations { // nolint: gocritic
+	for _, v := range violations { //nolint: gocritic
 		c.Violations = append(c.Violations, v)
 		if len(v.Struct) > 0 {
 			c.registerIdxPer(v.Package + "." + v.Struct)
@@ -141,7 +141,7 @@ func WrapType(info *types.Info) func(node ast.Expr) string {
 func WrapPrint(fSet *token.FileSet) func(ast.Node) []byte {
 	return func(node ast.Node) []byte {
 		var buf bytes.Buffer
-		printer.Fprint(&buf, fSet, node)
+		_ = printer.Fprint(&buf, fSet, node)
 		return buf.Bytes()
 	}
 }

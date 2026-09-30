@@ -24,6 +24,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMP_DIR=$(mktemp -d -t crd-ref-docs-XXXXX)
 DEFAULT_ARGS=(--log-level=ERROR --source-path="${SCRIPT_DIR}/test" --output-path="${TEMP_DIR}/out" --config="${SCRIPT_DIR}/test/config.yaml")
+AUTO_FIX=${AUTO_FIX:-}
 
 trap '[[ $TEMP_DIR ]] && rm -rf "$TEMP_DIR"' EXIT
 
@@ -33,6 +34,7 @@ run_test() {
 
     local renderer=asciidoctor
     local templates_dir=
+    local expected=expected.asciidoc
 
     while :; do
         case "${1:-}" in
@@ -54,6 +56,15 @@ run_test() {
                     exit 1
                 fi
                 ;;
+            --expected)
+                if [[ -n "${2:-}" ]]; then
+                    expected="$2"
+                    shift
+                else
+                    printf "ERROR: '--expected' cannot be empty.\n\n" >&2
+                    exit 1
+                fi
+                ;;
             *)
                 break
                 ;;
@@ -67,25 +78,22 @@ run_test() {
         args+=(--templates-dir="$templates_dir")
     fi
 
-    local expected
-    if [[ "$renderer" == "asciidoctor" ]]; then
-        expected=expected.asciidoc
-    else
-        expected=expected.md
-    fi
-
     (
         cd "$SCRIPT_DIR"
         cmd=(go run main.go "${args[@]}")
         echo "${cmd[@]}"
 
-        "${cmd[@]}"
+        "${cmd[@]}"  --template-value=k1=v1
 
         local diff
         if diff=$(diff -a -y --suppress-common-lines "${SCRIPT_DIR}/test/${expected}" "$actual"); then
             echo "OK"
         else
-            echo "ERROR: outputs differ"
+            if [[ -n "$AUTO_FIX" ]]; then
+                echo "INFO: auto-fixing the output"
+                cp "$actual" "${SCRIPT_DIR}/test/${expected}"
+            fi
+            echo "ERROR: outputs differ with ${expected}"
             echo ""
             echo "$diff"
             exit 1
@@ -94,6 +102,7 @@ run_test() {
 }
 
 run_test
-run_test --renderer asciidoctor --templates-dir templates/asciidoctor
-run_test --renderer markdown
-run_test --renderer markdown --templates-dir templates/markdown
+run_test --renderer asciidoctor --templates-dir templates/asciidoctor --expected expected.asciidoc
+run_test --renderer markdown --expected expected.md
+run_test --renderer markdown --templates-dir templates/markdown --expected expected.md
+run_test --renderer markdown --templates-dir test/templates/markdown --expected hide.md

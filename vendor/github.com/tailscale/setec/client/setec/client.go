@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package setec is a client library to access and manage secrets stored
@@ -42,6 +42,42 @@
 //
 // See also [Bootstrapping and Availability].
 //
+// ## Multiple Version Keyrings
+//
+// Some callers need to use multiple versions of the same key.  A typical
+// example is when a secret contains different versions of an encryption key,
+// where the active version is used for encryption, and non-active versions are
+// needed for decryption.
+//
+// To support this, the [Keyring] type allows a caller to fetch all available
+// versions of a given secret, and to keep them up-to-date with the service as
+// new values are added. To construct a [Keyring], call [Client.GetKeyring]:
+//
+//	r, err := client.GetKeyring(ctx, "example-encryption-key")
+//	if err != nil {
+//	   log.Fatalf("Initializing keyring: %v", err)
+//	}
+//
+// To retrieve the current active version (e.g., for encryption), use
+// [Keyring.Active]:
+//
+//	v, data := r.Active()
+//
+// The version is reported so the caller can record which version was observed.
+//
+// To retrieve a specified version (e.g., for decryption), use [Keyring.Get]:
+//
+//	data, ok := r.Get(v)
+//
+// This reports whether the requested version exists, and if so the current
+// value of the secret at that version.
+//
+// To update the keyring from the service, call [Keyring.Update:
+//
+//	if err := r.Update(ctx); err != nil {
+//	   log.Printf("Updating keyring failed: %v", err)
+//	}
+//
 // # Other Operations
 //
 // Programs that need to create, update, or delete secrets and secret versions
@@ -64,6 +100,9 @@ import (
 
 	"github.com/tailscale/setec/types/api"
 )
+
+// Assert that Client implements [VersioningStoreClient].
+var _ VersioningStoreClient = &Client{}
 
 // Client is a raw client to the secret management server.
 // If you're just consuming secrets, you probably want to use a Store
@@ -116,6 +155,8 @@ func do[RESP, REQ any](ctx context.Context, c Client, path string, req REQ) (RES
 			return resp, api.ErrAccessDenied
 		case http.StatusNotModified:
 			return resp, api.ErrValueNotChanged
+		case http.StatusPreconditionFailed:
+			return resp, api.ErrVersionClaimed
 		}
 		return resp, fmt.Errorf("request returned status %d: %q", code, string(bytes.TrimSpace(errBs)))
 	}
@@ -199,6 +240,19 @@ func (c Client) Put(ctx context.Context, name string, value []byte) (version api
 	})
 }
 
+// CreateVersion creates a specific version of a secret, sets its value and immediately activates that version.
+// It fails if this version of the secret ever had a value.
+//
+// Access requirement: "create-version"
+func (c Client) CreateVersion(ctx context.Context, name string, version api.SecretVersion, value []byte) error {
+	_, err := do[struct{}](ctx, c, "/api/create-version", api.CreateVersionRequest{
+		Name:    name,
+		Version: version,
+		Value:   value,
+	})
+	return err
+}
+
 // Activate changes the active version of the secret called name to version.
 //
 // Access requirement: "activate"
@@ -235,4 +289,25 @@ func (c Client) Delete(ctx context.Context, name string) error {
 		Name: name,
 	})
 	return err
+}
+
+// GetKeyring fetches all available versions of the named secret, and
+// returns a [Keyring] containing them.
+func (c Client) GetKeyring(ctx context.Context, name string) (*Keyring, error) {
+	info, err := c.Info(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	out := &Keyring{
+		name:     name,
+		client:   c,
+		versions: make(map[api.SecretVersion]*api.SecretValue),
+		active:   info.ActiveVersion,
+
+		// versions will be initialized by update below
+	}
+	if err := out.Update(ctx); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

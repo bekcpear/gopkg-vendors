@@ -96,6 +96,34 @@ func Model() string {
 	return "unknown model"
 }
 
+// bios returns a human readable version of the bios
+// as reported by the DMI sysfs interface files.
+func bios() string {
+	var parts []string
+	vendor := readFile0("/sys/class/dmi/id/bios_vendor")
+	if vendor != "" {
+		parts = append(parts, vendor)
+	}
+	version := readFile0("/sys/class/dmi/id/bios_version")
+	if version != "" {
+		parts = append(parts, version)
+	}
+	date := readFile0("/sys/class/dmi/id/bios_date")
+	if date != "" {
+		parts = append(parts, "("+date+")")
+	}
+	return strings.Join(parts, " ")
+}
+
+func firmwareVersion() string {
+	if ev := lastInstalledEepromVersion; ev != nil {
+		return "EEPROM " + ev.FirmwareDate
+	}
+	// No Raspberry Pi EEPROM version found,
+	// fall back to the BIOS information (PC).
+	return bios()
+}
+
 func readModuleInfo(path string) (string, error) {
 	bi, err := buildinfo.ReadFile(path)
 	if err != nil {
@@ -227,6 +255,7 @@ type filesystemStatus struct {
 
 func initStatus() {
 	model := Model()
+	firmware := firmwareVersion()
 
 	var uname unix.Utsname
 	if err := unix.Uname(&uname); err != nil {
@@ -285,23 +314,23 @@ func initStatus() {
 
 		var buf bytes.Buffer
 		if err := templates.ExecuteTemplate(&buf, "status.tmpl", struct {
-			Service        *service
-			BuildTimestamp string
-			SBOMHash       string
-			Hostname       string
-			Model          string
-			XsrfToken      int32
-			EEPROM         *eepromVersion
-			Kernel         string
+			Service         *service
+			BuildTimestamp  string
+			SBOMHash        string
+			Hostname        string
+			Model           string
+			XsrfToken       int32
+			FirmwareVersion string
+			Kernel          string
 		}{
-			Service:        svc,
-			BuildTimestamp: buildTimestamp,
-			SBOMHash:       sbomHash,
-			Hostname:       hostname,
-			Model:          model,
-			XsrfToken:      token,
-			EEPROM:         lastInstalledEepromVersion,
-			Kernel:         kernel,
+			Service:         svc,
+			BuildTimestamp:  buildTimestamp,
+			SBOMHash:        sbomHash,
+			Hostname:        hostname,
+			Model:           model,
+			XsrfToken:       token,
+			FirmwareVersion: firmware,
+			Kernel:          kernel,
 		}); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -361,39 +390,41 @@ func initStatus() {
 		services.Lock()
 		defer services.Unlock()
 		status := struct {
-			Services       []*service
-			PermDev        string
-			PermUsed       int64
-			PermAvail      int64
-			PermTotal      int64
-			PrivateAddrs   []string
-			PublicAddrs    []string
-			BuildTimestamp string
-			SBOMHash       string
-			Meminfo        map[string]int64
-			Hostname       string
-			Model          string
-			PermUUID       string
-			EEPROM         *eepromVersion
-			Kernel         string
-			MountDevices   []filesystemStatus
+			Services        []*service
+			PermDev         string
+			PermUsed        int64
+			PermAvail       int64
+			PermTotal       int64
+			PrivateAddrs    []string
+			PublicAddrs     []string
+			BuildTimestamp  string
+			SBOMHash        string
+			Meminfo         map[string]int64
+			Hostname        string
+			Model           string
+			PermUUID        string
+			EEPROM          *eepromVersion
+			FirmwareVersion string
+			Kernel          string
+			MountDevices    []filesystemStatus
 		}{
-			Services:       services.S,
-			PermDev:        rootdev.Partition(rootdev.Perm),
-			PermUsed:       int64(st.Bsize) * int64(st.Blocks-st.Bfree),
-			PermAvail:      int64(st.Bsize) * int64(st.Bavail),
-			PermTotal:      int64(st.Bsize) * int64(st.Blocks),
-			PrivateAddrs:   privateAddrs,
-			PublicAddrs:    publicAddrs,
-			BuildTimestamp: buildTimestamp,
-			SBOMHash:       sbomHash,
-			Meminfo:        parseMeminfo(),
-			Hostname:       hostname,
-			Model:          model,
-			PermUUID:       permUUID,
-			EEPROM:         lastInstalledEepromVersion,
-			Kernel:         kernel,
-			MountDevices:   mountDevices,
+			Services:        services.S,
+			PermDev:         rootdev.Partition(rootdev.Perm),
+			PermUsed:        int64(st.Bsize) * int64(st.Blocks-st.Bfree),
+			PermAvail:       int64(st.Bsize) * int64(st.Bavail),
+			PermTotal:       int64(st.Bsize) * int64(st.Blocks),
+			PrivateAddrs:    privateAddrs,
+			PublicAddrs:     publicAddrs,
+			BuildTimestamp:  buildTimestamp,
+			SBOMHash:        sbomHash,
+			Meminfo:         parseMeminfo(),
+			Hostname:        hostname,
+			Model:           model,
+			PermUUID:        permUUID,
+			EEPROM:          lastInstalledEepromVersion,
+			FirmwareVersion: firmware,
+			Kernel:          kernel,
+			MountDevices:    mountDevices,
 		}
 
 		if jsonRequested(r) {

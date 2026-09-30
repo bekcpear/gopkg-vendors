@@ -4,22 +4,28 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/evanw/esbuild/internal/ast"
 	"github.com/evanw/esbuild/internal/css_ast"
 	"github.com/evanw/esbuild/internal/css_lexer"
 	"github.com/evanw/esbuild/internal/logger"
 )
 
 type parseSelectorOpts struct {
-	composesContext        *composesContext
-	pseudoClassKind        css_ast.PseudoClassKind
-	isDeclarationContext   bool
-	stopOnCloseParen       bool
-	onlyOneComplexSelector bool
-	noLeadingCombinator    bool
+	composesContext         *composesContext
+	pseudoClassKind         css_ast.PseudoClassKind
+	isDeclarationContext    bool
+	stopOnCloseParen        bool
+	onlyOneComplexSelector  bool
+	isForgivingSelectorList bool
+	noLeadingCombinator     bool
 }
 
 func (p *parser) parseSelectorList(opts parseSelectorOpts) (list []css_ast.ComplexSelector, ok bool) {
+	// Potentially parse an empty list for ":is()" and ":where()"
+	if opts.isForgivingSelectorList && opts.stopOnCloseParen && p.peek(css_lexer.TCloseParen) {
+		ok = true
+		return
+	}
+
 	// Parse the first selector
 	sel, good := p.parseComplexSelector(parseComplexSelectorOpts{
 		parseSelectorOpts: opts,
@@ -69,7 +75,18 @@ func (p *parser) parseSelectorList(opts parseSelectorOpts) (list []css_ast.Compl
 		}
 	}
 
-	if p.options.minifySyntax {
+	// Remove the leading ampersand when minifying and it can be implied:
+	//
+	//   "a { & b {} }" => "a { b {} }"
+	//
+	// It can't be implied if it's not at the beginning, if there are multiple of
+	// them, or if the selector list is inside of a pseudo-class selector:
+	//
+	//   "a { b & {} }"
+	//   "a { & b & {} }"
+	//   "a { :has(& b) {} }"
+	//
+	if p.options.minifySyntax && !opts.stopOnCloseParen {
 		for i := 1; i < len(list); i++ {
 			if analyzeLeadingAmpersand(list[i], opts.isDeclarationContext) != cannotRemoveLeadingAmpersand {
 				list[i].Selectors = list[i].Selectors[1:]
@@ -82,7 +99,7 @@ func (p *parser) parseSelectorList(opts parseSelectorOpts) (list []css_ast.Compl
 
 		case canRemoveLeadingAmpersandIfNotFirst:
 			for i := 1; i < len(list); i++ {
-				if sel := list[i].Selectors[0]; !sel.HasNestingSelector() && (sel.Combinator.Byte != 0 || sel.TypeSelector == nil) {
+				if sel := list[i].Selectors[0]; len(sel.NestingSelectorLocs) == 0 && (sel.Combinator.Byte != 0 || sel.TypeSelector == nil) {
 					list[0].Selectors = list[0].Selectors[1:]
 					list[0], list[i] = list[i], list[0]
 					break
@@ -97,8 +114,8 @@ func (p *parser) parseSelectorList(opts parseSelectorOpts) (list []css_ast.Compl
 
 func mergeCompoundSelectors(target *css_ast.CompoundSelector, source css_ast.CompoundSelector) {
 	// ".foo:local(&)" => "&.foo"
-	if source.HasNestingSelector() && !target.HasNestingSelector() {
-		target.NestingSelectorLoc = source.NestingSelectorLoc
+	if len(source.NestingSelectorLocs) > 0 && len(target.NestingSelectorLocs) == 0 {
+		target.NestingSelectorLocs = source.NestingSelectorLocs
 	}
 
 	if source.TypeSelector != nil {
@@ -210,7 +227,7 @@ func (p *parser) flattenLocalAndGlobalSelectors(list []css_ast.ComplexSelector, 
 		if len(selectors) == 0 {
 			// Treat a bare ":global" or ":local" as a bare "&" nesting selector
 			selectors = append(selectors, css_ast.CompoundSelector{
-				NestingSelectorLoc:        ast.MakeIndex32(uint32(sel.Selectors[0].Range().Loc.Start)),
+				NestingSelectorLocs:       []logger.Loc{sel.Selectors[0].Range().Loc},
 				WasEmptyFromLocalOrGlobal: true,
 			})
 
@@ -235,8 +252,17 @@ const (
 func analyzeLeadingAmpersand(sel css_ast.ComplexSelector, isDeclarationContext bool) leadingAmpersand {
 	if len(sel.Selectors) > 1 {
 		if first := sel.Selectors[0]; first.IsSingleAmpersand() {
-			if second := sel.Selectors[1]; second.Combinator.Byte == 0 && second.HasNestingSelector() {
+			second := sel.Selectors[1]
+			rest := css_ast.ComplexSelector{Selectors: sel.Selectors[1:]}
+			if second.Combinator.Byte == 0 && rest.ContainsNestingCombinator() {
 				// ".foo { & &.bar {} }" => ".foo { & &.bar {} }"
+				// ".foo { & .bar:not(& .baz) {} }" => ".foo { & .bar:not(& .baz) {} }"
+
+				// The specification says: "If a selector in the <relative-selector-list>
+				// does not start with a combinator but does contain the nesting selector,
+				// it is interpreted as a non-relative selector." So we don't want to
+				// remove the leading "&" here as that would change the meaning to a
+				// non-relative selector. See: https://www.w3.org/TR/css-nesting-1/
 			} else if second.Combinator.Byte != 0 || second.TypeSelector == nil || !isDeclarationContext {
 				// "& + div {}" => "+ div {}"
 				// "& div {}" => "div {}"
@@ -247,6 +273,30 @@ func analyzeLeadingAmpersand(sel css_ast.ComplexSelector, isDeclarationContext b
 			} else {
 				// ".foo { & div {} }"
 				// ".foo { .bar, & div {} }" => ".foo { .bar, div {} }"
+
+				// The first iteration of CSS nesting didn't support an implicit "&" if
+				// the selector started with an identifier. This was done to avoid
+				// confusion with declarations in the parser, as the parser would
+				// otherwise need unbounded lookahead to distinguish between the two.
+				// Consider the following:
+				//
+				//   span {
+				//     color:blue;
+				//     div:hover span {}
+				//   }
+				//
+				// The "color:blue" is a declaration while "div:hover" is actually a
+				// relative selector in a nested style rule. The parser would need to
+				// scan to the ";" or "{" to distinguish between the two cases.
+				// Generally you want to avoid parsers with unbounded lookahead.
+				//
+				// However, this edge case is commonly encountered and it's confusing
+				// that it doesn't work. So the CSS working group later added unbounded
+				// lookahead to fix it: https://github.com/w3c/csswg-drafts/issues/7961.
+				//
+				// We deliberately don't take advantage of that newest syntax addition
+				// here so that our output still works in browsers before that newest
+				// syntax addition. We still keep a leading "&" before identifiers.
 				return canRemoveLeadingAmpersandIfNotFirst
 			}
 		}
@@ -330,7 +380,7 @@ func (p *parser) parseCompoundSelector(opts parseComplexSelectorOpts) (sel css_a
 	hasLeadingNestingSelector := p.peek(css_lexer.TDelimAmpersand)
 	if hasLeadingNestingSelector {
 		p.nestingIsPresent = true
-		sel.NestingSelectorLoc = ast.MakeIndex32(uint32(startLoc.Start))
+		sel.NestingSelectorLocs = append(sel.NestingSelectorLocs, startLoc)
 		p.advance()
 	}
 
@@ -406,7 +456,7 @@ subclassSelectors:
 		case css_lexer.TColon:
 			if p.next().Kind == css_lexer.TColon {
 				// Special-case the start of the pseudo-element selector section
-				for p.current().Kind == css_lexer.TColon {
+				for p.peek(css_lexer.TColon) {
 					firstColonLoc := p.current().Range.Loc
 					isElement := p.next().Kind == css_lexer.TColon
 					if isElement {
@@ -445,7 +495,7 @@ subclassSelectors:
 		case css_lexer.TDelimAmpersand:
 			// This is an extension: https://drafts.csswg.org/css-nesting-1/
 			p.nestingIsPresent = true
-			sel.NestingSelectorLoc = ast.MakeIndex32(uint32(subclassToken.Range.Loc.Start))
+			sel.NestingSelectorLocs = append(sel.NestingSelectorLocs, subclassToken.Range.Loc)
 			p.advance()
 
 		default:
@@ -689,9 +739,10 @@ func (p *parser) parsePseudoClassSelector(loc logger.Loc, isElement bool) (css_a
 					oldLocal := p.makeLocalSymbols
 					p.makeLocalSymbols = local
 					selectors, ok := p.parseSelectorList(parseSelectorOpts{
-						pseudoClassKind:        kind,
-						stopOnCloseParen:       true,
-						onlyOneComplexSelector: kind == css_ast.PseudoClassGlobal || kind == css_ast.PseudoClassLocal,
+						pseudoClassKind:         kind,
+						stopOnCloseParen:        true,
+						onlyOneComplexSelector:  kind == css_ast.PseudoClassGlobal || kind == css_ast.PseudoClassLocal,
+						isForgivingSelectorList: kind == css_ast.PseudoClassIs || kind == css_ast.PseudoClassWhere,
 					})
 					p.makeLocalSymbols = oldLocal
 

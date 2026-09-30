@@ -30,11 +30,6 @@ type filePermissions struct {
 	calls []string
 }
 
-// ID returns the ID of the rule.
-func (r *filePermissions) ID() string {
-	return r.MetaData.ID
-}
-
 func getConfiguredMode(conf map[string]interface{}, configKey string, defaultMode int64) int64 {
 	mode := defaultMode
 	if value, ok := conf[configKey]; ok {
@@ -61,7 +56,7 @@ func (r *filePermissions) Match(n ast.Node, c *gosec.Context) (*issue.Issue, err
 	for _, pkg := range r.pkgs {
 		if callexpr, matched := gosec.MatchCallByPackage(n, c, pkg, r.calls...); matched {
 			modeArg := callexpr.Args[len(callexpr.Args)-1]
-			if mode, err := gosec.GetInt(modeArg); err == nil && !modeIsSubset(mode, r.mode) {
+			if mode, err := gosec.GetInt(modeArg); err == nil && !modeIsSubset(mode, r.mode) || isOsPerm(modeArg) {
 				return c.NewIssue(n, r.ID(), r.What, r.Severity, r.Confidence), nil
 			}
 		}
@@ -69,19 +64,26 @@ func (r *filePermissions) Match(n ast.Node, c *gosec.Context) (*issue.Issue, err
 	return nil, nil
 }
 
+// isOsPerm check if the provide ast node contains a os.PermMode symbol
+func isOsPerm(n ast.Node) bool {
+	if node, ok := n.(*ast.SelectorExpr); ok {
+		if identX, ok := node.X.(*ast.Ident); ok {
+			if identX.Name == "os" && node.Sel != nil && node.Sel.Name == "ModePerm" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // NewWritePerms creates a rule to detect file Writes with bad permissions.
 func NewWritePerms(id string, conf gosec.Config) (gosec.Rule, []ast.Node) {
 	mode := getConfiguredMode(conf, id, 0o600)
 	return &filePermissions{
-		mode:  mode,
-		pkgs:  []string{"io/ioutil", "os"},
-		calls: []string{"WriteFile"},
-		MetaData: issue.MetaData{
-			ID:         id,
-			Severity:   issue.Medium,
-			Confidence: issue.High,
-			What:       fmt.Sprintf("Expect WriteFile permissions to be %#o or less", mode),
-		},
+		mode:     mode,
+		pkgs:     []string{"io/ioutil", "os"},
+		calls:    []string{"WriteFile"},
+		MetaData: issue.NewMetaData(id, fmt.Sprintf("Expect WriteFile permissions to be %#o or less", mode), issue.Medium, issue.High),
 	}, []ast.Node{(*ast.CallExpr)(nil)}
 }
 
@@ -90,15 +92,10 @@ func NewWritePerms(id string, conf gosec.Config) (gosec.Rule, []ast.Node) {
 func NewFilePerms(id string, conf gosec.Config) (gosec.Rule, []ast.Node) {
 	mode := getConfiguredMode(conf, id, 0o600)
 	return &filePermissions{
-		mode:  mode,
-		pkgs:  []string{"os"},
-		calls: []string{"OpenFile", "Chmod"},
-		MetaData: issue.MetaData{
-			ID:         id,
-			Severity:   issue.Medium,
-			Confidence: issue.High,
-			What:       fmt.Sprintf("Expect file permissions to be %#o or less", mode),
-		},
+		mode:     mode,
+		pkgs:     []string{"os"},
+		calls:    []string{"OpenFile", "Chmod"},
+		MetaData: issue.NewMetaData(id, fmt.Sprintf("Expect file permissions to be %#o or less", mode), issue.Medium, issue.High),
 	}, []ast.Node{(*ast.CallExpr)(nil)}
 }
 
@@ -107,15 +104,10 @@ func NewFilePerms(id string, conf gosec.Config) (gosec.Rule, []ast.Node) {
 func NewMkdirPerms(id string, conf gosec.Config) (gosec.Rule, []ast.Node) {
 	mode := getConfiguredMode(conf, id, 0o750)
 	return &filePermissions{
-		mode:  mode,
-		pkgs:  []string{"os"},
-		calls: []string{"Mkdir", "MkdirAll"},
-		MetaData: issue.MetaData{
-			ID:         id,
-			Severity:   issue.Medium,
-			Confidence: issue.High,
-			What:       fmt.Sprintf("Expect directory permissions to be %#o or less", mode),
-		},
+		mode:     mode,
+		pkgs:     []string{"os"},
+		calls:    []string{"Mkdir", "MkdirAll"},
+		MetaData: issue.NewMetaData(id, fmt.Sprintf("Expect directory permissions to be %#o or less", mode), issue.Medium, issue.High),
 	}, []ast.Node{(*ast.CallExpr)(nil)}
 }
 
@@ -127,11 +119,6 @@ type osCreatePermissions struct {
 }
 
 const defaultOsCreateMode = 0o666
-
-// ID returns the ID of the rule.
-func (r *osCreatePermissions) ID() string {
-	return r.MetaData.ID
-}
 
 // Match checks if the rule is matched.
 func (r *osCreatePermissions) Match(n ast.Node, c *gosec.Context) (*issue.Issue, error) {
@@ -145,7 +132,7 @@ func (r *osCreatePermissions) Match(n ast.Node, c *gosec.Context) (*issue.Issue,
 	return nil, nil
 }
 
-// NewOsCreatePerms reates a rule to detect file creation with a more permissive than configured
+// NewOsCreatePerms creates a rule to detect file creation with a more permissive than configured
 // permission mask.
 func NewOsCreatePerms(id string, conf gosec.Config) (gosec.Rule, []ast.Node) {
 	mode := getConfiguredMode(conf, id, 0o666)
@@ -153,12 +140,7 @@ func NewOsCreatePerms(id string, conf gosec.Config) (gosec.Rule, []ast.Node) {
 		mode:  mode,
 		pkgs:  []string{"os"},
 		calls: []string{"Create"},
-		MetaData: issue.MetaData{
-			ID:         id,
-			Severity:   issue.Medium,
-			Confidence: issue.High,
-			What: fmt.Sprintf("Expect file permissions to be %#o or less but os.Create used with default permissions %#o",
-				mode, defaultOsCreateMode),
-		},
+		MetaData: issue.NewMetaData(id, fmt.Sprintf("Expect file permissions to be %#o or less but os.Create used with default permissions %#o",
+			mode, defaultOsCreateMode), issue.Medium, issue.High),
 	}, []ast.Node{(*ast.CallExpr)(nil)}
 }
