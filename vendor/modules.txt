@@ -210,20 +210,21 @@ github.com/containerd/errdefs/pkg/internal/cause
 # github.com/coreos/go-oidc/v3 v3.18.0
 ## explicit; go 1.25.0
 github.com/coreos/go-oidc/v3/oidc
-# github.com/creachadair/command v0.2.6
-## explicit; go 1.25.0
+# github.com/creachadair/command v0.2.12
+## explicit; go 1.26.0
 github.com/creachadair/command
 # github.com/creachadair/flax v0.0.6
 ## explicit; go 1.23
 github.com/creachadair/flax
-# github.com/creachadair/mds v0.29.0
-## explicit; go 1.25.0
+# github.com/creachadair/mds v0.31.0
+## explicit; go 1.26.0
 github.com/creachadair/mds/mapset
 github.com/creachadair/mds/mdiff
 github.com/creachadair/mds/mstr
 github.com/creachadair/mds/slice
-# github.com/creachadair/msync v0.8.2
-## explicit; go 1.25
+github.com/creachadair/mds/value
+# github.com/creachadair/msync v0.10.1
+## explicit; go 1.26.0
 github.com/creachadair/msync/throttle
 github.com/creachadair/msync/trigger
 # github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
@@ -325,8 +326,8 @@ github.com/glebarez/go-sqlite
 # github.com/glebarez/sqlite v1.11.0
 ## explicit; go 1.18
 github.com/glebarez/sqlite
-# github.com/go-chi/chi/v5 v5.3.0
-## explicit; go 1.23
+# github.com/go-chi/chi/v5 v5.4.0
+## explicit; go 1.24
 github.com/go-chi/chi/v5
 github.com/go-chi/chi/v5/middleware
 # github.com/go-chi/metrics v0.1.1
@@ -927,8 +928,8 @@ golang.org/x/net/trace
 golang.org/x/oauth2
 golang.org/x/oauth2/clientcredentials
 golang.org/x/oauth2/internal
-# golang.org/x/sync v0.21.0
-## explicit; go 1.25.0
+# golang.org/x/sync v0.24.0
+## explicit; go 1.26.0
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
 # golang.org/x/sys v0.46.0

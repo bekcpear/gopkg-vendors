@@ -5,6 +5,7 @@ package slice
 
 import (
 	"iter"
+	"maps"
 	"slices"
 )
 
@@ -33,7 +34,7 @@ import (
 //
 // The capacity of the slice returned is clipped to its length, so that
 // appending to it will not modify the elements of vs after those kept.
-func Partition[T any](vs []T, keep func(T) bool) []T {
+func Partition[T any, Slice ~[]T](vs Slice, keep func(T) bool) Slice {
 	if len(vs) == 0 {
 		return vs
 	}
@@ -84,10 +85,7 @@ func MapKeys[T comparable, U any](m map[T]U) []T {
 		return nil
 	}
 	keys := make([]T, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-	return keys
+	return slices.AppendSeq(keys, maps.Keys(m))
 }
 
 func sliceCheck(i, n int) (int, bool) {
@@ -112,20 +110,6 @@ func At[T any, Slice ~[]T](ss Slice, i int) T {
 		panic("index out of range")
 	}
 	return ss[b]
-}
-
-// MatchingKeys returns an iterator over the keys k of m for which f(m[k]) is
-// true.  The results are delivered in arbitrary order.
-func MatchingKeys[T comparable, U any](m map[T]U, f func(U) bool) iter.Seq[T] {
-	return func(yield func(T) bool) {
-		for k, v := range m {
-			if f(v) {
-				if !yield(k) {
-					return
-				}
-			}
-		}
-	}
 }
 
 // Rotate permutes the elements of ss in-place by k positions.
@@ -226,19 +210,6 @@ func Batches[T any, Slice ~[]T](vs Slice, n int) iter.Seq[Slice] {
 	}
 }
 
-// Stripe returns a "stripe" of the ith elements of each slice in vs.  Any
-// slice that does not have an ith element is skipped. If none of the slices
-// has an ith element, the result is empty.
-func Stripe[T any, Slice ~[]T](vs []Slice, i int) Slice {
-	var out Slice
-	for _, v := range vs {
-		if i < len(v) {
-			out = append(out, v[i])
-		}
-	}
-	return out
-}
-
 // Head returns a subslice of up to n elements from the head (front) of vs.  If
 // vs has fewer than n elements, the whole slice is returned.
 func Head[T any, Slice ~[]T](vs Slice, n int) Slice {
@@ -271,12 +242,11 @@ func Select[T any, Slice ~[]T](vs Slice, f func(T) bool) iter.Seq[T] {
 
 // Find reports whether there is any v in vs for which f(v) returns true, and
 // if so returns the first one.
-func Find[T any, Slice ~[]T](vs Slice, f func(T) bool) (T, bool) {
+func Find[T any, Slice ~[]T](vs Slice, f func(T) bool) (_ T, ok bool) {
 	if i := slices.IndexFunc(vs, f); i >= 0 {
 		return vs[i], true
 	}
-	var zero T
-	return zero, false
+	return
 }
 
 // Map maps the elements of the input slice through f.  If vs == nil, it
@@ -296,10 +266,24 @@ func Map[T, U any, Slice ~[]T](vs Slice, f func(T) U) []U {
 // CountFunc reports the number of elements of vs for which f reports true.
 func CountFunc[T any, Slice ~[]T](vs Slice, f func(T) bool) int {
 	var n int
-	for _, v := range vs {
-		if f(v) {
-			n++
-		}
+	for range Select(vs, f) {
+		n++
 	}
 	return n
+}
+
+// ToMap constructs a map from the elements of vs, where the key and value for
+// each entry is assigned by f. The resulting map is non-nil even if len(vs) == 0.
+//
+// If f returns the same key for multiple entries in vs, the value in the
+// resulting map will be from the first such entry in vs.
+func ToMap[T any, K comparable, V any, Slice ~[]T](vs Slice, f func(T) (K, V)) map[K]V {
+	out := make(map[K]V)
+	for _, v := range vs {
+		key, value := f(v)
+		if _, ok := out[key]; !ok {
+			out[key] = value
+		}
+	}
+	return out
 }

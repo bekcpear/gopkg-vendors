@@ -1,0 +1,45 @@
+// Copyright (C) Michael J. Fromberger. All Rights Reserved.
+
+// Package value defines adapters for value types.
+package value
+
+// Ptr returns a pointer to its argument type containing v.
+//
+//go:fix inline
+func Ptr[T any](v T) *T { return new(v) }
+
+// At returns the value pointed to by p, or zero if p == nil.
+func At[T any](p *T) T {
+	if p == nil {
+		var zero T
+		return zero
+	}
+	return *p
+}
+
+// AtDefault returns the value pointed to by p, or dflt if p == nil.
+func AtDefault[T any](p *T, dflt T) T {
+	if p == nil {
+		return dflt
+	}
+	return *p
+}
+
+// Cond returns x if b is true, otherwise it returns y.
+func Cond[T any, Bool ~bool](b Bool, x, y T) T {
+	if b {
+		return x
+	}
+	return y
+}
+
+// AtMaybe returns Just(*p) if p != nil, or otherwise Absent().
+func AtMaybe[T any](p *T) Maybe[T] {
+	if p == nil {
+		return Absent[T]()
+	}
+	return Just(*p)
+}
+
+// Equal returns a function that reports whether its argument is equal to v.
+func Equal[T comparable](v T) func(T) bool { return func(w T) bool { return v == w } }

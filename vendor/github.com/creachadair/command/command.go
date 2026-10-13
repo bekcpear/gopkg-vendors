@@ -147,17 +147,17 @@ func (e *Env) newChild(cmd *C, cargs []string) *Env {
 	return &cp
 }
 
-// Write implements the [io.Writer] interface. Writing to a context writes to its
-// designated output stream, allowing the context to be sent diagnostic output.
+// Write implements the [io.Writer] interface. Writing to e writes to its
+// designated output stream, allowing the environment to be sent diagnostic output.
 func (e *Env) Write(data []byte) (int, error) {
 	return e.output().Write(data)
 }
 
-// ParseFlags parses flags from env.Args using the flag set from env.Command.
-// If parsing succeeds, it updates env.Args.
-// If flags were already parsed, ParseFlags reports nil.
+// ParseFlags parses flags from e.Args using the flag set from e.Command.
+// If parsing succeeds, it updates e.Args in-place.
+// If flags were already parsed, ParseFlags does nothing and reports nil.
 //
-// Note: This is done automatically if env.Command.CustomFlags is false.
+// Note: This is done automatically if e.Command.CustomFlags is false.
 // It is safe, but unnecessary, to call it explicitly in that case.
 // This method is provided for an Init hook to use when CustomFlags is true.
 func (e *Env) ParseFlags() error {
@@ -167,8 +167,8 @@ func (e *Env) ParseFlags() error {
 	return e.parseFlagsInternal(e.Args)
 }
 
-// parseFlagsInternal parses flags from rawArgs using the flag set from env.Command.
-// If parsing succeeds, it updates env.Args.
+// parseFlagsInternal parses flags from rawArgs using the flag set from e.Command.
+// If parsing succeeds, it updates e.Args in-place.
 func (e *Env) parseFlagsInternal(rawArgs []string) error {
 	e.Command.Flags.Usage = func() {}
 	e.Command.Flags.SetOutput(io.Discard)
@@ -300,7 +300,7 @@ func (c *C) HasRunnableSubcommands() bool {
 	return false
 }
 
-// NewEnv returns a new root context for c with the optional config value.
+// NewEnv returns a new root environment for c with the optional config value.
 func (c *C) NewEnv(config any) *Env { return &Env{Command: c, Config: config} }
 
 // FindSubcommand returns the subcommand of c matching name, or nil.
@@ -326,7 +326,7 @@ type UsageError struct {
 func (u UsageError) Error() string { return string(u.Message) }
 
 // Usagef returns a formatted error that describes a usage error for the
-// command whose environment is e. The result has concrete type UsageError.
+// command whose environment is e. The result has concrete type [UsageError].
 func (e *Env) Usagef(msg string, args ...any) error {
 	return UsageError{Env: e, Message: fmt.Sprintf(msg, args...)}
 }
@@ -410,7 +410,7 @@ func Run(env *Env, rawArgs []string) (err error) {
 
 	if cmd.Init != nil {
 		if err := cmd.Init(env); err != nil {
-			return fmt.Errorf("initializing %q: %v", cmd.Name, err)
+			return fmt.Errorf("initializing %q: %w", cmd.Name, err)
 		}
 	}
 
@@ -427,7 +427,11 @@ func Run(env *Env, rawArgs []string) (err error) {
 			// Show help for a topic subcommand with subcommands of its own.
 			return printLongHelp(env.newChild(sub, rest), nil)
 		} else if cmd.Run == nil {
-			fmt.Fprintf(env, "Error: %s command %q not understood\n", cmd.Name, env.Args[0])
+			fmt.Fprintf(env, "Error: %s command %q not understood", cmd.Name, env.Args[0])
+			if opts := findCandidates(cmd, env.Args[0]); len(opts) != 0 {
+				fmt.Fprintf(env, ". Did you mean %s?", joinOptions(opts))
+			}
+			fmt.Fprintln(env)
 			return ErrRequestHelp
 		}
 	}
