@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 package rtcp
@@ -6,6 +6,7 @@ package rtcp
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 )
 
 // A SenderReport (SR) packet provides reception quality feedback for an RTP stream.
@@ -218,6 +219,35 @@ func (r *SenderReport) Unmarshal(rawPacket []byte) error {
 	return nil
 }
 
+func appendSenderReportSSRCs(dst []uint32, header Header, pkt []byte) ([]uint32, error) {
+	if header.Type != TypeSenderReport {
+		return dst, errWrongType
+	}
+	// Reception report SSRCs, then the sender's own SSRC.
+	if len(pkt) < (headerLength + srHeaderLength) {
+		return dst, errPacketTooShort
+	}
+
+	packetBody := pkt[headerLength:]
+	offset := srReportOffset
+	for i := 0; i < int(header.Count); i++ {
+		rrEnd := offset + receptionReportLength
+		if rrEnd > len(packetBody) {
+			return dst, errPacketTooShort
+		}
+		rrBody := packetBody[offset : offset+receptionReportLength]
+		offset = rrEnd
+
+		var rr ReceptionReport
+		if err := rr.Unmarshal(rrBody); err != nil {
+			return dst, err
+		}
+		dst = append(dst, rr.SSRC)
+	}
+
+	return append(dst, binary.BigEndian.Uint32(packetBody[srSSRCOffset:])), nil
+}
+
 // DestinationSSRC returns an array of SSRC values that this packet refers to.
 func (r *SenderReport) DestinationSSRC() []uint32 {
 	out := make([]uint32, len(r.Reports)+1)
@@ -236,7 +266,9 @@ func (r *SenderReport) MarshalSize() int {
 		repsLength += rep.len()
 	}
 
-	return headerLength + srHeaderLength + repsLength + len(r.ProfileExtensions)
+	extLength := len(r.ProfileExtensions)
+
+	return headerLength + srHeaderLength + repsLength + extLength + getPadding(extLength)
 }
 
 // Header returns the Header associated with this packet.
@@ -249,17 +281,18 @@ func (r *SenderReport) Header() Header {
 }
 
 func (r SenderReport) String() string {
-	out := fmt.Sprintf("SenderReport from %x\n", r.SSRC)
-	out += fmt.Sprintf("\tNTPTime:\t%d\n", r.NTPTime)
-	out += fmt.Sprintf("\tRTPTIme:\t%d\n", r.RTPTime)
-	out += fmt.Sprintf("\tPacketCount:\t%d\n", r.PacketCount)
-	out += fmt.Sprintf("\tOctetCount:\t%d\n", r.OctetCount)
+	var out strings.Builder
+	fmt.Fprintf(&out, "SenderReport from %x\n", r.SSRC)
+	fmt.Fprintf(&out, "\tNTPTime:\t%d\n", r.NTPTime)
+	fmt.Fprintf(&out, "\tRTPTIme:\t%d\n", r.RTPTime)
+	fmt.Fprintf(&out, "\tPacketCount:\t%d\n", r.PacketCount)
+	fmt.Fprintf(&out, "\tOctetCount:\t%d\n", r.OctetCount)
 
-	out += "\tSSRC    \tLost\tLastSequence\n"
+	out.WriteString("\tSSRC    \tLost\tLastSequence\n")
 	for _, i := range r.Reports {
-		out += fmt.Sprintf("\t%x\t%d/%d\t%d\n", i.SSRC, i.FractionLost, i.TotalLost, i.LastSequenceNumber)
+		fmt.Fprintf(&out, "\t%x\t%d/%d\t%d\n", i.SSRC, i.FractionLost, i.TotalLost, i.LastSequenceNumber)
 	}
-	out += fmt.Sprintf("\tProfile Extension Data: %v\n", r.ProfileExtensions)
+	fmt.Fprintf(&out, "\tProfile Extension Data: %v\n", r.ProfileExtensions)
 
-	return out
+	return out.String()
 }

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 package rtcp
@@ -88,7 +88,7 @@ func (a *ApplicationDefined) Unmarshal(rawPacket []byte) error {
 		return errPacketTooShort
 	}
 
-	if int(header.Length+1)*4 != len(rawPacket) {
+	if (int(header.Length)+1)*4 != len(rawPacket) {
 		return errAppDefinedInvalidLength
 	}
 
@@ -108,6 +108,17 @@ func (a *ApplicationDefined) Unmarshal(rawPacket []byte) error {
 	a.Data = rawPacket[12 : len(rawPacket)-paddingSize]
 
 	return nil
+}
+
+func appendApplicationDefinedSSRCs(dst []uint32, header Header, pkt []byte) ([]uint32, error) {
+	if header.Type != TypeApplicationDefined {
+		return dst, errWrongType
+	}
+	if len(pkt) < 12 {
+		return dst, errPacketTooShort
+	}
+
+	return append(dst, binary.BigEndian.Uint32(pkt[4:8])), nil
 }
 
 // MarshalSize returns the size of the packet once marshaled.

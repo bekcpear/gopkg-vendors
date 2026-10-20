@@ -25,6 +25,7 @@ package compile
 //	toplevel	Funcode
 //	numfuncs	varint
 //	funcs		[]Funcode
+//	recursion	varint (0 or 1)
 //	<strings>	[]byte		# concatenation of all referenced strings
 //	EOF
 //
@@ -85,6 +86,7 @@ import (
 	"math"
 	"math/big"
 	debugpkg "runtime/debug"
+	"slices"
 	"unsafe"
 
 	"go.starlark.net/syntax"
@@ -130,6 +132,7 @@ func (prog *Program) Encode() []byte {
 	for _, fn := range prog.Functions {
 		e.function(fn)
 	}
+	e.int(b2i(prog.Recursion))
 
 	// Patch in the offset of the string data section.
 	binary.LittleEndian.PutUint32(e.p[4:8], uint32(len(e.p)))
@@ -193,7 +196,7 @@ func (e *encoder) function(fn *Funcode) {
 	for _, index := range fn.Cells {
 		e.int(index)
 	}
-	e.bindings(fn.Freevars)
+	e.bindings(fn.FreeVars)
 	e.int(fn.MaxStack)
 	e.int(fn.NumParams)
 	e.int(fn.NumKwonlyParams)
@@ -228,7 +231,7 @@ func DecodeProgram(data []byte) (_ *Program, err error) {
 	offset := binary.LittleEndian.Uint32(data[4:8])
 	d := decoder{
 		p: data[8:offset],
-		s: append([]byte(nil), data[offset:]...), // allocate a copy, which will persist
+		s: slices.Clone(data[offset:]), // allocate a copy, which will persist
 	}
 
 	if v := d.int(); v != Version {
@@ -246,9 +249,9 @@ func DecodeProgram(data []byte) (_ *Program, err error) {
 	}
 
 	// constants
-	constants := make([]interface{}, d.int())
+	constants := make([]any, d.int())
 	for i := range constants {
-		var c interface{}
+		var c any
 		switch d.int() {
 		case 0:
 			c = d.string()
@@ -270,6 +273,7 @@ func DecodeProgram(data []byte) (_ *Program, err error) {
 	for i := range funcs {
 		funcs[i] = d.function()
 	}
+	recursion := d.int() != 0
 
 	prog := &Program{
 		Loads:     loads,
@@ -278,6 +282,7 @@ func DecodeProgram(data []byte) (_ *Program, err error) {
 		Globals:   globals,
 		Functions: funcs,
 		Toplevel:  toplevel,
+		Recursion: recursion,
 	}
 	toplevel.Prog = prog
 	for _, f := range funcs {
@@ -313,19 +318,11 @@ func (d *decoder) uint64() uint64 {
 	return x
 }
 
-func (d *decoder) string() (s string) {
-	if slice := d.bytes(); len(slice) > 0 {
-		// Avoid a memory allocation for each string
-		// by unsafely aliasing slice.
-		type string struct {
-			data *byte
-			len  int
-		}
-		ptr := (*string)(unsafe.Pointer(&s))
-		ptr.data = &slice[0]
-		ptr.len = len(slice)
-	}
-	return s
+func (d *decoder) string() string {
+	// Avoid a memory allocation for each string
+	// by unsafely aliasing slice.
+	slice := d.bytes()
+	return unsafe.String(unsafe.SliceData(slice), len(slice))
 }
 
 func (d *decoder) bytes() []byte {
@@ -385,7 +382,7 @@ func (d *decoder) function() *Funcode {
 		pclinetab:       pclinetab,
 		Locals:          locals,
 		Cells:           cells,
-		Freevars:        freevars,
+		FreeVars:        freevars,
 		MaxStack:        maxStack,
 		NumParams:       numParams,
 		NumKwonlyParams: numKwonlyParams,

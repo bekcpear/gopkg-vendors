@@ -169,9 +169,14 @@ func NewStream(dataShards, parityShards int, o ...Option) (StreamEncoder, error)
 	if err != nil {
 		return nil, err
 	}
-	r.r = enc.(*reedSolomon)
+	rs, ok := enc.(*reedSolomon)
+	if !ok {
+		// Leopard encoders cannot be used for streaming.
+		return nil, ErrNotSupported
+	}
+	r.r = rs
 
-	r.blockPool.New = func() interface{} {
+	r.blockPool.New = func() any {
 		return AllocAligned(dataShards+parityShards, r.o.streamBS)
 	}
 	r.readShards = readShards

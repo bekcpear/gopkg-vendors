@@ -77,11 +77,12 @@ type Encoder interface {
 	// calling the Verify function is likely to fail.
 	ReconstructData(shards [][]byte) error
 
-	// ReconstructSome will recreate only requested data shards, if possible.
+	// ReconstructSome will recreate only requested shards, if possible.
 	//
 	// Given a list of shards, some of which contain data, fills in the
-	// data shards indicated by true values in the "required" parameter.
-	// The length of "required" array must be equal to DataShards.
+	// shards indicated by true values in the "required" parameter.
+	// The length of the "required" array must be equal to either Shards or DataShards.
+	// If the length is equal to DataShards, the reconstruction of parity shards will be ignored.
 	//
 	// The length of "shards" array must be equal to Shards.
 	// You indicate that a shard is missing by setting it to nil or zero-length.
@@ -98,9 +99,10 @@ type Encoder interface {
 	// Update parity is use for change a few data shards and update it's parity.
 	// Input 'newDatashards' containing data shards changed.
 	// Input 'shards' containing old data shards (if data shard not changed, it can be nil) and old parity shards.
-	// new parity shards will in shards[DataShards:]
-	// Update is very useful if  DataShards much larger than ParityShards and changed data shards is few. It will
-	// faster than Encode and not need read all data shards to encode.
+	// New parity shards will in shards[DataShards:]
+	// Update is very useful if DataShards much larger than ParityShards and changed data shards is few.
+	// It will be faster than Encode and will not need read all data shards to encode.
+	// Note that the data shards in shards will *not* be updated.
 	Update(shards [][]byte, newDatashards [][]byte) error
 
 	// Split a data slice into the number of shards given to the encoder,
@@ -149,12 +151,22 @@ type Extensions interface {
 	// aligned to reasonable memory sizes.
 	// Provide the size of each shard.
 	AllocAligned(each int) [][]byte
+
+	// DecodeIdx allows progressively decoding shards.
+	// dst slices that are non-nil will be filled with decoded data.
+	// On first call, dst non-nil slices should be zero.
+	// expectInput indicates which input shards are expected (true = shard expected).
+	// input provides the shards - non-nil slices are treated as provided data.
+	// len(dst) must equal len(input) must equal TotalShards.
+	// If expectInput == nil (merge mode): input shards are XORed into corresponding dst shards.
+	// This allows merging of partial decodings from different sources.
+	// Not all implementations supports this. ErrNotSupported will be returned if not supported.
+	DecodeIdx(dst [][]byte, expectInput []bool, input [][]byte) error
 }
 
 const (
-	avx2CodeGenMinSize       = 64
-	avx2CodeGenMinShards     = 3
-	avx2CodeGenMaxGoroutines = 8
+	codeGenMinSize           = 64
+	codeGenMinShards         = 3
 	gfniCodeGenMaxGoroutines = 4
 
 	intSize = 32 << (^uint(0) >> 63) // 32 or 64
@@ -210,6 +222,33 @@ var ErrMaxShardNum = errors.New("cannot create Encoder with more than 256 data+p
 
 // ErrNotSupported is returned when an operation is not supported.
 var ErrNotSupported = errors.New("operation not supported")
+
+// ErrInvShardCombo will be returned by New if the requested combination of
+// data and parity shards cannot be represented by the Leopard encoder.
+// Leopard rounds the parity shard count up to a power of two, m, and walks the
+// FFT skew table in steps of m for every m data shards. The combination is
+// usable only when roundUp(dataShards, m)+m fits the field, i.e. 256 for
+// GF(2^8) and 65536 for GF(2^16). Lowering the parity shard count to the
+// nearest power of two, or lowering the data shard count, resolves it.
+var ErrInvShardCombo = errors.New("data and parity shard combination not supported by leopard encoder")
+
+// leopardFits reports whether the FFT skew table covers the layout for the
+// given shard counts in a field with fieldOrder elements.
+func leopardFits(dataShards, parityShards, fieldOrder int) bool {
+	// Reject before ceilPow2: it returns 0 for non-positive input, and counts
+	// beyond the field would overflow the rounding below.
+	if dataShards <= 0 || parityShards <= 0 ||
+		dataShards > fieldOrder || parityShards > fieldOrder {
+		return false
+	}
+	m := ceilPow2(parityShards)
+	blocks := dataShards / m
+	if dataShards%m != 0 {
+		blocks++
+	}
+	// blocks*m <= dataShards+m-1 <= 2*fieldOrder, so this cannot overflow.
+	return blocks*m <= fieldOrder-m
+}
 
 // buildMatrix creates the matrix to use for encoding, given the
 // number of data shards and the number of total shards.
@@ -269,7 +308,7 @@ func buildMatrixJerasure(dataShards, totalShards int) (matrix, error) {
 	}
 	vm[totalShards-1][dataShards-1] = 1
 
-	for i := 0; i < dataShards; i++ {
+	for i := range dataShards {
 		// Find the row where i'th col is not 0
 		r := i
 		for ; r < totalShards && vm[r][i] == 0; r++ {
@@ -283,16 +322,16 @@ func buildMatrixJerasure(dataShards, totalShards int) (matrix, error) {
 		// Multiply by the inverted matrix (same as vm.Multiply(vm[0:dataShards].Invert()))
 		if vm[i][i] != 1 {
 			// Make vm[i][i] = 1 by dividing the column by vm[i][i]
-			tmp := galDivide(1, vm[i][i])
-			for j := 0; j < totalShards; j++ {
+			tmp := galOneOver(vm[i][i])
+			for j := range totalShards {
 				vm[j][i] = galMultiply(vm[j][i], tmp)
 			}
 		}
-		for j := 0; j < dataShards; j++ {
+		for j := range dataShards {
 			// Make vm[i][j] = 0 where j != i by adding vm[i][j]*vm[.][i] to each column
 			tmp := vm[i][j]
 			if j != i && tmp != 0 {
-				for r := 0; r < totalShards; r++ {
+				for r := range totalShards {
 					vm[r][j] = galAdd(vm[r][j], galMultiply(tmp, vm[r][i]))
 				}
 			}
@@ -300,10 +339,10 @@ func buildMatrixJerasure(dataShards, totalShards int) (matrix, error) {
 	}
 
 	// Make vm[dataShards] row all ones - divide each column j by vm[dataShards][j]
-	for j := 0; j < dataShards; j++ {
+	for j := range dataShards {
 		tmp := vm[dataShards][j]
 		if tmp != 1 {
-			tmp = galDivide(1, tmp)
+			tmp = galOneOver(tmp)
 			for i := dataShards; i < totalShards; i++ {
 				vm[i][j] = galMultiply(vm[i][j], tmp)
 			}
@@ -314,8 +353,8 @@ func buildMatrixJerasure(dataShards, totalShards int) (matrix, error) {
 	for i := dataShards + 1; i < totalShards; i++ {
 		tmp := vm[i][0]
 		if tmp != 1 {
-			tmp = galDivide(1, tmp)
-			for j := 0; j < dataShards; j++ {
+			tmp = galOneOver(tmp)
+			for j := range dataShards {
 				vm[i][j] = galMultiply(vm[i][j], tmp)
 			}
 		}
@@ -415,8 +454,19 @@ func New(dataShards, parityShards int, opts ...Option) (Encoder, error) {
 	for _, opt := range opts {
 		opt(&o)
 	}
+	if o.workAlloc == nil {
+		o.workAlloc = &defaultWorkAllocator{}
+	}
 
+	// Validate before picking a backend: every check below, here and in the
+	// leopard constructors, compares against a total that must not have wrapped.
+	if dataShards <= 0 || parityShards < 0 {
+		return nil, ErrInvShardNum
+	}
 	totShards := dataShards + parityShards
+	if totShards < dataShards {
+		return nil, ErrMaxShardNum
+	}
 	switch {
 	case o.withLeopard == leopardGF16 && parityShards > 0 || totShards > 256:
 		return newFF16(dataShards, parityShards, o)
@@ -434,10 +484,6 @@ func New(dataShards, parityShards int, opts ...Option) (Encoder, error) {
 		o:            o,
 	}
 
-	if dataShards <= 0 || parityShards < 0 {
-		return nil, ErrInvShardNum
-	}
-
 	if parityShards == 0 {
 		return &r, nil
 	}
@@ -449,11 +495,11 @@ func New(dataShards, parityShards int, opts ...Option) (Encoder, error) {
 			return nil, errors.New("coding matrix must contain at least parityShards rows")
 		}
 		r.m = make([][]byte, r.totalShards)
-		for i := 0; i < dataShards; i++ {
+		for i := range dataShards {
 			r.m[i] = make([]byte, dataShards)
 			r.m[i][i] = 1
 		}
-		for k, row := range r.o.customMatrix {
+		for k, row := range r.o.customMatrix[:parityShards] {
 			if len(row) < dataShards {
 				return nil, errors.New("coding matrix must contain at least dataShards columns")
 			}
@@ -476,28 +522,25 @@ func New(dataShards, parityShards int, opts ...Option) (Encoder, error) {
 	}
 
 	// Calculate what we want per round
-	r.o.perRound = cpuid.CPU.Cache.L2
+	r.o.perRound = max(cpuid.CPU.Cache.L2, 128<<10)
+
+	_, _, useCodeGen := r.hasCodeGen(codeGenMinSize, codeGenMaxInputs, codeGenMaxOutputs)
 
 	divide := parityShards + 1
-	if avx2CodeGen && r.o.useAVX2 && (dataShards > maxAvx2Inputs || parityShards > maxAvx2Outputs) {
+	if codeGen && useCodeGen && (dataShards > codeGenMaxInputs || parityShards > codeGenMaxOutputs) {
 		// Base on L1 cache if we have many inputs.
-		r.o.perRound = cpuid.CPU.Cache.L1D
+		r.o.perRound = max(cpuid.CPU.Cache.L1D, 32<<10)
 		divide = 0
-		if dataShards > maxAvx2Inputs {
-			divide += maxAvx2Inputs
+		if dataShards > codeGenMaxInputs {
+			divide += codeGenMaxInputs
 		} else {
 			divide += dataShards
 		}
-		if parityShards > maxAvx2Inputs {
-			divide += maxAvx2Outputs
+		if parityShards > codeGenMaxInputs {
+			divide += codeGenMaxOutputs
 		} else {
 			divide += parityShards
 		}
-	}
-
-	if r.o.perRound <= 0 {
-		// Set to 128K if undetectable.
-		r.o.perRound = 128 << 10
 	}
 
 	if cpuid.CPU.ThreadsPerCore > 1 && r.o.maxGoroutines > cpuid.CPU.PhysicalCores {
@@ -508,7 +551,9 @@ func New(dataShards, parityShards int, opts ...Option) (Encoder, error) {
 	// 1 input + parity must fit in cache, and we add one more to be safer.
 	r.o.perRound = r.o.perRound / divide
 	// Align to 64 bytes.
-	r.o.perRound = ((r.o.perRound + 63) / 64) * 64
+	r.o.perRound = max(
+		// Final sanity check...
+		((r.o.perRound+63)/64)*64, 1<<10)
 
 	if r.o.minSplitSize <= 0 {
 		// Set minsplit as high as we can, but still have parity in L1.
@@ -517,11 +562,9 @@ func New(dataShards, parityShards int, opts ...Option) (Encoder, error) {
 			cacheSize = 32 << 10
 		}
 
-		r.o.minSplitSize = cacheSize / (parityShards + 1)
-		// Min 1K
-		if r.o.minSplitSize < 1024 {
-			r.o.minSplitSize = 1024
-		}
+		r.o.minSplitSize = max(
+			// Min 1K
+			cacheSize/(parityShards+1), 1024)
 	}
 
 	if r.o.shardSize > 0 {
@@ -548,13 +591,17 @@ func New(dataShards, parityShards int, opts ...Option) (Encoder, error) {
 
 	// Generated AVX2 does not need data to stay in L1 cache between runs.
 	// We will be purely limited by RAM speed.
-	if r.canAVX2C(avx2CodeGenMinSize, maxAvx2Inputs, maxAvx2Outputs) && r.o.maxGoroutines > avx2CodeGenMaxGoroutines {
-		r.o.maxGoroutines = avx2CodeGenMaxGoroutines
+	if useCodeGen && r.o.maxGoroutines > codeGenMaxGoroutines {
+		r.o.maxGoroutines = codeGenMaxGoroutines
 	}
 
-	if r.canGFNI(avx2CodeGenMinSize, maxAvx2Inputs, maxAvx2Outputs) && r.o.maxGoroutines > gfniCodeGenMaxGoroutines {
+	if _, _, useGFNI := r.canGFNI(codeGenMinSize, codeGenMaxInputs, codeGenMaxOutputs); useGFNI && r.o.maxGoroutines > gfniCodeGenMaxGoroutines {
 		r.o.maxGoroutines = gfniCodeGenMaxGoroutines
 	}
+
+	// Skip 2 byte table method if we have many shards.
+	// This is the approximate switchover for Zen5.
+	r.o.skip2B = dataShards+parityShards >= 20
 
 	// Inverted matrices are cached in a tree keyed by the indices
 	// of the invalid rows of the data to reconstruct.
@@ -570,9 +617,13 @@ func New(dataShards, parityShards int, opts ...Option) (Encoder, error) {
 		r.parity[i] = r.m[dataShards+i]
 	}
 
-	if avx2CodeGen && r.o.useAVX2 {
-		sz := r.dataShards * r.parityShards * 2 * 32
-		r.mPool.New = func() interface{} {
+	if codeGen /* && r.o.useAVX2 */ {
+		paddedDS := r.dataShards
+		if codeGenPadInputs > 1 {
+			paddedDS = ((paddedDS + codeGenPadInputs - 1) / codeGenPadInputs) * codeGenPadInputs
+		}
+		sz := paddedDS * r.parityShards * 2 * 32
+		r.mPool.New = func() any {
 			return AllocAligned(1, sz)[0]
 		}
 		r.mPoolSz = sz
@@ -593,6 +644,63 @@ func (r *reedSolomon) putTmpSlice(b []byte) {
 		// Sanity check
 		panic(fmt.Sprintf("got short tmp returned, want %d, got %d", r.mPoolSz, cap(b)))
 	}
+}
+
+// multiplyRowWithMatrix multiplies a single row with a matrix to produce a new row.
+// result[j] = sum over i of row[i] * matrix[i][j]
+func multiplyRowWithMatrix(row []byte, matrix [][]byte) []byte {
+	if len(row) != len(matrix) {
+		panic("row length must match matrix height")
+	}
+	result := make([]byte, len(matrix[0]))
+	for j := range result {
+		for i := range row {
+			result[j] ^= galMultiply(row[i], matrix[i][j])
+		}
+	}
+	return result
+}
+
+// getDecodeMatrix returns the inverted matrix for decoding, using cached version if available
+func (r *reedSolomon) getDecodeMatrix(validIndices, invalidIndices []int) ([][]byte, error) {
+	// Attempt to get the cached inverted matrix out of the tree
+	// based on the indices of the invalid rows.
+	dataDecodeMatrix := r.tree.GetInvertedMatrix(invalidIndices)
+
+	// If the inverted matrix isn't cached in the tree yet we must
+	// construct it ourselves and insert it into the tree for the
+	// future.  In this way the inversion tree is lazily loaded.
+	if dataDecodeMatrix == nil {
+		// Pull out the rows of the matrix that correspond to the
+		// shards that we have and build a square matrix.  This
+		// matrix could be used to generate the shards that we have
+		// from the original data.
+		subMatrix, _ := newMatrix(r.dataShards, r.dataShards)
+		for subMatrixRow, validIndex := range validIndices[:r.dataShards] {
+			for c := 0; c < r.dataShards; c++ {
+				subMatrix[subMatrixRow][c] = r.m[validIndex][c]
+			}
+		}
+		// Invert the matrix, so we can go from the encoded shards
+		// back to the original data.  Then pull out the row that
+		// generates the shard that we want to decode.  Note that
+		// since this matrix maps back to the original data, it can
+		// be used to create a data shard, but not a parity shard.
+		var err error
+		dataDecodeMatrix, err = subMatrix.Invert()
+		if err != nil {
+			return nil, err
+		}
+
+		// Cache the inverted matrix in the tree for future use keyed on the
+		// indices of the invalid rows.
+		err = r.tree.InsertInvertedMatrix(invalidIndices, dataDecodeMatrix, r.totalShards)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return dataDecodeMatrix, nil
 }
 
 // ErrTooFewShards is returned if too few shards where given to
@@ -620,7 +728,7 @@ func (r *reedSolomon) Encode(shards [][]byte) error {
 	output := shards[r.dataShards:]
 
 	// Do the coding.
-	r.codeSomeShards(r.parity, shards[0:r.dataShards], output[:r.parityShards], len(shards[0]))
+	r.codeSomeShards(r.parity, shards[0:r.dataShards], output[:r.parityShards], len(shards[0]), true)
 	return nil
 }
 
@@ -644,6 +752,19 @@ func (r *reedSolomon) EncodeIdx(dataShard []byte, idx int, parity [][]byte) erro
 	}
 	if len(parity[0]) != len(dataShard) {
 		return ErrShardSize
+	}
+
+	if codeGen && len(dataShard) >= r.o.perRound && len(parity) >= codeGenMinShards && (pshufb || r.o.useAvx512GFNI || r.o.useAvxGNFI) {
+		m := make([][]byte, r.parityShards)
+		for iRow := range m {
+			m[iRow] = r.parity[iRow][idx : idx+1]
+		}
+		if r.o.useAvx512GFNI || r.o.useAvxGNFI {
+			r.codeSomeShardsGFNI(m, [][]byte{dataShard}, parity, len(dataShard), false, nil, nil)
+		} else {
+			r.codeSomeShardsAVXP(m, [][]byte{dataShard}, parity, len(dataShard), false, nil, nil)
+		}
+		return nil
 	}
 
 	// Process using no goroutines for now.
@@ -688,18 +809,26 @@ func (r *reedSolomon) Update(shards [][]byte, newDatashards [][]byte) error {
 		return err
 	}
 
-	for i := range newDatashards {
-		if newDatashards[i] != nil && shards[i] == nil {
+	shardSize := shardSize(shards)
+
+	// Every shard handed to the kernels must be exactly shardSize long,
+	// since neither the assembly nor the Go loops re-check the lengths.
+	for i, ns := range newDatashards {
+		if len(ns) == 0 {
+			continue
+		}
+		if len(ns) != shardSize {
+			return ErrShardSize
+		}
+		if len(shards[i]) != shardSize {
 			return ErrInvalidInput
 		}
 	}
 	for _, p := range shards[r.dataShards:] {
-		if p == nil {
+		if len(p) != shardSize {
 			return ErrInvalidInput
 		}
 	}
-
-	shardSize := shardSize(shards)
 
 	// Get the slice of output buffers.
 	output := shards[r.dataShards:]
@@ -721,13 +850,13 @@ func (r *reedSolomon) updateParityShards(matrixRows, oldinputs, newinputs, outpu
 
 	for c := 0; c < r.dataShards; c++ {
 		in := newinputs[c]
-		if in == nil {
+		if len(in) == 0 {
 			continue
 		}
 		oldin := oldinputs[c]
 		// oldinputs data will be changed
 		sliceXor(in, oldin, &r.o)
-		for iRow := 0; iRow < outputCount; iRow++ {
+		for iRow := range outputCount {
 			galMulSliceXor(matrixRows[iRow][c], oldin, outputs[iRow], &r.o)
 		}
 	}
@@ -735,10 +864,7 @@ func (r *reedSolomon) updateParityShards(matrixRows, oldinputs, newinputs, outpu
 
 func (r *reedSolomon) updateParityShardsP(matrixRows, oldinputs, newinputs, outputs [][]byte, outputCount, byteCount int) {
 	var wg sync.WaitGroup
-	do := byteCount / r.o.maxGoroutines
-	if do < r.o.minSplitSize {
-		do = r.o.minSplitSize
-	}
+	do := max(byteCount/r.o.maxGoroutines, r.o.minSplitSize)
 	start := 0
 	for start < byteCount {
 		if start+do > byteCount {
@@ -748,13 +874,13 @@ func (r *reedSolomon) updateParityShardsP(matrixRows, oldinputs, newinputs, outp
 		go func(start, stop int) {
 			for c := 0; c < r.dataShards; c++ {
 				in := newinputs[c]
-				if in == nil {
+				if len(in) == 0 {
 					continue
 				}
 				oldin := oldinputs[c]
 				// oldinputs data will be change
 				sliceXor(in[start:stop], oldin[start:stop], &r.o)
-				for iRow := 0; iRow < outputCount; iRow++ {
+				for iRow := range outputCount {
 					galMulSliceXor(matrixRows[iRow][c], oldin[start:stop], outputs[iRow][start:stop], &r.o)
 				}
 			}
@@ -783,18 +909,6 @@ func (r *reedSolomon) Verify(shards [][]byte) (bool, error) {
 	return r.checkSomeShards(r.parity, shards[:r.dataShards], toCheck[:r.parityShards], len(shards[0])), nil
 }
 
-func (r *reedSolomon) canAVX2C(byteCount int, inputs, outputs int) bool {
-	return avx2CodeGen && r.o.useAVX2 &&
-		byteCount >= avx2CodeGenMinSize && inputs+outputs >= avx2CodeGenMinShards &&
-		inputs <= maxAvx2Inputs && outputs <= maxAvx2Outputs
-}
-
-func (r *reedSolomon) canGFNI(byteCount int, inputs, outputs int) bool {
-	return avx2CodeGen && r.o.useGFNI &&
-		byteCount >= avx2CodeGenMinSize && inputs+outputs >= avx2CodeGenMinShards &&
-		inputs <= maxAvx2Inputs && outputs <= maxAvx2Outputs
-}
-
 // Multiplies a subset of rows from a coding matrix by a full set of
 // input totalShards to produce some output totalShards.
 // 'matrixRows' is The rows from the matrix to use.
@@ -804,12 +918,12 @@ func (r *reedSolomon) canGFNI(byteCount int, inputs, outputs int) bool {
 // The number of outputs computed, and the
 // number of matrix rows used, is determined by
 // outputCount, which is the number of outputs to compute.
-func (r *reedSolomon) codeSomeShards(matrixRows, inputs, outputs [][]byte, byteCount int) {
+func (r *reedSolomon) codeSomeShards(matrixRows, inputs, outputs [][]byte, byteCount int, clear bool) {
 	if len(outputs) == 0 {
 		return
 	}
-	if byteCount > r.o.minSplitSize {
-		r.codeSomeShardsP(matrixRows, inputs, outputs, byteCount)
+	if r.o.maxGoroutines > 1 && byteCount > r.o.minSplitSize {
+		r.codeSomeShardsP(matrixRows, inputs, outputs, byteCount, clear)
 		return
 	}
 
@@ -818,18 +932,26 @@ func (r *reedSolomon) codeSomeShards(matrixRows, inputs, outputs [][]byte, byteC
 	if end > len(inputs[0]) {
 		end = len(inputs[0])
 	}
-	if r.canGFNI(byteCount, len(inputs), len(outputs)) {
-		var gfni [maxAvx2Inputs * maxAvx2Outputs]uint64
+	if galMulGFNI, galMulGFNIXor, useGFNI := r.canGFNI(byteCount, len(inputs), len(outputs)); useGFNI {
+		var gfni [codeGenMaxInputs * codeGenMaxOutputs]uint64
 		m := genGFNIMatrix(matrixRows, len(inputs), 0, len(outputs), gfni[:])
-		start += galMulSlicesGFNI(m, inputs, outputs, 0, byteCount)
+		if clear {
+			start += (*galMulGFNI)(m, inputs, outputs, 0, byteCount)
+		} else {
+			start += (*galMulGFNIXor)(m, inputs, outputs, 0, byteCount)
+		}
 		end = len(inputs[0])
-	} else if r.canAVX2C(byteCount, len(inputs), len(outputs)) {
-		m := genAvx2Matrix(matrixRows, len(inputs), 0, len(outputs), r.getTmpSlice())
-		start += galMulSlicesAvx2(m, inputs, outputs, 0, byteCount)
+	} else if galMulGen, galMulGenXor, ok := r.hasCodeGen(byteCount, len(inputs), len(outputs)); ok {
+		m := genCodeGenMatrix(matrixRows, len(inputs), 0, len(outputs), r.o.vectorLength, r.getTmpSlice())
+		if clear {
+			start += (*galMulGen)(m, inputs, outputs, 0, byteCount)
+		} else {
+			start += (*galMulGenXor)(m, inputs, outputs, 0, byteCount)
+		}
 		r.putTmpSlice(m)
 		end = len(inputs[0])
-	} else if len(inputs)+len(outputs) > avx2CodeGenMinShards && r.canAVX2C(byteCount, maxAvx2Inputs, maxAvx2Outputs) {
-		var gfni [maxAvx2Inputs * maxAvx2Outputs]uint64
+	} else if galMulGen, galMulGenXor, ok := r.hasCodeGen(byteCount, codeGenMaxInputs, codeGenMaxOutputs); len(inputs)+len(outputs) > codeGenMinShards && ok {
+		var gfni [codeGenMaxInputs * codeGenMaxOutputs]uint64
 		end = len(inputs[0])
 		inIdx := 0
 		m := r.getTmpSlice()
@@ -837,32 +959,31 @@ func (r *reedSolomon) codeSomeShards(matrixRows, inputs, outputs [][]byte, byteC
 		ins := inputs
 		for len(ins) > 0 {
 			inPer := ins
-			if len(inPer) > maxAvx2Inputs {
-				inPer = inPer[:maxAvx2Inputs]
+			if len(inPer) > codeGenMaxInputs {
+				inPer = inPer[:codeGenMaxInputs]
 			}
 			outs := outputs
 			outIdx := 0
 			for len(outs) > 0 {
 				outPer := outs
-				if len(outPer) > maxAvx2Outputs {
-					outPer = outPer[:maxAvx2Outputs]
+				if len(outPer) > codeGenMaxOutputs {
+					outPer = outPer[:codeGenMaxOutputs]
 				}
-				if r.o.useGFNI {
+				if useGFNI {
 					m := genGFNIMatrix(matrixRows[outIdx:], len(inPer), inIdx, len(outPer), gfni[:])
-					if inIdx == 0 {
-						galMulSlicesGFNI(m, inPer, outPer, 0, byteCount)
+					if inIdx == 0 && clear {
+						start = (*galMulGFNI)(m, inPer, outPer, 0, byteCount)
 					} else {
-						galMulSlicesGFNIXor(m, inPer, outPer, 0, byteCount)
+						start = (*galMulGFNIXor)(m, inPer, outPer, 0, byteCount)
 					}
 				} else {
-					m = genAvx2Matrix(matrixRows[outIdx:], len(inPer), inIdx, len(outPer), m)
-					if inIdx == 0 {
-						galMulSlicesAvx2(m, inPer, outPer, 0, byteCount)
+					m = genCodeGenMatrix(matrixRows[outIdx:], len(inPer), inIdx, len(outPer), r.o.vectorLength, m)
+					if inIdx == 0 && clear {
+						start = (*galMulGen)(m, inPer, outPer, 0, byteCount)
 					} else {
-						galMulSlicesAvx2Xor(m, inPer, outPer, 0, byteCount)
+						start = (*galMulGenXor)(m, inPer, outPer, 0, byteCount)
 					}
 				}
-				start = byteCount & avxSizeMask
 				outIdx += len(outPer)
 				outs = outs[len(outPer):]
 			}
@@ -874,10 +995,10 @@ func (r *reedSolomon) codeSomeShards(matrixRows, inputs, outputs [][]byte, byteC
 		}
 	}
 	for start < len(inputs[0]) {
-		for c := 0; c < len(inputs); c++ {
+		for c := range inputs {
 			in := inputs[c][start:end]
-			for iRow := 0; iRow < len(outputs); iRow++ {
-				if c == 0 {
+			for iRow := range outputs {
+				if c == 0 && clear {
 					galMulSlice(matrixRows[iRow][c], in, outputs[iRow][start:end], &r.o)
 				} else {
 					galMulSliceXor(matrixRows[iRow][c], in, outputs[iRow][start:end], &r.o)
@@ -894,45 +1015,50 @@ func (r *reedSolomon) codeSomeShards(matrixRows, inputs, outputs [][]byte, byteC
 
 // Perform the same as codeSomeShards, but split the workload into
 // several goroutines.
-func (r *reedSolomon) codeSomeShardsP(matrixRows, inputs, outputs [][]byte, byteCount int) {
+func (r *reedSolomon) codeSomeShardsP(matrixRows, inputs, outputs [][]byte, byteCount int, clear bool) {
 	var wg sync.WaitGroup
 	gor := r.o.maxGoroutines
 
-	var avx2Matrix []byte
+	var genMatrix []byte
 	var gfniMatrix []uint64
-	useAvx2 := r.canAVX2C(byteCount, len(inputs), len(outputs))
-	useGFNI := r.canGFNI(byteCount, len(inputs), len(outputs))
+	galMulGen, galMulGenXor, useCodeGen := r.hasCodeGen(byteCount, len(inputs), len(outputs))
+	galMulGFNI, galMulGFNIXor, useGFNI := r.canGFNI(byteCount, len(inputs), len(outputs))
 	if useGFNI {
-		var tmp [maxAvx2Inputs * maxAvx2Outputs]uint64
+		var tmp [codeGenMaxInputs * codeGenMaxOutputs]uint64
 		gfniMatrix = genGFNIMatrix(matrixRows, len(inputs), 0, len(outputs), tmp[:])
-	} else if useAvx2 {
-		avx2Matrix = genAvx2Matrix(matrixRows, len(inputs), 0, len(outputs), r.getTmpSlice())
-		defer r.putTmpSlice(avx2Matrix)
-	} else if r.o.useGFNI && byteCount < 10<<20 && len(inputs)+len(outputs) > avx2CodeGenMinShards &&
-		r.canAVX2C(byteCount/4, maxAvx2Inputs, maxAvx2Outputs) {
+	} else if useCodeGen {
+		genMatrix = genCodeGenMatrix(matrixRows, len(inputs), 0, len(outputs), r.o.vectorLength, r.getTmpSlice())
+		defer r.putTmpSlice(genMatrix)
+	} else if galMulGFNI, galMulGFNIXor, useGFNI := r.canGFNI(byteCount/4, codeGenMaxInputs, codeGenMaxOutputs); useGFNI &&
+		len(inputs)+len(outputs) > codeGenMinShards {
 		// It appears there is a switchover point at around 10MB where
 		// Regular processing is faster...
-		r.codeSomeShardsAVXP(matrixRows, inputs, outputs, byteCount)
+		r.codeSomeShardsGFNI(matrixRows, inputs, outputs, byteCount, clear, galMulGFNI, galMulGFNIXor)
 		return
-	} else if r.o.useAVX2 && byteCount < 10<<20 && len(inputs)+len(outputs) > avx2CodeGenMinShards &&
-		r.canAVX2C(byteCount/4, maxAvx2Inputs, maxAvx2Outputs) {
+	} else if galMulGen, galMulGenXor, ok := r.hasCodeGen(byteCount/4, codeGenMaxInputs, codeGenMaxOutputs); ok &&
+		len(inputs)+len(outputs) > codeGenMinShards {
 		// It appears there is a switchover point at around 10MB where
 		// Regular processing is faster...
-		r.codeSomeShardsAVXP(matrixRows, inputs, outputs, byteCount)
+		r.codeSomeShardsAVXP(matrixRows, inputs, outputs, byteCount, clear, galMulGen, galMulGenXor)
 		return
 	}
 
-	do := byteCount / gor
-	if do < r.o.minSplitSize {
-		do = r.o.minSplitSize
-	}
+	do := max(byteCount/gor, r.o.minSplitSize)
 
 	exec := func(start, stop int) {
 		if stop-start >= 64 {
 			if useGFNI {
-				start += galMulSlicesGFNI(gfniMatrix, inputs, outputs, start, stop)
-			} else if useAvx2 {
-				start += galMulSlicesAvx2(avx2Matrix, inputs, outputs, start, stop)
+				if clear {
+					start += (*galMulGFNI)(gfniMatrix, inputs, outputs, start, stop)
+				} else {
+					start += (*galMulGFNIXor)(gfniMatrix, inputs, outputs, start, stop)
+				}
+			} else if useCodeGen {
+				if clear {
+					start += (*galMulGen)(genMatrix, inputs, outputs, start, stop)
+				} else {
+					start += (*galMulGenXor)(genMatrix, inputs, outputs, start, stop)
+				}
 			}
 		}
 
@@ -941,10 +1067,10 @@ func (r *reedSolomon) codeSomeShardsP(matrixRows, inputs, outputs [][]byte, byte
 			lstop = stop
 		}
 		for lstart < stop {
-			for c := 0; c < len(inputs); c++ {
+			for c := range inputs {
 				in := inputs[c][lstart:lstop]
-				for iRow := 0; iRow < len(outputs); iRow++ {
-					if c == 0 {
+				for iRow := range outputs {
+					if c == 0 && clear {
 						galMulSlice(matrixRows[iRow][c], in, outputs[iRow][lstart:lstop], &r.o)
 					} else {
 						galMulSliceXor(matrixRows[iRow][c], in, outputs[iRow][lstart:lstop], &r.o)
@@ -982,7 +1108,8 @@ func (r *reedSolomon) codeSomeShardsP(matrixRows, inputs, outputs [][]byte, byte
 
 // Perform the same as codeSomeShards, but split the workload into
 // several goroutines.
-func (r *reedSolomon) codeSomeShardsAVXP(matrixRows, inputs, outputs [][]byte, byteCount int) {
+// If clear is set, the first write will overwrite the output.
+func (r *reedSolomon) codeSomeShardsAVXP(matrixRows, inputs, outputs [][]byte, byteCount int, clear bool, galMulGen, galMulGenXor *func(matrix []byte, in [][]byte, out [][]byte, start int, stop int) int) {
 	var wg sync.WaitGroup
 	gor := r.o.maxGoroutines
 
@@ -993,10 +1120,23 @@ func (r *reedSolomon) codeSomeShardsAVXP(matrixRows, inputs, outputs [][]byte, b
 		first  bool
 	}
 	// Make a plan...
-	plan := make([]state, 0, ((len(inputs)+maxAvx2Inputs-1)/maxAvx2Inputs)*((len(outputs)+maxAvx2Outputs-1)/maxAvx2Outputs))
+	plan := make([]state, 0, ((len(inputs)+codeGenMaxInputs-1)/codeGenMaxInputs)*((len(outputs)+codeGenMaxOutputs-1)/codeGenMaxOutputs))
 
 	tmp := r.getTmpSlice()
 	defer r.putTmpSlice(tmp)
+
+	// The pool buffer is sized for dataShards x parityShards. Callers may supply
+	// more inputs than that, so hand out what is left and let genCodeGenMatrix
+	// allocate once the buffer is exhausted.
+	genMatrix := func(rows [][]byte, inputs, inIdx, outputs int) []byte {
+		m := genCodeGenMatrix(rows, inputs, inIdx, outputs, r.o.vectorLength, tmp)
+		if len(m) <= len(tmp) {
+			tmp = tmp[len(m):]
+		} else {
+			tmp = nil
+		}
+		return m
+	}
 
 	// Flips between input first to output first.
 	// We put the smallest data load in the inner loop.
@@ -1005,24 +1145,23 @@ func (r *reedSolomon) codeSomeShardsAVXP(matrixRows, inputs, outputs [][]byte, b
 		ins := inputs
 		for len(ins) > 0 {
 			inPer := ins
-			if len(inPer) > maxAvx2Inputs {
-				inPer = inPer[:maxAvx2Inputs]
+			if len(inPer) > codeGenMaxInputs {
+				inPer = inPer[:codeGenMaxInputs]
 			}
 			outs := outputs
 			outIdx := 0
 			for len(outs) > 0 {
 				outPer := outs
-				if len(outPer) > maxAvx2Outputs {
-					outPer = outPer[:maxAvx2Outputs]
+				if len(outPer) > codeGenMaxOutputs {
+					outPer = outPer[:codeGenMaxOutputs]
 				}
 				// Generate local matrix
-				m := genAvx2Matrix(matrixRows[outIdx:], len(inPer), inIdx, len(outPer), tmp)
-				tmp = tmp[len(m):]
+				m := genMatrix(matrixRows[outIdx:], len(inPer), inIdx, len(outPer))
 				plan = append(plan, state{
 					input:  inPer,
 					output: outPer,
 					m:      m,
-					first:  inIdx == 0,
+					first:  inIdx == 0 && clear,
 				})
 				outIdx += len(outPer)
 				outs = outs[len(outPer):]
@@ -1035,26 +1174,25 @@ func (r *reedSolomon) codeSomeShardsAVXP(matrixRows, inputs, outputs [][]byte, b
 		outIdx := 0
 		for len(outs) > 0 {
 			outPer := outs
-			if len(outPer) > maxAvx2Outputs {
-				outPer = outPer[:maxAvx2Outputs]
+			if len(outPer) > codeGenMaxOutputs {
+				outPer = outPer[:codeGenMaxOutputs]
 			}
 
 			inIdx := 0
 			ins := inputs
 			for len(ins) > 0 {
 				inPer := ins
-				if len(inPer) > maxAvx2Inputs {
-					inPer = inPer[:maxAvx2Inputs]
+				if len(inPer) > codeGenMaxInputs {
+					inPer = inPer[:codeGenMaxInputs]
 				}
 				// Generate local matrix
-				m := genAvx2Matrix(matrixRows[outIdx:], len(inPer), inIdx, len(outPer), tmp)
-				tmp = tmp[len(m):]
+				m := genMatrix(matrixRows[outIdx:], len(inPer), inIdx, len(outPer))
 				//fmt.Println("bytes:", len(inPer)*r.o.perRound, "out:", len(outPer)*r.o.perRound)
 				plan = append(plan, state{
 					input:  inPer,
 					output: outPer,
 					m:      m,
-					first:  inIdx == 0,
+					first:  inIdx == 0 && clear,
 				})
 				inIdx += len(inPer)
 				ins = ins[len(inPer):]
@@ -1064,27 +1202,26 @@ func (r *reedSolomon) codeSomeShardsAVXP(matrixRows, inputs, outputs [][]byte, b
 		}
 	}
 
-	do := byteCount / gor
-	if do < r.o.minSplitSize {
-		do = r.o.minSplitSize
-	}
+	do := max(byteCount/gor, r.o.minSplitSize)
 
 	exec := func(start, stop int) {
+		defer wg.Done()
 		lstart, lstop := start, start+r.o.perRound
 		if lstop > stop {
 			lstop = stop
 		}
 		for lstart < stop {
-			if lstop-lstart >= minAvx2Size {
+			if galMulGen != nil && galMulGenXor != nil && lstop-lstart >= minCodeGenSize {
 				// Execute plan...
+				var n int
 				for _, p := range plan {
 					if p.first {
-						galMulSlicesAvx2(p.m, p.input, p.output, lstart, lstop)
+						n = (*galMulGen)(p.m, p.input, p.output, lstart, lstop)
 					} else {
-						galMulSlicesAvx2Xor(p.m, p.input, p.output, lstart, lstop)
+						n = (*galMulGenXor)(p.m, p.input, p.output, lstart, lstop)
 					}
 				}
-				lstart += (lstop - lstart) & avxSizeMask
+				lstart += n
 				if lstart == lstop {
 					lstop += r.o.perRound
 					if lstop > stop {
@@ -1096,8 +1233,8 @@ func (r *reedSolomon) codeSomeShardsAVXP(matrixRows, inputs, outputs [][]byte, b
 
 			for c := range inputs {
 				in := inputs[c][lstart:lstop]
-				for iRow := 0; iRow < len(outputs); iRow++ {
-					if c == 0 {
+				for iRow := range outputs {
+					if c == 0 && clear {
 						galMulSlice(matrixRows[iRow][c], in, outputs[iRow][lstart:lstop], &r.o)
 					} else {
 						galMulSliceXor(matrixRows[iRow][c], in, outputs[iRow][lstart:lstop], &r.o)
@@ -1110,7 +1247,6 @@ func (r *reedSolomon) codeSomeShardsAVXP(matrixRows, inputs, outputs [][]byte, b
 				lstop = stop
 			}
 		}
-		wg.Done()
 	}
 	if gor == 1 {
 		wg.Add(1)
@@ -1135,7 +1271,8 @@ func (r *reedSolomon) codeSomeShardsAVXP(matrixRows, inputs, outputs [][]byte, b
 
 // Perform the same as codeSomeShards, but split the workload into
 // several goroutines.
-func (r *reedSolomon) codeSomeShardsGFNI(matrixRows, inputs, outputs [][]byte, byteCount int) {
+// If clear is set, the first write will overwrite the output.
+func (r *reedSolomon) codeSomeShardsGFNI(matrixRows, inputs, outputs [][]byte, byteCount int, clear bool, galMulGFNI, galMulGFNIXor *func(matrix []uint64, in, out [][]byte, start, stop int) int) {
 	var wg sync.WaitGroup
 	gor := r.o.maxGoroutines
 
@@ -1146,7 +1283,7 @@ func (r *reedSolomon) codeSomeShardsGFNI(matrixRows, inputs, outputs [][]byte, b
 		first  bool
 	}
 	// Make a plan...
-	plan := make([]state, 0, ((len(inputs)+maxAvx2Inputs-1)/maxAvx2Inputs)*((len(outputs)+maxAvx2Outputs-1)/maxAvx2Outputs))
+	plan := make([]state, 0, ((len(inputs)+codeGenMaxInputs-1)/codeGenMaxInputs)*((len(outputs)+codeGenMaxOutputs-1)/codeGenMaxOutputs))
 
 	// Flips between input first to output first.
 	// We put the smallest data load in the inner loop.
@@ -1155,15 +1292,15 @@ func (r *reedSolomon) codeSomeShardsGFNI(matrixRows, inputs, outputs [][]byte, b
 		ins := inputs
 		for len(ins) > 0 {
 			inPer := ins
-			if len(inPer) > maxAvx2Inputs {
-				inPer = inPer[:maxAvx2Inputs]
+			if len(inPer) > codeGenMaxInputs {
+				inPer = inPer[:codeGenMaxInputs]
 			}
 			outs := outputs
 			outIdx := 0
 			for len(outs) > 0 {
 				outPer := outs
-				if len(outPer) > maxAvx2Outputs {
-					outPer = outPer[:maxAvx2Outputs]
+				if len(outPer) > codeGenMaxOutputs {
+					outPer = outPer[:codeGenMaxOutputs]
 				}
 				// Generate local matrix
 				m := genGFNIMatrix(matrixRows[outIdx:], len(inPer), inIdx, len(outPer), make([]uint64, len(inPer)*len(outPer)))
@@ -1171,7 +1308,7 @@ func (r *reedSolomon) codeSomeShardsGFNI(matrixRows, inputs, outputs [][]byte, b
 					input:  inPer,
 					output: outPer,
 					m:      m,
-					first:  inIdx == 0,
+					first:  inIdx == 0 && clear,
 				})
 				outIdx += len(outPer)
 				outs = outs[len(outPer):]
@@ -1184,16 +1321,16 @@ func (r *reedSolomon) codeSomeShardsGFNI(matrixRows, inputs, outputs [][]byte, b
 		outIdx := 0
 		for len(outs) > 0 {
 			outPer := outs
-			if len(outPer) > maxAvx2Outputs {
-				outPer = outPer[:maxAvx2Outputs]
+			if len(outPer) > codeGenMaxOutputs {
+				outPer = outPer[:codeGenMaxOutputs]
 			}
 
 			inIdx := 0
 			ins := inputs
 			for len(ins) > 0 {
 				inPer := ins
-				if len(inPer) > maxAvx2Inputs {
-					inPer = inPer[:maxAvx2Inputs]
+				if len(inPer) > codeGenMaxInputs {
+					inPer = inPer[:codeGenMaxInputs]
 				}
 				// Generate local matrix
 				m := genGFNIMatrix(matrixRows[outIdx:], len(inPer), inIdx, len(outPer), make([]uint64, len(inPer)*len(outPer)))
@@ -1202,7 +1339,7 @@ func (r *reedSolomon) codeSomeShardsGFNI(matrixRows, inputs, outputs [][]byte, b
 					input:  inPer,
 					output: outPer,
 					m:      m,
-					first:  inIdx == 0,
+					first:  inIdx == 0 && clear,
 				})
 				inIdx += len(inPer)
 				ins = ins[len(inPer):]
@@ -1212,27 +1349,26 @@ func (r *reedSolomon) codeSomeShardsGFNI(matrixRows, inputs, outputs [][]byte, b
 		}
 	}
 
-	do := byteCount / gor
-	if do < r.o.minSplitSize {
-		do = r.o.minSplitSize
-	}
+	do := max(byteCount/gor, r.o.minSplitSize)
 
 	exec := func(start, stop int) {
+		defer wg.Done()
 		lstart, lstop := start, start+r.o.perRound
 		if lstop > stop {
 			lstop = stop
 		}
 		for lstart < stop {
-			if lstop-lstart >= minAvx2Size {
+			if galMulGFNI != nil && galMulGFNIXor != nil && lstop-lstart >= minCodeGenSize {
 				// Execute plan...
+				var n int
 				for _, p := range plan {
 					if p.first {
-						galMulSlicesGFNI(p.m, p.input, p.output, lstart, lstop)
+						n = (*galMulGFNI)(p.m, p.input, p.output, lstart, lstop)
 					} else {
-						galMulSlicesGFNIXor(p.m, p.input, p.output, lstart, lstop)
+						n = (*galMulGFNIXor)(p.m, p.input, p.output, lstart, lstop)
 					}
 				}
-				lstart += (lstop - lstart) & avxSizeMask
+				lstart += n
 				if lstart == lstop {
 					lstop += r.o.perRound
 					if lstop > stop {
@@ -1244,8 +1380,8 @@ func (r *reedSolomon) codeSomeShardsGFNI(matrixRows, inputs, outputs [][]byte, b
 
 			for c := range inputs {
 				in := inputs[c][lstart:lstop]
-				for iRow := 0; iRow < len(outputs); iRow++ {
-					if c == 0 {
+				for iRow := range outputs {
+					if c == 0 && clear {
 						galMulSlice(matrixRows[iRow][c], in, outputs[iRow][lstart:lstop], &r.o)
 					} else {
 						galMulSliceXor(matrixRows[iRow][c], in, outputs[iRow][lstart:lstop], &r.o)
@@ -1258,8 +1394,8 @@ func (r *reedSolomon) codeSomeShardsGFNI(matrixRows, inputs, outputs [][]byte, b
 				lstop = stop
 			}
 		}
-		wg.Done()
 	}
+
 	if gor == 1 {
 		wg.Add(1)
 		exec(0, byteCount)
@@ -1290,7 +1426,7 @@ func (r *reedSolomon) checkSomeShards(matrixRows, inputs, toCheck [][]byte, byte
 	}
 
 	outputs := AllocAligned(len(toCheck), byteCount)
-	r.codeSomeShards(matrixRows, inputs, outputs, byteCount)
+	r.codeSomeShards(matrixRows, inputs, outputs, byteCount, true)
 
 	for i, calc := range outputs {
 		if !bytes.Equal(calc, toCheck[i]) {
@@ -1307,6 +1443,10 @@ var ErrShardNoData = errors.New("no shard data")
 // ErrShardSize is returned if shard length isn't the same for all
 // shards.
 var ErrShardSize = errors.New("shard sizes do not match")
+
+// ErrInvalidShardSize is returned if shard length doesn't meet the requirements,
+// typically a multiple of N.
+var ErrInvalidShardSize = errors.New("invalid shard size")
 
 // checkShards will check if shards are the same size
 // or 0, if allowed. An error is returned if this fails.
@@ -1357,6 +1497,177 @@ func (r *reedSolomon) Reconstruct(shards [][]byte) error {
 	return r.reconstruct(shards, false, nil)
 }
 
+// DecodeIdx allows progressively decoding shards into dst.
+// Dst slices to be decoded should be filled.
+// On the first call, dst slices should be set to all zeros.
+// expectInput should be the same for all calls and should
+// represent the inputs that are expected to be added.
+// The number of expected inputs should at least be the number of data shards.
+// Each input should be sent once - and only once.
+// len(dst) must be = len(input).
+// All sent slices must be the same length.
+// The caller must manage all of the above.
+// Merging:
+// If 'expectInput == nil' no new input is added, but the slices are XORed together.
+// This means that the same slices as dst must be set in input.
+// This allows merging two separate inputs where a number of inputs has been filled.
+func (r *reedSolomon) DecodeIdx(dst [][]byte, expectInput []bool, input [][]byte) (err error) {
+	// Special case: merging mode when expectInput == nil
+	if expectInput == nil {
+		if len(dst) != len(input) {
+			return errors.Join(ErrInvalidInput, errors.New("dst and input must have same length for merging"))
+		}
+		// XOR each pair of slices
+		for i := range dst {
+			if input[i] != nil {
+				if dst[i] == nil {
+					return errors.Join(ErrInvalidInput, fmt.Errorf("input[%d] provided but dst[%d] is nil", i, i))
+				}
+				if len(dst[i]) != len(input[i]) {
+					return errors.Join(ErrInvalidShardSize, fmt.Errorf("dst[%d] size %d != input[%d] size %d", i, len(dst[i]), i, len(input[i])))
+				}
+				sliceXor(input[i], dst[i], &r.o)
+			}
+		}
+		return nil
+	}
+
+	// Validate expectInput length
+	if len(expectInput) != r.totalShards {
+		return errors.Join(ErrInvalidInput, fmt.Errorf("expectInput length %d, expected %d", len(expectInput), r.totalShards))
+	}
+
+	// Validate dst and input have same length as totalShards
+	if len(dst) != r.totalShards {
+		return errors.Join(ErrInvalidInput, fmt.Errorf("dst length %d, expected %d (totalShards)", len(dst), r.totalShards))
+	}
+	if len(input) != r.totalShards {
+		return errors.Join(ErrInvalidInput, fmt.Errorf("input length %d, expected %d (totalShards)", len(input), r.totalShards))
+	}
+
+	// Check for unexpected inputs first
+	for inputIdx := range input {
+		if input[inputIdx] != nil && !expectInput[inputIdx] {
+			return errors.Join(ErrInvalidInput, fmt.Errorf("unexpected input at index %d (not marked in expectInput)", inputIdx))
+		}
+	}
+
+	// Check that dst shards are not allocated for expected inputs
+	for i := range expectInput {
+		if expectInput[i] && dst[i] != nil {
+			return errors.Join(ErrInvalidInput, fmt.Errorf("dst[%d] should be nil (marked as input in expectInput)", i))
+		}
+	}
+
+	// Build valid and invalid indices from expectInput
+	validIndices := make([]int, 0)
+	invalidIndices := make([]int, 0)
+	for i, filled := range expectInput {
+		if filled {
+			validIndices = append(validIndices, i)
+		} else {
+			invalidIndices = append(invalidIndices, i)
+		}
+	}
+
+	// We need at least dataShards valid indices for matrix inversion
+	if len(validIndices) < r.dataShards {
+		return errors.Join(ErrTooFewShards, fmt.Errorf("%d valid shards marked in expectInput, need at least %d", len(validIndices), r.dataShards))
+	}
+
+	// Get the inverted matrix for decoding
+	dataDecodeMatrix, err := r.getDecodeMatrix(validIndices, invalidIndices)
+	if err != nil {
+		return err
+	}
+
+	// Verify shard sizes are consistent.
+	// Tracked separately from the size, so a zero-length input cannot pass as "unset".
+	shardSize := 0
+	sizeKnown := false
+	for i := range input {
+		if input[i] != nil {
+			if !sizeKnown {
+				shardSize, sizeKnown = len(input[i]), true
+			} else if len(input[i]) != shardSize {
+				return errors.Join(ErrInvalidShardSize, fmt.Errorf("input[%d] size %d != expected size %d", i, len(input[i]), shardSize))
+			}
+		}
+	}
+	for i := range dst {
+		if dst[i] != nil {
+			if len(dst[i]) != shardSize {
+				return errors.Join(ErrInvalidShardSize, fmt.Errorf("dst[%d] size %d != expected size %d", i, len(dst[i]), shardSize))
+			}
+		}
+	}
+
+	// Build matrix rows and output arrays for codeSomeShards
+	outputCount := 0
+	outputs := make([][]byte, 0, r.totalShards)
+	matrixRows := make([][]byte, 0, r.totalShards)
+
+	for dstIdx := range dst {
+		if dst[dstIdx] == nil {
+			continue
+		}
+		outputs = append(outputs, dst[dstIdx])
+
+		// Build matrix row for this dst shard
+		row := make([]byte, len(validIndices))
+		if dstIdx < r.dataShards {
+			// Data shard: use inverted matrix row directly
+			copy(row, dataDecodeMatrix[dstIdx])
+		} else {
+			// Parity shard: multiply parity row with inverted matrix
+			parityIdx := dstIdx - r.dataShards
+			for col := 0; col < len(validIndices) && col < r.dataShards; col++ {
+				row[col] = 0
+				for i := 0; i < r.dataShards; i++ {
+					row[col] ^= galMultiply(r.parity[parityIdx][i], dataDecodeMatrix[i][col])
+				}
+			}
+		}
+		matrixRows = append(matrixRows, row)
+		outputCount++
+	}
+
+	if outputCount == 0 {
+		return nil
+	}
+
+	// Build input array from available shards
+	inputs := make([][]byte, 0, len(validIndices))
+	actualInputIndices := make([]int, 0, len(validIndices))
+	for col := 0; col < len(validIndices); col++ {
+		inputIdx := validIndices[col]
+		if inputIdx < len(input) && input[inputIdx] != nil {
+			inputs = append(inputs, input[inputIdx])
+			actualInputIndices = append(actualInputIndices, col)
+		}
+	}
+
+	// If no inputs are provided in this call, nothing to do
+	if len(inputs) == 0 {
+		return nil
+	}
+
+	// Adjust matrix rows to only include columns for available inputs
+	adjustedMatrixRows := make([][]byte, len(matrixRows))
+	for i, row := range matrixRows {
+		adjustedRow := make([]byte, len(actualInputIndices))
+		for j, colIdx := range actualInputIndices {
+			adjustedRow[j] = row[colIdx]
+		}
+		adjustedMatrixRows[i] = adjustedRow
+	}
+
+	// Use codeSomeShards for efficient matrix multiplication
+	// Always accumulate (never clear) - caller provides zeroed slices
+	r.codeSomeShards(adjustedMatrixRows, inputs, outputs, shardSize, false)
+	return nil
+}
+
 // ReconstructData will recreate any missing data shards, if possible.
 //
 // Given a list of shards, some of which contain data, fills in the
@@ -1376,13 +1687,14 @@ func (r *reedSolomon) ReconstructData(shards [][]byte) error {
 	return r.reconstruct(shards, true, nil)
 }
 
-// ReconstructSome will recreate only requested data shards, if possible.
+// ReconstructSome will recreate only requested shards, if possible.
 //
 // Given a list of shards, some of which contain data, fills in the
-// data shards indicated by true values in the "required" parameter.
-// The length of "required" array must be equal to dataShards.
+// shards indicated by true values in the "required" parameter.
+// The length of the "required" array must be equal to either Shards or DataShards.
+// If the length is equal to DataShards, the reconstruction of parity shards will be ignored.
 //
-// The length of "shards" array must be equal to shards.
+// The length of "shards" array must be equal to Shards.
 // You indicate that a shard is missing by setting it to nil or zero-length.
 // If a shard is zero-length but has sufficient capacity, that memory will
 // be used, otherwise a new []byte will be allocated.
@@ -1393,7 +1705,10 @@ func (r *reedSolomon) ReconstructData(shards [][]byte) error {
 // As the reconstructed shard set may contain missing parity shards,
 // calling the Verify function is likely to fail.
 func (r *reedSolomon) ReconstructSome(shards [][]byte, required []bool) error {
-	return r.reconstruct(shards, true, required)
+	if len(required) != r.dataShards && len(required) != r.totalShards {
+		return ErrInvalidInput
+	}
+	return r.reconstruct(shards, len(required) == r.dataShards, required)
 }
 
 // reconstruct will recreate the missing data totalShards, and unless
@@ -1427,8 +1742,12 @@ func (r *reedSolomon) reconstruct(shards [][]byte, dataOnly bool, required []boo
 			if i < r.dataShards {
 				dataPresent++
 			}
-		} else if required != nil && required[i] {
-			missingRequired++
+		} else if required != nil {
+			// required may only cover the data shards, in which case any
+			// missing parity shard is by definition not required.
+			if i < len(required) && required[i] {
+				missingRequired++
+			}
 		}
 	}
 	if numberPresent == r.totalShards || dataOnly && dataPresent == r.dataShards ||
@@ -1464,51 +1783,19 @@ func (r *reedSolomon) reconstruct(shards [][]byte, dataOnly bool, required []boo
 		}
 	}
 
-	// Attempt to get the cached inverted matrix out of the tree
-	// based on the indices of the invalid rows.
-	dataDecodeMatrix := r.tree.GetInvertedMatrix(invalidIndices)
-
-	// If the inverted matrix isn't cached in the tree yet we must
-	// construct it ourselves and insert it into the tree for the
-	// future.  In this way the inversion tree is lazily loaded.
-	if dataDecodeMatrix == nil {
-		// Pull out the rows of the matrix that correspond to the
-		// shards that we have and build a square matrix.  This
-		// matrix could be used to generate the shards that we have
-		// from the original data.
-		subMatrix, _ := newMatrix(r.dataShards, r.dataShards)
-		for subMatrixRow, validIndex := range validIndices {
-			for c := 0; c < r.dataShards; c++ {
-				subMatrix[subMatrixRow][c] = r.m[validIndex][c]
-			}
-		}
-		// Invert the matrix, so we can go from the encoded shards
-		// back to the original data.  Then pull out the row that
-		// generates the shard that we want to decode.  Note that
-		// since this matrix maps back to the original data, it can
-		// be used to create a data shard, but not a parity shard.
-		dataDecodeMatrix, err = subMatrix.Invert()
-		if err != nil {
-			return err
-		}
-
-		// Cache the inverted matrix in the tree for future use keyed on the
-		// indices of the invalid rows.
-		err = r.tree.InsertInvertedMatrix(invalidIndices, dataDecodeMatrix, r.totalShards)
-		if err != nil {
-			return err
-		}
+	// Get the inverted matrix for decoding
+	dataDecodeMatrix, err := r.getDecodeMatrix(validIndices, invalidIndices)
+	if err != nil {
+		return err
 	}
 
-	// Re-create any data shards that were missing.
-	//
-	// The input to the coding is all of the shards we actually
-	// have, and the output is the missing data shards.  The computation
-	// is done using the special decode matrix we just built.
-	outputs := make([][]byte, r.parityShards)
-	matrixRows := make([][]byte, r.parityShards)
+	// Unified reconstruction: build a single decode matrix for all missing shards
+	// and reconstruct them in one codeSomeShards call.
 	outputCount := 0
+	outputs := make([][]byte, r.totalShards)
+	matrixRows := make([][]byte, r.totalShards)
 
+	// Count and prepare missing data shards
 	for iShard := 0; iShard < r.dataShards; iShard++ {
 		if len(shards[iShard]) == 0 && (required == nil || required[iShard]) {
 			if cap(shards[iShard]) >= shardSize {
@@ -1521,33 +1808,29 @@ func (r *reedSolomon) reconstruct(shards [][]byte, dataOnly bool, required []boo
 			outputCount++
 		}
 	}
-	r.codeSomeShards(matrixRows, subShards, outputs[:outputCount], shardSize)
 
-	if dataOnly {
-		// Exit out early if we are only interested in the data shards
-		return nil
-	}
-
-	// Now that we have all of the data shards intact, we can
-	// compute any of the parity that is missing.
-	//
-	// The input to the coding is ALL of the data shards, including
-	// any that we just calculated.  The output is whichever of the
-	// data shards were missing.
-	outputCount = 0
-	for iShard := r.dataShards; iShard < r.totalShards; iShard++ {
-		if len(shards[iShard]) == 0 && (required == nil || required[iShard]) {
-			if cap(shards[iShard]) >= shardSize {
-				shards[iShard] = shards[iShard][0:shardSize]
-			} else {
-				shards[iShard] = AllocAligned(1, shardSize)[0]
+	if !dataOnly {
+		// Count and prepare missing parity shards
+		for iShard := r.dataShards; iShard < r.totalShards; iShard++ {
+			if len(shards[iShard]) == 0 && (required == nil || required[iShard]) {
+				if cap(shards[iShard]) >= shardSize {
+					shards[iShard] = shards[iShard][0:shardSize]
+				} else {
+					shards[iShard] = AllocAligned(1, shardSize)[0]
+				}
+				outputs[outputCount] = shards[iShard]
+				// For parity shards, multiply parity row with inverted matrix
+				parityIdx := iShard - r.dataShards
+				matrixRows[outputCount] = multiplyRowWithMatrix(r.parity[parityIdx], dataDecodeMatrix)
+				outputCount++
 			}
-			outputs[outputCount] = shards[iShard]
-			matrixRows[outputCount] = r.parity[iShard-r.dataShards]
-			outputCount++
 		}
 	}
-	r.codeSomeShards(matrixRows, shards[:r.dataShards], outputs[:outputCount], shardSize)
+
+	// Single reconstruction call for all missing shards
+	if outputCount > 0 {
+		r.codeSomeShards(matrixRows[:outputCount], subShards, outputs[:outputCount], shardSize, true)
+	}
 	return nil
 }
 
@@ -1590,10 +1873,7 @@ func (r *reedSolomon) Split(data []byte) ([][]byte, error) {
 		} else {
 			data = data[:cap(data)]
 		}
-		clear := data[dataLen:]
-		for i := range clear {
-			clear[i] = 0
-		}
+		clear(data[dataLen:])
 	}
 
 	// Only allocate memory if necessary
@@ -1607,7 +1887,7 @@ func (r *reedSolomon) Split(data []byte) ([][]byte, error) {
 			// Copy partial shards
 			copyFrom := data[perShard*fullShards : dataLen]
 			for i := range padding {
-				if len(copyFrom) <= 0 {
+				if len(copyFrom) == 0 {
 					break
 				}
 				copyFrom = copyFrom[copy(padding[i], copyFrom):]
@@ -1681,4 +1961,8 @@ func (r *reedSolomon) Join(dst io.Writer, shards [][]byte, outSize int) error {
 		write -= n
 	}
 	return nil
+}
+
+type indexer interface {
+	int | int8 | int16 | int32 | int64 | uint | uint8 | uint16 | uint32 | uint64
 }

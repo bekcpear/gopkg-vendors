@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 package rtcp
@@ -63,7 +63,7 @@ func (p SliceLossIndication) Marshal() ([]byte, error) {
 
 // Unmarshal decodes the SliceLossIndication from binary.
 func (p *SliceLossIndication) Unmarshal(rawPacket []byte) error {
-	if len(rawPacket) < (headerLength + ssrcLength) {
+	if len(rawPacket) < (headerLength + (ssrcLength * 2)) {
 		return errPacketTooShort
 	}
 
@@ -72,17 +72,17 @@ func (p *SliceLossIndication) Unmarshal(rawPacket []byte) error {
 		return err
 	}
 
-	if len(rawPacket) < (headerLength + int(4*header.Length)) {
+	if len(rawPacket) < (headerLength + 4*int(header.Length)) {
 		return errPacketTooShort
 	}
 
-	if header.Type != TypeTransportSpecificFeedback || header.Count != FormatSLI {
+	if header.Type != TypePayloadSpecificFeedback || header.Count != FormatSLI {
 		return errWrongType
 	}
 
 	p.SenderSSRC = binary.BigEndian.Uint32(rawPacket[headerLength:])
 	p.MediaSSRC = binary.BigEndian.Uint32(rawPacket[headerLength+ssrcLength:])
-	for i := headerLength + sliOffset; i < (headerLength + int(header.Length*4)); i += 4 {
+	for i := headerLength + sliOffset; i < (headerLength + 4*int(header.Length)); i += 4 {
 		sli := binary.BigEndian.Uint32(rawPacket[i:])
 		p.SLI = append(p.SLI, SLIEntry{
 			First:   uint16((sli >> 19) & 0x1FFF), //nolint:gosec // G115
@@ -103,7 +103,7 @@ func (p *SliceLossIndication) MarshalSize() int {
 func (p *SliceLossIndication) Header() Header {
 	return Header{
 		Count:  FormatSLI,
-		Type:   TypeTransportSpecificFeedback,
+		Type:   TypePayloadSpecificFeedback,
 		Length: uint16((p.MarshalSize() / 4) - 1), //nolint:gosec // G115
 	}
 }

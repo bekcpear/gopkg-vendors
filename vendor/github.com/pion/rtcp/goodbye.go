@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 package rtcp
@@ -6,6 +6,7 @@ package rtcp
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 )
 
 // The Goodbye packet indicates that one or more sources are no longer active.
@@ -120,6 +121,23 @@ func (g *Goodbye) Unmarshal(rawPacket []byte) error {
 	return nil
 }
 
+func appendGoodbyeSSRCs(dst []uint32, header Header, pkt []byte) ([]uint32, error) {
+	if header.Type != TypeGoodbye {
+		return dst, errWrongType
+	}
+	reasonOffset := int(headerLength + header.Count*ssrcLength)
+	if reasonOffset > len(pkt) {
+		return dst, errPacketTooShort
+	}
+	for i := 0; i < int(header.Count); i++ {
+		offset := headerLength + i*ssrcLength
+
+		dst = append(dst, binary.BigEndian.Uint32(pkt[offset:]))
+	}
+
+	return dst, nil
+}
+
 // Header returns the Header associated with this packet.
 func (g *Goodbye) Header() Header {
 	return Header{
@@ -154,11 +172,12 @@ func (g *Goodbye) DestinationSSRC() []uint32 {
 }
 
 func (g Goodbye) String() string {
-	out := "Goodbye\n"
+	var out strings.Builder
+	out.WriteString("Goodbye\n")
 	for i, s := range g.Sources {
-		out += fmt.Sprintf("\tSource %d: %x\n", i, s)
+		fmt.Fprintf(&out, "\tSource %d: %x\n", i, s)
 	}
-	out += fmt.Sprintf("\tReason: %s\n", g.Reason)
+	fmt.Fprintf(&out, "\tReason: %s\n", g.Reason)
 
-	return out
+	return out.String()
 }

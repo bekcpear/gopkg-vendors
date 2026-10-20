@@ -1,10 +1,11 @@
-//go:build !noasm && !appengine && !gccgo
-// +build !noasm,!appengine,!gccgo
+//go:build !noasm && !appengine && !gccgo && !nopshufb
 
 // Copyright 2015, Klaus Post, see LICENSE for details.
 // Copyright 2017, Minio, Inc.
 
 package reedsolomon
+
+const pshufb = true
 
 //go:noescape
 func galMulNEON(low, high, in, out []byte)
@@ -12,17 +13,35 @@ func galMulNEON(low, high, in, out []byte)
 //go:noescape
 func galMulXorNEON(low, high, in, out []byte)
 
-//go:noescape
-func galXorNEON(in, out []byte)
+func getVectorLength() (vl, pl uint64)
+
+func init() {
+	if defaultOptions.useSVE {
+		if vl, _ := getVectorLength(); vl <= 256 {
+			// set vector length in bytes
+			defaultOptions.vectorLength = int(vl) >> 3
+		} else {
+			// disable SVE for hardware implementatons over 256 bits (only know to be Fujitsu A64FX atm)
+			defaultOptions.useSVE = false
+		}
+	}
+}
 
 func galMulSlice(c byte, in, out []byte, o *options) {
+	// The kernels below write len(in) bytes to out without consulting its
+	// length. Fail here rather than past the end of out.
+	out = out[:len(in)]
 	if c == 1 {
 		copy(out, in)
 		return
 	}
 	var done int
-	galMulNEON(mulTableLow[c][:], mulTableHigh[c][:], in, out)
 	done = (len(in) >> 5) << 5
+	if raceEnabled {
+		raceReadSlice(in[:done])
+		raceWriteSlice(out[:done])
+	}
+	galMulNEON(mulTableLow[c][:], mulTableHigh[c][:], in, out)
 
 	remain := len(in) - done
 	if remain > 0 {
@@ -34,33 +53,23 @@ func galMulSlice(c byte, in, out []byte, o *options) {
 }
 
 func galMulSliceXor(c byte, in, out []byte, o *options) {
+	out = out[:len(in)]
 	if c == 1 {
 		sliceXor(in, out, o)
 		return
 	}
-	var done int
+	done := (len(in) >> 5) << 5
+	if raceEnabled {
+		raceReadSlice(in[:done])
+		raceWriteSlice(out[:done])
+	}
 	galMulXorNEON(mulTableLow[c][:], mulTableHigh[c][:], in, out)
-	done = (len(in) >> 5) << 5
 
 	remain := len(in) - done
 	if remain > 0 {
 		mt := mulTable[c][:256]
 		for i := done; i < len(in); i++ {
 			out[i] ^= mt[in[i]]
-		}
-	}
-}
-
-// simple slice xor
-func sliceXor(in, out []byte, o *options) {
-
-	galXorNEON(in, out)
-	done := (len(in) >> 5) << 5
-
-	remain := len(in) - done
-	if remain > 0 {
-		for i := done; i < len(in); i++ {
-			out[i] ^= in[i]
 		}
 	}
 }
@@ -90,7 +99,7 @@ func fftDIT2(x, y []byte, log_m ffe, o *options) {
 	// Reference version:
 	refMulAdd(x, y, log_m)
 	// 64 byte aligned, always full.
-	galXorNEON(x, y)
+	xorSliceNEON(x, y)
 }
 
 // 2-way butterfly forward
@@ -103,7 +112,7 @@ func fftDIT28(x, y []byte, log_m ffe8, o *options) {
 // 2-way butterfly
 func ifftDIT2(x, y []byte, log_m ffe, o *options) {
 	// 64 byte aligned, always full.
-	galXorNEON(x, y)
+	xorSliceNEON(x, y)
 	// Reference version:
 	refMulAdd(x, y, log_m)
 }
@@ -119,6 +128,14 @@ func mulgf16(x, y []byte, log_m ffe, o *options) {
 	refMul(x, y, log_m)
 }
 
+func mulgf16Xor8(scalars *[8]uint16, in []byte, outs *[8][]byte, o *options) {
+	refMulAdd8x(scalars, in, outs)
+}
+
+func mulgf16Xor(x, y []byte, log_m ffe, o *options) {
+	refMulAdd(x, y, log_m)
+}
+
 func mulAdd8(out, in []byte, log_m ffe8, o *options) {
 	t := &multiply256LUT8[log_m]
 	galMulXorNEON(t[:16], t[16:32], in, out)
@@ -126,7 +143,7 @@ func mulAdd8(out, in []byte, log_m ffe8, o *options) {
 	in = in[done:]
 	if len(in) > 0 {
 		out = out[done:]
-		refMulAdd8(in, out, log_m)
+		refMulAdd8(out, in, log_m)
 	}
 }
 
@@ -140,7 +157,18 @@ func mulgf8(out, in []byte, log_m ffe8, o *options) {
 	if remain > 0 {
 		mt := mul8LUTs[log_m].Value[:]
 		for i := done; i < len(in); i++ {
-			out[i] ^= byte(mt[in[i]])
+			out[i] = byte(mt[in[i]])
 		}
 	}
+}
+
+// 4-way butterfly with separate destination
+func ifftDIT4Dst(dst, work [][]byte, dist int, log_m01, log_m23, log_m02 ffe, o *options) {
+	ifftDIT4DstRef(dst, work, dist, log_m01, log_m23, log_m02, o)
+}
+
+// 4-way butterfly with separate destination
+func ifftDIT48Dst(dst, work [][]byte, dist int, log_m01, log_m23, log_m02 ffe8, o *options) {
+	// Fall back. Should not be called.
+	ifftDIT4DstRef8(dst, work, dist, log_m01, log_m23, log_m02, o)
 }

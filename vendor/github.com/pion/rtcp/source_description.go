@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 package rtcp
@@ -6,6 +6,7 @@ package rtcp
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 )
 
 // SDESType is the item type used in the RTCP SDES control packet.
@@ -172,6 +173,49 @@ func (s *SourceDescription) Unmarshal(rawPacket []byte) error {
 	return nil
 }
 
+//nolint:cyclop
+func appendSourceDescriptionSSRCs(dst []uint32, header Header, pkt []byte) ([]uint32, error) {
+	if header.Type != TypeSourceDescription {
+		return dst, errWrongType
+	}
+	numChunks := 0
+	for i := headerLength; i < len(pkt); numChunks++ {
+		chunk := pkt[i:]
+		if len(chunk) < (sdesSourceLen + sdesTypeLen) {
+			return dst, errPacketTooShort
+		}
+		dst = append(dst, binary.BigEndian.Uint32(chunk))
+
+		chunkLen := -1
+		for itemOffset := sdesSourceLen; itemOffset < len(chunk); {
+			item := chunk[itemOffset:]
+			if pktType := SDESType(item[sdesTypeOffset]); pktType == SDESEnd {
+				chunkLen = itemOffset + sdesTypeLen
+				chunkLen += getPadding(chunkLen)
+
+				break
+			}
+			if len(item) < (sdesTypeLen + sdesOctetCountLen) {
+				return dst, errPacketTooShort
+			}
+			octetCount := int(item[sdesOctetCountOffset])
+			if sdesTextOffset+octetCount > len(item) {
+				return dst, errPacketTooShort
+			}
+			itemOffset += sdesTypeLen + sdesOctetCountLen + octetCount
+		}
+		if chunkLen < 0 || chunkLen > len(chunk) {
+			return dst, errPacketTooShort
+		}
+		i += chunkLen
+	}
+	if numChunks != int(header.Count) {
+		return dst, errInvalidHeader
+	}
+
+	return dst, nil
+}
+
 // MarshalSize returns the size of the packet once marshaled.
 func (s *SourceDescription) MarshalSize() int {
 	chunksLength := 0
@@ -313,14 +357,14 @@ func (s SourceDescriptionItem) Marshal() ([]byte, error) {
 
 	rawPacket := make([]byte, sdesTypeLen+sdesOctetCountLen)
 
-	rawPacket[sdesTypeOffset] = uint8(s.Type)
+	rawPacket[sdesTypeOffset] = uint8(s.Type) //nolint:gosec // rawPacket is created with length 2
 
 	txtBytes := []byte(s.Text)
 	octetCount := len(txtBytes)
 	if octetCount > sdesMaxOctetCount {
 		return nil, errSDESTextTooLong
 	}
-	rawPacket[sdesOctetCountOffset] = uint8(octetCount)
+	rawPacket[sdesOctetCountOffset] = uint8(octetCount) //nolint:gosec // rawPacket is created with length 2
 
 	rawPacket = append(rawPacket, txtBytes...) //nolint:makezero
 
@@ -365,10 +409,11 @@ func (s *SourceDescription) DestinationSSRC() []uint32 {
 }
 
 func (s *SourceDescription) String() string {
-	out := "Source Description:\n"
+	var out strings.Builder
+	out.WriteString("Source Description:\n")
 	for _, c := range s.Chunks {
-		out += fmt.Sprintf("\t%x: %s\n", c.Source, c.Items)
+		fmt.Fprintf(&out, "\t%x: %s\n", c.Source, c.Items)
 	}
 
-	return out
+	return out.String()
 }

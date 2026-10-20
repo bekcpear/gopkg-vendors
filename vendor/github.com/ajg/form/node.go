@@ -6,6 +6,7 @@ package form
 
 import (
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -31,8 +32,7 @@ func (n node) merge(d, e rune, p string, vs *url.Values) {
 	}
 }
 
-// TODO: Add tests for implicit indexing.
-func parseValues(d, e rune, vs url.Values, canIndexFirstLevelOrdinally bool) node {
+func parseValues(d, e rune, vs url.Values, canIndexFirstLevelOrdinally bool, maxDepth int) node {
 	// NOTE: Because of the flattening of potentially multiple strings to one key, implicit indexing works:
 	//    i. At the first level;   e.g. Foo.Bar=A&Foo.Bar=B     becomes 0.Foo.Bar=A&1.Foo.Bar=B
 	//   ii. At the last level;    e.g. Foo.Bar._=A&Foo.Bar._=B becomes Foo.Bar.0=A&Foo.Bar.1=B
@@ -44,19 +44,33 @@ func parseValues(d, e rune, vs url.Values, canIndexFirstLevelOrdinally bool) nod
 		indexLastLevelOrdinally := strings.HasSuffix(k, string(d)+implicitKey)
 
 		for i, s := range ss {
+			// Derive each indexed key from the original k; mutating k in
+			// place would compound across values (the second value of a
+			// repeated key becoming "1."+"0."+k, etc.).
+			key := k
 			if canIndexFirstLevelOrdinally {
-				k = strconv.Itoa(i) + string(d) + k
+				key = strconv.Itoa(i) + string(d) + k
 			} else if indexLastLevelOrdinally {
-				k = strings.TrimSuffix(k, implicitKey) + strconv.Itoa(i)
+				key = strings.TrimSuffix(k, implicitKey) + strconv.Itoa(i)
 			}
 
-			m[k] = s
+			m[key] = s
 		}
 	}
 
+	// Split in sorted key order so outcomes never depend on map iteration
+	// order: a scalar key is a strict prefix of any composite key through it,
+	// and prefixes sort first, so the scalar is always absorbed into the node
+	// (rather than the node colliding with a later scalar).
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	n := node{}
-	for k, s := range m {
-		n = n.split(d, e, k, s)
+	for _, k := range keys {
+		n = n.split(d, e, k, m[k], 1, maxDepth)
 	}
 	return n
 }
@@ -76,7 +90,11 @@ func splitPath(d, e rune, path string) (k, rest string) {
 	return unescape(d, e, path), ""
 }
 
-func (n node) split(d, e rune, path, s string) node {
+func (n node) split(d, e rune, path, s string, depth, maxDepth int) node {
+	if maxDepth >= 0 && depth > maxDepth {
+		panic(errKind(KindLimit, "key path nesting exceeds the maximum depth ("+strconv.Itoa(maxDepth)+
+			"); set Decoder.MaxDepth for trusted input"))
+	}
 	k, rest := splitPath(d, e, path)
 	if rest == "" {
 		return add(n, k, s)
@@ -86,7 +104,7 @@ func (n node) split(d, e rune, path, s string) node {
 	}
 
 	c := getNode(n[k])
-	n[k] = c.split(d, e, rest, s)
+	n[k] = c.split(d, e, rest, s, depth+1, maxDepth)
 	return n
 }
 
@@ -96,7 +114,7 @@ func add(n node, k, s string) node {
 	}
 
 	if _, ok := n[k]; ok {
-		panic("key " + k + " already set")
+		panic("key " + k + " already set") // Unreachable: sorted splitting absorbs scalars first.
 	}
 
 	n[k] = s

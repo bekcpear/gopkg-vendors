@@ -23,92 +23,6 @@ go get -u github.com/klauspost/reedsolomon
 
 Using Go modules is recommended.
 
-# Changes
-
-## 2022
-
-* [GFNI](https://github.com/klauspost/reedsolomon/pull/224) support for amd64, for up to 3x faster processing.
-* [Leopard GF8](https://github.com/klauspost/reedsolomon#leopard-gf8) mode added, for faster processing of medium shard counts.
-* [Leopard GF16](https://github.com/klauspost/reedsolomon#leopard-compatible-gf16) mode added, for up to 65536 shards. 
-* [WithJerasureMatrix](https://pkg.go.dev/github.com/klauspost/reedsolomon?tab=doc#WithJerasureMatrix) allows constructing a [Jerasure](https://github.com/tsuraan/Jerasure) compatible matrix.
-
-## 2021
-
-* Use `GOAMD64=v4` to enable faster AVX2.
-* Add progressive shard encoding.
-* Wider AVX2 loops
-* Limit concurrency on AVX2, since we are likely memory bound.
-* Allow 0 parity shards.
-* Allow disabling inversion cache.
-* Faster AVX2 encoding.
-
-<details>
-	<summary>See older changes</summary>
-
-## May 2020
-
-* ARM64 optimizations, up to 2.5x faster.
-* Added [WithFastOneParityMatrix](https://pkg.go.dev/github.com/klauspost/reedsolomon?tab=doc#WithFastOneParityMatrix) for faster operation with 1 parity shard.
-* Much better performance when using a limited number of goroutines.
-* AVX512 is now using multiple cores.
-* Stream processing overhaul, big speedups in most cases.
-* AVX512 optimizations
-
-## March 6, 2019
-
-The pure Go implementation is about 30% faster. Minor tweaks to assembler implementations.
-
-## February 8, 2019
-
-AVX512 accelerated version added for Intel Skylake CPUs. This can give up to a 4x speed improvement as compared to AVX2.
-See [here](https://github.com/klauspost/reedsolomon#performance-on-avx512) for more details.
-
-## December 18, 2018
-
-Assembly code for ppc64le has been contributed, this boosts performance by about 10x on this platform.
-
-## November 18, 2017
-
-Added [WithAutoGoroutines](https://godoc.org/github.com/klauspost/reedsolomon#WithAutoGoroutines) which will attempt 
-to calculate the optimal number of goroutines to use based on your expected shard size and detected CPU.
-
-## October 1, 2017
-
-* [Cauchy Matrix](https://godoc.org/github.com/klauspost/reedsolomon#WithCauchyMatrix) is now an option. 
-Thanks to [templexxx](https://github.com/templexxx) for the basis of this.
-
-* Default maximum number of [goroutines](https://godoc.org/github.com/klauspost/reedsolomon#WithMaxGoroutines) 
-has been increased for better multi-core scaling.
-
-* After several requests the Reconstruct and ReconstructData now slices of zero length but sufficient capacity to 
-be used instead of allocating new memory.
-
-## August 26, 2017
-
-*  The [`Encoder()`](https://godoc.org/github.com/klauspost/reedsolomon#Encoder) now contains an `Update` 
-function contributed by [chenzhongtao](https://github.com/chenzhongtao).
-
-* [Frank Wessels](https://github.com/fwessels) kindly contributed ARM 64 bit assembly, 
-which gives a huge performance boost on this platform.
-
-## July 20, 2017
-
-`ReconstructData` added to [`Encoder`](https://godoc.org/github.com/klauspost/reedsolomon#Encoder) interface. 
-This can cause compatibility issues if you implement your own Encoder. A simple workaround can be added:
-
-```Go
-func (e *YourEnc) ReconstructData(shards [][]byte) error {
-	return ReconstructData(shards)
-}
-```
-
-You can of course also do your own implementation. 
-The [`StreamEncoder`](https://godoc.org/github.com/klauspost/reedsolomon#StreamEncoder) 
-handles this without modifying the interface. 
-This is a good lesson on why returning interfaces is not a good design.
-
-</details>
-
 # Usage
 
 This section assumes you know the basics of Reed-Solomon encoding. 
@@ -224,7 +138,7 @@ You might have a large slice of data.
 To help you split this, there are some helper functions that can split and join a single byte slice.
 
 ```Go
-   bigfile, _ := ioutil.Readfile("myfile.data")
+   bigfile, _ := os.Readfile("myfile.data")
    
    // Split the file
    split, err := enc.Split(bigfile)
@@ -247,8 +161,8 @@ For AMD64 aligned inputs can make a big speed difference.
 This is an example of the speed difference when inputs are unaligned/aligned:
 
 ```
-BenchmarkEncode100x20x10000-32    	    7058	    172648 ns/op	6950.57 MB/s
-BenchmarkEncode100x20x10000-32    	    8406	    137911 ns/op	8701.24 MB/s
+BenchmarkEncodeUnaligned100x20x10000-32    	  100198	     36085 ns/op	33254.75 MB/s
+BenchmarkEncodeAligned100x20x10000-32      	  102711	     35207 ns/op	34084.15 MB/s
 ```
 
 This is mostly the case when dealing with odd-sized shards. 
@@ -305,6 +219,142 @@ func test() {
     // parity now contains parity, as if all data was sent in one call.
 }
 ```
+
+# Progressive decoding
+
+For advanced use cases, you can progressively decode missing shards (data or parity) using `DecodeIdx`. 
+This allows you to:
+
+* Reconstruct shards from multiple sources arriving at different times
+* Merge partial reconstructions from different nodes in a distributed system
+* Incrementally add input shards as they become available
+
+To access progressive decoding, cast your encoder to the `Extensions` interface:
+
+```Go
+// Cast to Extensions interface
+ext := enc.(reedsolomon.Extensions)
+```
+
+## Basic Usage
+
+`DecodeIdx` works with three parameters:
+* `dst [][]byte` - Destination slices for reconstructed data (pre-allocated, initially zeroed)
+* `expectInput []bool` - Which shards you expect to receive (true = expected)
+* `input [][]byte` - The actual input shards for this call
+
+<details>
+
+<summary>Click to see example</summary>
+
+```Go
+func doReconstruct() {
+	// Create encoder:
+	enc, _ := reedsolomon.New(5, 3)
+	ext := enc.(reedsolomon.Extensions)
+
+	// Set up reconstruction - we want to reconstruct shards 1 and 4
+	dst := make([][]byte, 5+3)
+	dst[1] = make([]byte, shardSize) // Will reconstruct shard 1
+	dst[4] = make([]byte, shardSize) // Will reconstruct shard 4
+
+	// Mark which shards we expect to receive
+	expectInput := []bool{
+		0: true,
+		1: false, // Reconstructing this shard.
+		2: true,
+		3: true,
+		4: false, // Reconstructing this shard. 
+		5: true,
+		6: true,
+		7: false, // We only need to supply 6 shards, so we skip this.
+	}
+
+	// First call - provide some shards
+	input1 := make([][]byte, 5+3)
+	input1[0] = shard0data
+	input1[2] = shard2data
+
+	err := ext.DecodeIdx(dst, expectInput, input1)
+
+	// Second call - provide remaining shards
+	input2 := make([][]byte, 5+3)
+	input2[3] = shard3data
+	input2[5] = shard5data
+	input2[6] = shard6data
+
+	err = ext.DecodeIdx(dst, expectInput, input2)
+	// dst[1] and dst[4] now contain the reconstructed data
+}
+```
+
+</details>
+
+## Merging Partial DecodeIdx Results
+
+You can also merge partial reconstructions from different nodes using merge mode (`expectInput == nil`):
+
+<details>
+
+<summary>Click to see example</summary>
+
+```Go
+func progressiveReconstruct() {
+    // Create encoder: 5 data + 3 parity = 8 total shards
+    enc, _ := reedsolomon.New(5, 3)
+    ext := enc.(reedsolomon.Extensions)
+
+    // Assume we lost shards 1 and 3, need to reconstruct them
+    dst1 := make([][]byte, 8)
+    dst1[1] = make([]byte, shardSize)  // Reconstruct shard 1
+    dst1[3] = make([]byte, shardSize)  // Reconstruct shard 3
+
+    // We need 5 valid shards total - mark which ones we expect
+    expectInput := make([]bool, 8)
+    expectInput[0] = true  // Have shard 0
+    expectInput[2] = true  // Have shard 2
+    expectInput[4] = true  // Have shard 4
+    expectInput[5] = true  // Have shard 5 (parity)
+    expectInput[6] = true  // Have shard 6 (parity)
+
+    // First source provides shards 0, 2
+    input1 := make([][]byte, 8)
+    input1[0] = availableShards[0]
+    input1[2] = availableShards[2]
+    ext.DecodeIdx(dst1, expectInput, input1)
+
+    // Second source provides shard 4, 5 and 6
+    dst2 := make([][]byte, 8)
+    dst2[1] = make([]byte, shardSize)  // Reconstruct shard 1
+    dst2[3] = make([]byte, shardSize)  // Reconstruct shard 3
+
+    input2 := make([][]byte, 8)
+    input2[4] = availableShards[4]
+    input2[5] = availableShards[5]
+    input2[6] = availableShards[6]
+    ext.DecodeIdx(dst2, expectInput, input2)
+
+    // Merge the dst2 partial result into dst1
+	// These can come from different machines.
+    ext.DecodeIdx(dst1, nil, dst2)
+
+    // dst1[1] and dst1[3] now contain the reconstructed data
+}
+```
+</details>
+
+
+## Important Notes
+
+* **Consistency**: `expectInput` must be the same across all calls for a reconstruction
+* **Completeness**: You must provide exactly the shards marked in `expectInput`, one time each
+* **Automatic shard selection**: When more than `dataShards` positions are marked as `true` in `expectInput`, only the first `dataShards` will be used for reconstruction.
+* **Size matching**: All shards must be the same size
+* **Zero initialization**: Destination shards should start as zeros on the first call
+
+Progressive decoding is particularly useful for distributed storage systems, network reconstruction scenarios, and cases where input data arrives incrementally.
+
+While this can be used for regular reconstruction, typically that will be slightly faster and easier to use.
 
 # Streaming/Merging
 
@@ -403,6 +453,10 @@ This allows encoding up to 65536 shards (data+parity) with the following limitat
 * The shard size *must*  each be a multiple of 64 bytes.
 * Each buffer should have the same number of bytes.
 * Even the last shard must be rounded up to the block size.
+* Let `m` be the number of recovery pieces rounded up to a power of two.
+  Then `roundUp(data, m) + m` must fit the field, meaning 65536 for GF16 and 256 for GF8.
+  `New` returns `ErrInvShardCombo` otherwise; reducing the recovery piece count to a
+  power of two, or reducing the data piece count, resolves it.
 
 |                 | Regular | Leopard |
 |-----------------|---------|---------|
@@ -441,32 +495,31 @@ To enable Leopard GF8 mode use `WithLeopardGF(true)`.
 Benchmark Encoding and Reconstructing *1KB* shards with variable number of shards.
 All implementation use inversion cache when available.
 Speed is total shard size for each operation. Data shard throughput is speed/2.
-AVX2 is used.
 
-| Encoder      | Shards      | Encode         | Recover All  | Recover One    |
-|--------------|-------------|----------------|--------------|----------------|
-| Cauchy       | 4+4         | 23076.83 MB/s  | 5444.02 MB/s | 10834.67 MB/s  |
-| Cauchy       | 8+8         | 15206.87 MB/s  | 4223.42 MB/s | 16181.62  MB/s |
-| Cauchy       | 16+16       | 7427.47 MB/s   | 3305.84 MB/s | 22480.41  MB/s |
-| Cauchy       | 32+32       | 3785.64 MB/s   | 2300.07 MB/s | 26181.31  MB/s |
-| Cauchy       | 64+64       | 1911.93 MB/s   | 1368.51 MB/s | 27992.93 MB/s  |
-| Cauchy       | 128+128     | 963.83 MB/s    | 1327.56 MB/s | 32866.86 MB/s  |
-| Leopard GF8  | 4+4         | 17061.28 MB/s  | 3099.06 MB/s | 4096.78 MB/s   |
-| Leopard GF8  | 8+8         | 10546.67 MB/s  | 2925.92 MB/s | 3964.00 MB/s   |
-| Leopard GF8  | 16+16       | 10961.37  MB/s | 2328.40 MB/s | 3110.22 MB/s   |
-| Leopard GF8  | 32+32       | 7111.47 MB/s   | 2374.61 MB/s | 3220.75 MB/s   |
-| Leopard GF8  | 64+64       | 7468.57 MB/s   | 2055.41 MB/s | 3061.81 MB/s   |
-| Leopard GF8  | 128+128     | 5479.99 MB/s   | 1953.21 MB/s | 2815.15 MB/s   |
-| Leopard GF16 | 256+256     | 6158.66 MB/s   | 454.14 MB/s  | 506.70 MB/s    |
-| Leopard GF16 | 512+512     | 4418.58 MB/s   | 685.75 MB/s  | 801.63 MB/s    |
-| Leopard GF16 | 1024+1024   | 4778.05 MB/s   | 814.51 MB/s  | 1080.19 MB/s   |
-| Leopard GF16 | 2048+2048   | 3417.05 MB/s   | 911.64 MB/s  | 1179.48 MB/s   |
-| Leopard GF16 | 4096+4096   | 3209.41 MB/s   | 729.13 MB/s  | 1135.06 MB/s   |
-| Leopard GF16 | 8192+8192   | 2034.11 MB/s   | 604.52 MB/s  | 842.13 MB/s    |
-| Leopard GF16 | 16384+16384 | 1525.88 MB/s   | 486.74 MB/s  | 750.01 MB/s    |
-| Leopard GF16 | 32768+32768 | 1138.67 MB/s   | 482.81 MB/s  | 712.73 MB/s    |
+| Encoder      | Shards      | Encode          | Recover All   | Recover One     |
+|--------------|-------------|-----------------|---------------|-----------------|
+| Cauchy       | 4+4         | 59636.23 MB/s   | 9494.17 MB/s  | 21352.14 MB/s   |
+| Cauchy       | 8+8         | 89924.23 MB/s   | 15361.86 MB/s | 51814.79 MB/s   |
+| Cauchy       | 16+16       | 11599.80 MB/s   | 7232.95 MB/s  | 51413.06 MB/s   |
+| Cauchy       | 32+32       | 6060.57 MB/s    | 4731.84 MB/s  | 62880.86 MB/s   |
+| Cauchy       | 64+64       | 3099.28 MB/s    | 2746.79 MB/s  | 72923.38 MB/s   |
+| Cauchy       | 128+128     | 1576.93 MB/s    | 1472.20 MB/s  | 82504.67 MB/s   |
+| Leopard GF8  | 4+4         | 55138.94 MB/s   | 7695.13 MB/s  | 12775.18 MB/s   |
+| Leopard GF8  | 8+8         | 52264.75 MB/s   | 9425.42 MB/s  | 13794.19 MB/s   |
+| Leopard GF8  | 16+16       | 64844.90 MB/s   | 7709.28 MB/s  | 10713.69 MB/s   |
+| Leopard GF8  | 32+32       | 39757.60 MB/s   | 7671.30 MB/s  | 9575.71 MB/s    |
+| Leopard GF8  | 64+64       | 40143.15 MB/s   | 6733.38 MB/s  | 9210.23 MB/s    |
+| Leopard GF8  | 128+128     | 30116.72 MB/s   | 5937.93 MB/s  | 8806.07 MB/s    |
+| Leopard GF16 | 256+256     | 27153.59 MB/s   | 1187.09 MB/s  | 1269.02 MB/s    |
+| Leopard GF16 | 512+512     | 22315.40 MB/s   | 1888.36 MB/s  | 2136.33 MB/s    |
+| Leopard GF16 | 1024+1024   | 19596.76 MB/s   | 2466.09 MB/s  | 3068.25 MB/s    |
+| Leopard GF16 | 2048+2048   | 15700.86 MB/s   | 3003.09 MB/s  | 4048.59 MB/s    |
+| Leopard GF16 | 4096+4096   | 15134.19 MB/s   | 3190.63 MB/s  | 4524.92 MB/s    |
+| Leopard GF16 | 8192+8192   | 13246.07 MB/s   | 3067.94 MB/s  | 4062.52 MB/s    |
+| Leopard GF16 | 16384+16384 | 8403.47 MB/s    | 1837.53 MB/s  | 2744.81 MB/s    |
+| Leopard GF16 | 32768+32768 | 5558.16 MB/s    | 1317.53 MB/s  | 1958.46 MB/s    |
 
-"Traditional" encoding is faster until somewhere between 16 and 32 shards.
+"Traditional" encoding is faster until somewhere between 8 and 16 shards.
 Leopard provides fast encoding in all cases, but shows a significant overhead for reconstruction.
 
 Calculating the reconstruction matrix takes a significant amount of computation. 
@@ -479,14 +532,14 @@ Performance depends mainly on the number of parity shards.
 In rough terms, doubling the number of parity shards will double the encoding time.
 
 Here are the throughput numbers with some different selections of data and parity shards. 
-For reference each shard is 1MB random data, and 16 CPU cores are used for encoding.
+For reference each shard is 1MB random data, and 32 threads are used for encoding.
 
-| Data | Parity | Go MB/s | SSSE3 MB/s | AVX2 MB/s |
-|------|--------|---------|------------|-----------|
-| 5    | 2      | 20,772  | 66,355     | 108,755   |
-| 8    | 8      | 6,815   | 38,338     | 70,516    |
-| 10   | 4      | 9,245   | 48,237     | 93,875    |
-| 50   | 20     | 2,063   | 12,130     | 22,828    |
+| Data | Parity | Go MB/s | SSSE3 MB/s | AVX2 MB/s | GFNI MB/s |
+|------|--------|---------|------------|-----------|-----------|
+| 5    | 2      | 40,690  | 97,827     | 202,283   | 241,747   |
+| 8    | 8      | 14,244  | 62,412     | 128,343   | 271,680   |
+| 10   | 4      | 17,999  | 80,093     | 152,673   | 273,628   |
+| 50   | 20     | 3,520   | 24,184     | 44,734    | 47,706    |
 
 The throughput numbers here is the size of the encoded data and parity shards.
 
@@ -494,20 +547,20 @@ If `runtime.GOMAXPROCS()` is set to a value higher than 1,
 the encoder will use multiple goroutines to perform the calculations in `Verify`, `Encode` and `Reconstruct`.
 
 
-Benchmarking `Reconstruct()` followed by a `Verify()` (=`all`) versus just calling `ReconstructData()` (=`data`) gives the following result:
+Benchmarking `Reconstruct()` (=`all`) versus just calling `ReconstructData()` (=`data`) gives the following result:
 ```
-benchmark                            all MB/s     data MB/s    speedup
-BenchmarkReconstruct10x2x10000-8     2011.67      10530.10     5.23x
-BenchmarkReconstruct50x5x50000-8     4585.41      14301.60     3.12x
-BenchmarkReconstruct10x2x1M-8        8081.15      28216.41     3.49x
-BenchmarkReconstruct5x2x1M-8         5780.07      28015.37     4.85x
-BenchmarkReconstruct10x4x1M-8        4352.56      14367.61     3.30x
-BenchmarkReconstruct50x20x1M-8       1364.35      4189.79      3.07x
-BenchmarkReconstruct10x4x16M-8       1484.35      5779.53      3.89x
+benchmark                              all MB/s       data MB/s      speedup
+BenchmarkReconstruct10x2x10000-32      122764.16      110366.81      0.90x
+BenchmarkReconstruct50x5x50000-32      116532.21      115657.88      0.99x
+BenchmarkReconstruct10x2x1M-32         269362.91      271178.89      1.01x
+BenchmarkReconstruct5x2x1M-32          236882.30      244961.33      1.03x
+BenchmarkReconstruct10x4x1M-32         298882.25      308258.61      1.03x
+BenchmarkReconstruct50x20x1M-32         75888.83       76367.32      1.01x
+BenchmarkReconstruct10x4x16M-32         62017.48       63305.76      1.02x
 ```
 
 The package will use [GFNI](https://en.wikipedia.org/wiki/AVX-512#GFNI) instructions combined with AVX512 when these are available.
-This further improves speed by up to 3x over AVX2 code paths.
+This further improves speed by up to 2x over AVX2 code paths.
 
 ## ARM64 NEON
 
@@ -534,6 +587,21 @@ BenchmarkGaloisXor128K-160     862.02       7905.00      9.17x
 BenchmarkGaloisXor1M-160       784.60       6296.65      8.03x
 ```
 
+# Legal
+
+> None of section below is legal advice. Seek your own legal counsel.
+> As stated by the [LICENSE](LICENSE) the authors will not be held reliable for any use of this library.
+> Users are encouraged to independently verify they comply with all legal requirements. 
+
+As can be seen in [recent news](https://www.datanami.com/2023/10/16/cloudera-hit-with-240-million-judgement-over-erasure-coding/)
+there has been lawsuits related to possible patents of aspects of erasure coding functionality.
+
+As a possible mitigation it is possible to use the tag `nopshufb` when compiling any code which includes this package.
+This will remove all inclusion and use of `PSHUFB` and equivalent on other platforms.
+
+This is done by adding `-tags=nopshufb` to `go build` and similar commands that produce binary output.
+
+The removed code may not be infringing and even after `-tags=nopshufb` there may still be infringing code left. 
 
 # Links
 * [Backblaze Open Sources Reed-Solomon Erasure Coding Source Code](https://www.backblaze.com/blog/reed-solomon/).
@@ -543,8 +611,9 @@ BenchmarkGaloisXor1M-160       784.60       6296.65      8.03x
 * [Reed-Solomon Erasure Coding in Haskell](https://github.com/NicolasT/reedsolomon). Haskell port of the package with similar performance.
 * [reed-solomon-erasure](https://github.com/darrenldl/reed-solomon-erasure). Compatible Rust implementation.
 * [go-erasure](https://github.com/somethingnew2-0/go-erasure). A similar library using cgo, slower in my tests.
-* [Screaming Fast Galois Field Arithmetic](http://www.snia.org/sites/default/files2/SDC2013/presentations/NewThinking/EthanMiller_Screaming_Fast_Galois_Field%20Arithmetic_SIMD%20Instructions.pdf). Basis for SSE3 optimizations.
+* [Screaming Fast Galois Field Arithmetic](https://www.snia.org/sites/default/files/files2/files2/SDC2013/presentations/NewThinking/EthanMiller_Screaming_Fast_Galois_Field%20Arithmetic_SIMD%20Instructions.pdf). Basis for SSE3 optimizations.
 * [Leopard-RS](https://github.com/catid/leopard) C library used as basis for GF16 implementation.
+* [reed-solomon-simd](https://github.com/AndersTrier/reed-solomon-simd) Leopard-RS Rust implementation.
 
 # License
 
