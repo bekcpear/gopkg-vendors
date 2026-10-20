@@ -7,30 +7,13 @@
 # 5. optional 'skipver' takes an ERE pattern; tag versions matching it (both
 #    upstream tags and local vendor tags) are ignored when finding the latest
 LIST="
-    module: act
-    source: github
-      path: nektos/act
-
     module: bark-server
     source: github
       path: Finb/bark-server
 
-    module: dendrite
-    source: github
-      path: matrix-org/dendrite
-
-    module: filebrowser
-    source: github
-      path: filebrowser/filebrowser
-
     module: headscale
     source: github
       path: juanfont/headscale
-
-    module: keybase
-    source: github
-      path: keybase/client
-   subpath: go
 
     module: tailscale
     source: github
