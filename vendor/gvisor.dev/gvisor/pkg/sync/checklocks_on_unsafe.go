@@ -1,7 +1,8 @@
 // Copyright 2020 The gVisor Authors.
 //
 // Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd.
 
 //go:build checklocks
 // +build checklocks
@@ -87,7 +88,7 @@ func noteUnlock(l unsafe.Pointer) {
 
 func dumpLocks() string {
 	var s strings.Builder
-	locksHeld.Range(func(key, value interface{}) bool {
+	locksHeld.Range(func(key, value any) bool {
 		goid := key.(int64)
 		locks := value.(*gLocks)
 

@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 )
 
 const (
 	// Globals are applicable to all rules and used for general
 	// configuration settings for gosec.
 	Globals = "global"
+	// ExcludeRulesKey is the config key for path-based rule exclusions
+	ExcludeRulesKey = "exclude-rules"
 )
 
 // GlobalOption defines the name of the global options
@@ -26,7 +27,27 @@ const (
 	Audit GlobalOption = "audit"
 	// NoSecAlternative global option alternative for #nosec directive
 	NoSecAlternative GlobalOption = "#nosec"
+	// ExcludeRules global option for some rules  should not be load
+	ExcludeRules GlobalOption = "exclude"
+	// IncludeRules global option for  should be load
+	IncludeRules GlobalOption = "include"
+	// SSA global option to enable go analysis framework with SSA support
+	SSA GlobalOption = "ssa"
+	// NoSecRequireRules global option requires at least one rule ID in every
+	// #nosec / //gosec:disable annotation. When enabled, naked directives no
+	// longer suppress any findings and an error is reported instead.
+	NoSecRequireRules GlobalOption = "nosec-require-rules"
+	// NoSecRequireJustification global option requires a `-- justification`
+	// in every #nosec / //gosec:disable annotation. When enabled, directives
+	// without a justification no longer suppress any findings and an error is
+	// reported instead.
+	NoSecRequireJustification GlobalOption = "nosec-require-justification"
 )
+
+// NoSecTag returns the tag used to disable gosec for a line of code.
+func NoSecTag(tag string) string {
+	return fmt.Sprintf("%s%s", "#", tag)
+}
 
 // Config is used to provide configuration and customization to each of the rules.
 type Config map[string]interface{}
@@ -60,7 +81,7 @@ func (c Config) convertGlobals() {
 // should be used with io.Reader to load configuration from
 // file or from string etc.
 func (c Config) ReadFrom(r io.Reader) (int64, error) {
-	data, err := ioutil.ReadAll(r)
+	data, err := io.ReadAll(r)
 	if err != nil {
 		return int64(len(data)), err
 	}
@@ -85,7 +106,7 @@ func (c Config) WriteTo(w io.Writer) (int64, error) {
 func (c Config) Get(section string) (interface{}, error) {
 	settings, found := c[section]
 	if !found {
-		return nil, fmt.Errorf("Section %s not in configuration", section)
+		return nil, fmt.Errorf("section %s not in configuration", section)
 	}
 	return settings, nil
 }
@@ -124,4 +145,39 @@ func (c Config) IsGlobalEnabled(option GlobalOption) (bool, error) {
 		return false, err
 	}
 	return (value == "true" || value == "enabled"), nil
+}
+
+// GetExcludeRules retrieves the path-based exclusion rules from the configuration.
+// Returns nil if no exclusion rules are configured.
+func (c Config) GetExcludeRules() ([]PathExcludeRule, error) {
+	if c == nil {
+		return nil, nil
+	}
+
+	rawRules, exists := c[ExcludeRulesKey]
+	if !exists {
+		return nil, nil
+	}
+
+	// The config is unmarshaled as map[string]interface{}, so we need to
+	// re-marshal and unmarshal to get the proper typed struct
+	rulesJSON, err := json.Marshal(rawRules)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal exclude-rules: %w", err)
+	}
+
+	var rules []PathExcludeRule
+	if err := json.Unmarshal(rulesJSON, &rules); err != nil {
+		return nil, fmt.Errorf("failed to parse exclude-rules: %w", err)
+	}
+
+	return rules, nil
+}
+
+// SetExcludeRules sets the path-based exclusion rules in the configuration.
+func (c Config) SetExcludeRules(rules []PathExcludeRule) {
+	if c == nil {
+		return
+	}
+	c[ExcludeRulesKey] = rules
 }

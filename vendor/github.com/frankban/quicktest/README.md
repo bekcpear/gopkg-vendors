@@ -1,11 +1,11 @@
-[![GoDoc](https://godoc.org/github.com/frankban/quicktest?status.svg)](https://godoc.org/github.com/frankban/quicktest)
+[![Go Reference](https://pkg.go.dev/badge/github.com/frankban/quicktest.svg)](https://pkg.go.dev/github.com/frankban/quicktest#section-documentation)
 [![Build Status](https://github.com/frankban/quicktest/actions/workflows/ci.yaml/badge.svg)](https://github.com/frankban/quicktest/actions/workflows/ci.yaml)
 
 [//]: # (Generated with: godocdown -template=.godocdown.template -o README.md)
 
-# quicktest
+### quicktest
 
-`go get github.com/frankban/quicktest`
+`go get github.com/frankban/quicktest@latest`
 
 Package quicktest provides a collection of Go helpers for writing tests.
 
@@ -18,7 +18,12 @@ instance:
         t.Run("numbers", func(t *testing.T) {
             c := qt.New(t)
             numbers, err := somepackage.Numbers()
+            c.Assert(err, qt.IsNil)
             c.Assert(numbers, qt.DeepEquals, []int{42, 47})
+        })
+        t.Run("bad wolf error", func(t *testing.T) {
+            c := qt.New(t)
+            numbers, err := somepackage.Numbers()
             c.Assert(err, qt.ErrorMatches, "bad wolf")
         })
         t.Run("nil", func(t *testing.T) {
@@ -27,7 +32,6 @@ instance:
             c.Assert(got, qt.IsNil, qt.Commentf("value: %v", somepackage.Value))
         })
     }
-
 
 ### Assertions
 
@@ -53,7 +57,6 @@ ErrorMatches, IsNil and others. More can be added by implementing the Checker
 interface. Below, we list the checkers implemented by the package in
 alphabetical order.
 
-
 ### All
 
 All returns a Checker that uses the given checker to check elements of slice or
@@ -67,7 +70,6 @@ For example:
 
 See also Any and Contains.
 
-
 ### Any
 
 Any returns a Checker that uses the given checker to check elements of a slice
@@ -80,7 +82,6 @@ For example:
 
 See also All and Contains.
 
-
 ### CmpEquals
 
 CmpEquals checks equality of two arbitrary values according to the provided
@@ -91,7 +92,6 @@ Example calls:
 
     c.Assert(list, qt.CmpEquals(cmpopts.SortSlices), []int{42, 47})
     c.Assert(got, qt.CmpEquals(), []int{42, 47}) // Same as qt.DeepEquals.
-
 
 ### CodecEquals
 
@@ -115,7 +115,6 @@ using CmpEquals(opts) to perform the check.
 
 See JSONEquals for an example of this in use.
 
-
 ### Contains
 
 Contains checks that a map, slice, array or string contains a value. It's the
@@ -128,7 +127,6 @@ For example:
     c.Assert("hello world", qt.Contains, "world")
     c.Assert([]int{3,5,7,99}, qt.Contains, 7)
 
-
 ### ContentEquals
 
 ContentEquals is is like DeepEquals but any slices in the compared values will
@@ -137,7 +135,6 @@ be sorted before being compared.
 For example:
 
     c.Assert([]string{"c", "a", "b"}, qt.ContentEquals, []string{"a", "b", "c"})
-
 
 ### DeepEquals
 
@@ -149,7 +146,6 @@ required, use CmpEquals (see below).
 Example call:
 
     c.Assert(got, qt.DeepEquals, []int{42, 47})
-
 
 ### Equals
 
@@ -164,7 +160,6 @@ Note that the following will fail:
     c.Assert((*sometype)(nil), qt.Equals, nil)
 
 Use the IsNil checker below for this kind of nil check.
-
 
 ### ErrorAs
 
@@ -182,7 +177,6 @@ For instance:
         c.Assert(pathError.Path, Equals, "some_path")
     }
 
-
 ### ErrorIs
 
 ErrorIs checks that the error is or wraps a specific error value. This is
@@ -191,7 +185,6 @@ analogous to calling errors.Is.
 For instance:
 
     c.Assert(err, qt.ErrorIs, os.ErrNotExist)
-
 
 ### ErrorMatches
 
@@ -202,7 +195,6 @@ For instance:
 
     c.Assert(err, qt.ErrorMatches, `bad wolf .*`)
 
-
 ### HasLen
 
 HasLen checks that the provided value has the given length.
@@ -211,7 +203,6 @@ For instance:
 
     c.Assert([]int{42, 47}, qt.HasLen, 2)
     c.Assert(myMap, qt.HasLen, 42)
-
 
 ### Implements
 
@@ -223,7 +214,6 @@ For instance:
     var rc io.ReadCloser
     c.Assert(myReader, qt.Implements, &rc)
 
-
 ### IsFalse
 
 IsFalse checks that the provided value is false. The value must have a boolean
@@ -233,7 +223,6 @@ For instance:
 
     c.Assert(false, qt.IsFalse)
     c.Assert(IsValid(), qt.IsFalse)
-
 
 ### IsNil
 
@@ -252,7 +241,6 @@ So it's just fine to check an error like this:
 
     c.Assert(err, qt.IsNil)
 
-
 ### IsNotNil
 
 IsNotNil is a Checker checking that the provided value is not nil. IsNotNil is
@@ -261,7 +249,6 @@ the equivalent of qt.Not(qt.IsNil)
 For instance:
 
     c.Assert(got, qt.IsNotNil)
-
 
 ### IsTrue
 
@@ -272,7 +259,6 @@ For instance:
 
     c.Assert(true, qt.IsTrue)
     c.Assert(myBoolean(false), qt.IsTrue)
-
 
 ### JSONEquals
 
@@ -286,7 +272,6 @@ For instance:
 
     c.Assert(`{"First": 47.11}`, qt.JSONEquals, &MyStruct{First: 47.11})
 
-
 ### Matches
 
 Matches checks that a string or result of calling the String method (if the
@@ -297,7 +282,6 @@ For instance:
     c.Assert("these are the voyages", qt.Matches, `these are .*`)
     c.Assert(net.ParseIP("1.2.3.4"), qt.Matches, `1.*`)
 
-
 ### Not
 
 Not returns a Checker negating the given Checker.
@@ -307,7 +291,6 @@ For instance:
     c.Assert(got, qt.Not(qt.IsNil))
     c.Assert(answer, qt.Not(qt.Equals), 42)
 
-
 ### PanicMatches
 
 PanicMatches checks that the provided function panics with a message matching
@@ -316,7 +299,6 @@ the provided regular expression.
 For instance:
 
     c.Assert(func() {panic("bad wolf ...")}, qt.PanicMatches, `bad wolf .*`)
-
 
 ### Satisfies
 
@@ -331,7 +313,6 @@ For instance:
 
     // Check that a floating point number is a not-a-number.
     c.Assert(f, qt.Satisfies, math.IsNaN)
-
 
 ### Deferred Execution
 
@@ -363,4 +344,4 @@ The c.Patch, c.Setenv, c.Unsetenv and c.Mkdir helpers use t.Cleanup for cleaning
 up resources when available, and fall back to Defer otherwise.
 
 For a complete API reference, see the
-[package documentation](https://pkg.go.dev/github.com/frankban/quicktest).
+[package documentation](https://pkg.go.dev/github.com/frankban/quicktest#section-documentation).

@@ -1,0 +1,47 @@
+package taskgroup
+
+// A Throttle rate-limits the number of concurrent goroutines that can execute
+// in parallel to some fixed number.  A zero Throttle is ready for use, but
+// imposes no limit on parallel execution.
+//
+// Note that the [Group.Limit] method creates a throttle automatically.
+// The main reason to create a Throttle explicitly is if you want to share
+// capacity across multiple [Group] values.
+type Throttle struct {
+	adm chan struct{}
+}
+
+// NewThrottle constructs a [Throttle] with a capacity of n goroutines.
+// If n ≤ 0, the resulting Throttle imposes no limit.
+func NewThrottle(n int) Throttle {
+	if n <= 0 {
+		return Throttle{}
+	}
+	return Throttle{adm: make(chan struct{}, n)}
+}
+
+// Limit returns a function that starts each [Task] passed to it in g,
+// respecting the rate limit imposed by t. Each call to Limit yields a fresh
+// start function, and all the functions returned share the capacity of t.
+func (t Throttle) Limit(g *Group) StartFunc {
+	if t.adm == nil {
+		return g.Go
+	}
+	return func(task Task) {
+		t.adm <- struct{}{} // wait for a semaphore slot
+		g.Go(func() error {
+			defer func() { <-t.adm }() // yield a semaphore slot
+			return task()
+		})
+	}
+}
+
+// A StartFunc executes each [Task] passed to it in a [Group].
+type StartFunc func(Task)
+
+// Go is a legibility shorthand for calling s with task.
+func (s StartFunc) Go(task Task) { s(task) }
+
+// Run is a legibility shorthand for calling s with a task that runs f and
+// reports a nil error.
+func (s StartFunc) Run(f func()) { s(noError(f)) }

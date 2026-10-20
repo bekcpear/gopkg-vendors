@@ -15,15 +15,18 @@
 package name
 
 import (
+	// nolint: depguard
+	_ "crypto/sha256" // Recommended by go-digest.
+	// nolint: depguard
+	_ "crypto/sha512" // Needed for sha512 digests.
+	"encoding"
+	"encoding/json"
 	"strings"
+
+	"github.com/opencontainers/go-digest"
 )
 
-const (
-	// These have the form: sha256:<hex string>
-	// TODO(dekkagaijin): replace with opencontainers/go-digest or docker/distribution's validation.
-	digestChars = "sh:0123456789abcdef"
-	digestDelim = "@"
-)
+const digestDelim = "@"
 
 // Digest stores a digest name in a structured form.
 type Digest struct {
@@ -32,8 +35,11 @@ type Digest struct {
 	original string
 }
 
-// Ensure Digest implements Reference
 var _ Reference = (*Digest)(nil)
+var _ encoding.TextMarshaler = (*Digest)(nil)
+var _ encoding.TextUnmarshaler = (*Digest)(nil)
+var _ json.Marshaler = (*Digest)(nil)
+var _ json.Unmarshaler = (*Digest)(nil)
 
 // Context implements Reference.
 func (d Digest) Context() Repository {
@@ -60,8 +66,38 @@ func (d Digest) String() string {
 	return d.original
 }
 
-func checkDigest(name string) error {
-	return checkElement("digest", name, digestChars, 7+64, 7+64)
+// MarshalJSON formats the digest into a string for JSON serialization.
+func (d Digest) MarshalJSON() ([]byte, error) {
+	return json.Marshal(d.String())
+}
+
+// UnmarshalJSON parses a JSON string into a Digest.
+func (d *Digest) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	n, err := NewDigest(s)
+	if err != nil {
+		return err
+	}
+	*d = n
+	return nil
+}
+
+// MarshalText formats the digest into a string for text serialization.
+func (d Digest) MarshalText() ([]byte, error) {
+	return []byte(d.String()), nil
+}
+
+// UnmarshalText parses a text string into a Digest.
+func (d *Digest) UnmarshalText(data []byte) error {
+	n, err := NewDigest(string(data))
+	if err != nil {
+		return err
+	}
+	*d = n
+	return nil
 }
 
 // NewDigest returns a new Digest representing the given name.
@@ -72,11 +108,9 @@ func NewDigest(name string, opts ...Option) (Digest, error) {
 		return Digest{}, newErrBadName("a digest must contain exactly one '@' separator (e.g. registry/repository@digest) saw: %s", name)
 	}
 	base := parts[0]
-	digest := parts[1]
-
-	// Always check that the digest is valid.
-	if err := checkDigest(digest); err != nil {
-		return Digest{}, err
+	dig := parts[1]
+	if err := digest.Digest(dig).Validate(); err != nil {
+		return Digest{}, newErrBadName("%s: %s", err, dig)
 	}
 
 	tag, err := NewTag(base, opts...)
@@ -90,7 +124,7 @@ func NewDigest(name string, opts ...Option) (Digest, error) {
 	}
 	return Digest{
 		Repository: repo,
-		digest:     digest,
+		digest:     dig,
 		original:   name,
 	}, nil
 }

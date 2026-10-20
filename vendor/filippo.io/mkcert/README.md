@@ -62,7 +62,7 @@ sudo pacman -S nss
 sudo zypper install mozilla-nss-tools
 ```
 
-Then you can install using [Linuxbrew](http://linuxbrew.sh/)
+Then you can install using [Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux)
 
 ```
 brew install mkcert
@@ -76,6 +76,12 @@ go build -ldflags "-X main.Version=$(git describe --tags)"
 ```
 
 or use [the pre-built binaries](https://github.com/FiloSottile/mkcert/releases).
+
+```
+curl -JLO "https://dl.filippo.io/mkcert/latest?for=linux/amd64"
+chmod +x mkcert-v*-linux-amd64
+sudo cp mkcert-v*-linux-amd64 /usr/local/bin/mkcert
+```
 
 For Arch Linux users, [`mkcert`](https://www.archlinux.org/packages/community/x86_64/mkcert/) is available on the official Arch Linux repository.
 

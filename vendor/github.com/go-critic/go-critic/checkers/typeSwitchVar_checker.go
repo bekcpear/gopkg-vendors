@@ -5,7 +5,8 @@ import (
 
 	"github.com/go-critic/go-critic/checkers/internal/astwalk"
 	"github.com/go-critic/go-critic/checkers/internal/lintutil"
-	"github.com/go-critic/go-critic/framework/linter"
+	"github.com/go-critic/go-critic/linter"
+
 	"github.com/go-toolsmith/astequal"
 	"github.com/go-toolsmith/astp"
 )
@@ -13,7 +14,7 @@ import (
 func init() {
 	var info linter.CheckerInfo
 	info.Name = "typeSwitchVar"
-	info.Tags = []string{"style"}
+	info.Tags = []string{linter.StyleTag}
 	info.Summary = "Detects type switches that can benefit from type guard clause with variable"
 	info.Before = `
 switch v.(type) {
@@ -74,7 +75,7 @@ func (c *typeSwitchVarChecker) checkTypeSwitch(root *ast.TypeSwitchStmt) {
 		// Create artificial node just for matching.
 		assert1 := ast.TypeAssertExpr{X: expr, Type: clause.List[0]}
 		for _, stmt := range clause.Body {
-			assert2 := lintutil.FindNode(stmt, func(x ast.Node) bool {
+			assert2 := lintutil.FindNode(stmt, nil, func(x ast.Node) bool {
 				return astequal.Node(&assert1, x)
 			})
 			if object == c.ctx.TypesInfo.ObjectOf(identOf(assert2)) {

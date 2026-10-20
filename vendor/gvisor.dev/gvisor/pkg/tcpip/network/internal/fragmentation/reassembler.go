@@ -15,14 +15,22 @@
 package fragmentation
 
 import (
+	"cmp"
 	"math"
-	"sort"
+	"slices"
 
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
+// hole describes a missing or received range in a reassembler.
+//
+// Holes stored in reassembler.holes are protected by that reassembler's mu
+// until release takes exclusive ownership. A hole has no reference to its
+// reassembler, so checklocks cannot name the owning mutex.
+//
+// +stateify savable
 type hole struct {
 	first  uint16
 	last   uint16
@@ -33,17 +41,34 @@ type hole struct {
 	pkt *stack.PacketBuffer
 }
 
+// reassembler holds a packet's fragments until reassembly or release.
+//
+// Fragmentation.release claims exclusive ownership of memSize, holes, and
+// pkt by marking reassembly done under mu. Those cleanup accesses need
+// exceptions because checklocks cannot model the ownership transfer.
+//
+// +stateify savable
 type reassembler struct {
+	// reassemblerEntry is protected by the owning Fragmentation.mu. There
+	// is no reference back to that Fragmentation, so checklocks cannot name
+	// its mutex here.
 	reassemblerEntry
-	id        FragmentID
-	memSize   int
-	proto     uint8
-	mu        sync.Mutex
-	holes     []hole
-	filled    int
+	id FragmentID
+	// +checklocks:mu
+	memSize int
+	// +checklocks:mu
+	proto uint8
+	// mu follows the owning Fragmentation.mu in lock order.
+	mu sync.Mutex `state:"nosave"`
+	// +checklocks:mu
+	holes []hole
+	// +checklocks:mu
+	filled int
+	// +checklocks:mu
 	done      bool
 	createdAt tcpip.MonotonicTime
-	pkt       *stack.PacketBuffer
+	// +checklocks:mu
+	pkt *stack.PacketBuffer
 }
 
 func newReassembler(id FragmentID, clock tcpip.Clock) *reassembler {
@@ -60,6 +85,7 @@ func newReassembler(id FragmentID, clock tcpip.Clock) *reassembler {
 	return r
 }
 
+// +checklocksexclude:r.mu
 func (r *reassembler) process(first, last uint16, more bool, proto uint8, pkt *stack.PacketBuffer) (*stack.PacketBuffer, uint8, bool, int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -101,8 +127,21 @@ func (r *reassembler) process(first, last uint16, more bool, proto uint8, pkt *s
 		}
 
 		holeFound = true
+		// IPv6: rfc8200#section-4.5
+		//  Changed the text to require that IPv6 nodes must not create
+		//  overlapping fragments.  Also, when reassembling an IPv6
+		//  datagram, if one or more its constituent fragments is
+		//  determined to be an overlapping fragment, the entire datagram
+		//  (and any constituent fragments) must be silently discarded.
+		//  Includes a clarification that no ICMP error message should be
+		//  sent if overlapping fragments are received.
 		if currentHole.filled {
+			// Incoming fragment is a subset of an existing fragment.
+			if first != currentHole.first || last != currentHole.last {
+				return nil, 0, false, 0, ErrFragmentOverlap
+			}
 			// Incoming fragment is a duplicate.
+			// Not dropping packet in case of duplicates.
 			continue
 		}
 
@@ -133,7 +172,7 @@ func (r *reassembler) process(first, last uint16, more bool, proto uint8, pkt *s
 			last:   last,
 			filled: true,
 			final:  currentHole.final,
-			pkt:    pkt.IncRef(),
+			pkt:    pkt.Clone(),
 		}
 		r.filled++
 		// For IPv6, it is possible to have different Protocol values between
@@ -148,7 +187,7 @@ func (r *reassembler) process(first, last uint16, more bool, proto uint8, pkt *s
 			if r.pkt != nil {
 				r.pkt.DecRef()
 			}
-			r.pkt = pkt.IncRef()
+			r.pkt = pkt.Clone()
 			r.proto = proto
 		}
 		break
@@ -163,17 +202,18 @@ func (r *reassembler) process(first, last uint16, more bool, proto uint8, pkt *s
 		return nil, 0, false, memConsumed, nil
 	}
 
-	sort.Slice(r.holes, func(i, j int) bool {
-		return r.holes[i].first < r.holes[j].first
+	slices.SortFunc(r.holes, func(a, b hole) int {
+		return cmp.Compare(a.first, b.first)
 	})
 
-	resPkt := r.holes[0].pkt.IncRef()
+	resPkt := r.holes[0].pkt.Clone()
 	for i := 1; i < len(r.holes); i++ {
 		stack.MergeFragment(resPkt, r.holes[i].pkt)
 	}
 	return resPkt, r.proto, true /* done */, memConsumed, nil
 }
 
+// +checklocksexclude:r.mu
 func (r *reassembler) checkDoneOrMark() bool {
 	r.mu.Lock()
 	prev := r.done

@@ -18,7 +18,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/rand"
+	"time"
 
+	"golang.org/x/time/rate"
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sleep"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -29,13 +32,20 @@ import (
 )
 
 // epQueue is a queue of endpoints.
+//
+// +stateify savable
 type epQueue struct {
-	mu   sync.Mutex
-	list endpointList
+	mu epQueueMutex `state:"nosave"`
+
+	// +checklocks:mu
+	list endpointList `state:"nosave"`
 }
 
 // enqueue adds e to the queue if the endpoint is not already on the queue.
-func (q *epQueue) enqueue(e *endpoint) {
+//
+// +checklocksexclude:q.mu
+// +checklocksexclude:e.pendingProcessingMu
+func (q *epQueue) enqueue(e *Endpoint) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	e.pendingProcessingMu.Lock()
@@ -50,7 +60,12 @@ func (q *epQueue) enqueue(e *endpoint) {
 
 // dequeue removes and returns the first element from the queue if available,
 // returns nil otherwise.
-func (q *epQueue) dequeue() *endpoint {
+//
+// The caller must not hold a queued endpoint's pendingProcessingMu. checklocks
+// cannot name that mutex through the endpoint obtained from the queue.
+//
+// +checklocksexclude:q.mu
+func (q *epQueue) dequeue() *Endpoint {
 	q.mu.Lock()
 	if e := q.list.Front(); e != nil {
 		q.list.Remove(e)
@@ -65,6 +80,8 @@ func (q *epQueue) dequeue() *endpoint {
 }
 
 // empty returns true if the queue is empty, false otherwise.
+//
+// +checklocksexclude:q.mu
 func (q *epQueue) empty() bool {
 	q.mu.Lock()
 	v := q.list.Empty()
@@ -73,21 +90,25 @@ func (q *epQueue) empty() bool {
 }
 
 // processor is responsible for processing packets queued to a tcp endpoint.
+//
+// +stateify savable
 type processor struct {
 	epQ              epQueue
-	sleeper          sleep.Sleeper
-	newEndpointWaker sleep.Waker
-	closeWaker       sleep.Waker
-	pauseWaker       sleep.Waker
-	pauseChan        chan struct{}
-	resumeChan       chan struct{}
+	sleeper          sleep.Sleeper `state:"nosave"`
+	newEndpointWaker sleep.Waker   `state:"nosave"`
+	closeWaker       sleep.Waker   `state:"nosave"`
+	pauseWaker       sleep.Waker   `state:"nosave"`
+	pauseChan        chan struct{} `state:"nosave"`
+	resumeChan       chan struct{} `state:"nosave"`
 }
 
 func (p *processor) close() {
 	p.closeWaker.Assert()
 }
 
-func (p *processor) queueEndpoint(ep *endpoint) {
+// +checklocksexclude:p.epQ.mu
+// +checklocksexclude:ep.pendingProcessingMu
+func (p *processor) queueEndpoint(ep *Endpoint) {
 	// Queue an endpoint for processing by the processor goroutine.
 	p.epQ.enqueue(ep)
 	p.newEndpointWaker.Assert()
@@ -97,7 +118,7 @@ func (p *processor) queueEndpoint(ep *endpoint) {
 // of its associated listening endpoint.
 //
 // +checklocks:ep.mu
-func deliverAccepted(ep *endpoint) bool {
+func deliverAccepted(ep *Endpoint) bool {
 	lEP := ep.h.listenEP
 	lEP.acceptMu.Lock()
 
@@ -129,7 +150,10 @@ func deliverAccepted(ep *endpoint) bool {
 
 // handleConnecting is responsible for TCP processing for an endpoint in one of
 // the connecting states.
-func (p *processor) handleConnecting(ep *endpoint) {
+//
+// +checklocksexclude:ep.segmentQueue.mu
+// +checklocksexclude:ep.pendingProcessingMu
+func handleConnecting(ep *Endpoint) {
 	if !ep.TryLock() {
 		return
 	}
@@ -145,7 +169,7 @@ func (p *processor) handleConnecting(ep *endpoint) {
 		ep.mu.Unlock()
 		return
 	}
-	if err := ep.h.processSegments(); err != nil { // +checklocksforce:ep.h.ep.mu
+	if err := ep.h.processSegments(); err != nil {
 		// handshake failed. clean up the tcp endpoint and handshake
 		// state.
 		if lEP := ep.h.listenEP; lEP != nil {
@@ -172,7 +196,9 @@ func (p *processor) handleConnecting(ep *endpoint) {
 
 // handleConnected is responsible for TCP processing for an endpoint in one of
 // the connected states(StateEstablished, StateFinWait1 etc.)
-func (p *processor) handleConnected(ep *endpoint) {
+//
+// +checklocksexclude:ep.segmentQueue.mu
+func handleConnected(ep *Endpoint) {
 	if !ep.TryLock() {
 		return
 	}
@@ -200,7 +226,7 @@ func (p *processor) handleConnected(ep *endpoint) {
 		ep.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
 		return
 	case ep.EndpointState() == StateTimeWait:
-		p.startTimeWait(ep)
+		startTimeWait(ep)
 	}
 	ep.mu.Unlock()
 }
@@ -208,7 +234,7 @@ func (p *processor) handleConnected(ep *endpoint) {
 // startTimeWait starts a new goroutine to handle TIME-WAIT.
 //
 // +checklocks:ep.mu
-func (p *processor) startTimeWait(ep *endpoint) {
+func startTimeWait(ep *Endpoint) {
 	// Disable close timer as we are now entering real TIME_WAIT.
 	if ep.finWait2Timer != nil {
 		ep.finWait2Timer.Stop()
@@ -221,7 +247,9 @@ func (p *processor) startTimeWait(ep *endpoint) {
 
 // handleTimeWait is responsible for TCP processing for an endpoint in TIME-WAIT
 // state.
-func (p *processor) handleTimeWait(ep *endpoint) {
+//
+// +checklocksexclude:ep.segmentQueue.mu
+func handleTimeWait(ep *Endpoint) {
 	if !ep.TryLock() {
 		return
 	}
@@ -249,9 +277,13 @@ func (p *processor) handleTimeWait(ep *endpoint) {
 	ep.mu.Unlock()
 }
 
+var warnRateLimiter = rate.NewLimiter(rate.Every(time.Second), 1)
+
 // handleListen is responsible for TCP processing for an endpoint in LISTEN
 // state.
-func (p *processor) handleListen(ep *endpoint) {
+//
+// +checklocksexclude:ep.segmentQueue.mu
+func handleListen(ep *Endpoint) {
 	if !ep.TryLock() {
 		return
 	}
@@ -270,9 +302,11 @@ func (p *processor) handleListen(ep *endpoint) {
 			break
 		}
 
-		// TODO(gvisor.dev/issue/4690): Better handle errors instead of
-		// silently dropping.
-		_ = ep.handleListenSegment(ep.listenCtx, s)
+		if err := ep.handleListenSegment(ep.listenCtx, s); err != nil {
+			if warnRateLimiter.Allow() {
+				log.Warningf("tcp.Endpoint.handleListenSegment() failed for packet [nic=%d, source=%s, dest=%s, protocol=%d]: %v", s.pkt.NICID, s.pkt.Network().SourceAddress(), s.pkt.Network().DestinationAddress(), s.pkt.NetworkProtocolNumber, err)
+			}
+		}
 		s.DecRef()
 	}
 }
@@ -307,13 +341,13 @@ func (p *processor) start(wg *sync.WaitGroup) {
 				}
 				switch state := ep.EndpointState(); {
 				case state.connecting():
-					p.handleConnecting(ep)
+					handleConnecting(ep)
 				case state.connected() && state != StateTimeWait:
-					p.handleConnected(ep)
+					handleConnected(ep)
 				case state == StateTimeWait:
-					p.handleTimeWait(ep)
+					handleTimeWait(ep)
 				case state == StateListen:
-					p.handleListen(ep)
+					handleListen(ep)
 				case state == StateError || state == StateClose:
 					// Try to redeliver any still queued
 					// packets to another endpoint or send a
@@ -326,9 +360,10 @@ func (p *processor) start(wg *sync.WaitGroup) {
 				default:
 					panic(fmt.Sprintf("unexpected tcp state in processor: %v", state))
 				}
-				// If there are more segments to process then
+				// If there are more segments to process and the
+				// endpoint lock is not held by user then
 				// requeue this endpoint for processing.
-				if !ep.segmentQueue.empty() {
+				if !ep.segmentQueue.empty() && !ep.isOwnedByUser() {
 					p.epQ.enqueue(ep)
 				}
 			}
@@ -354,11 +389,13 @@ func (p *processor) resume() {
 // goroutines do full tcp processing. The processor is selected based on the
 // hash of the endpoint id to ensure that delivery for the same endpoint happens
 // in-order.
+//
+// +stateify savable
 type dispatcher struct {
 	processors []processor
-	wg         sync.WaitGroup
+	wg         sync.WaitGroup `state:"nosave"`
 	hasher     jenkinsHasher
-	mu         sync.Mutex
+	mu         dispatcherMutex `state:"nosave"`
 	// +checklocks:mu
 	paused bool
 	// +checklocks:mu
@@ -373,9 +410,18 @@ func (d *dispatcher) init(rng *rand.Rand, nProcessors int) {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
 	d.closed = false
 	d.processors = make([]processor, nProcessors)
 	d.hasher = jenkinsHasher{seed: rng.Uint32()}
+	d.startLocked()
+}
+
+// +checklocks:d.mu
+func (d *dispatcher) startLocked() {
+	if d.closed {
+		return
+	}
 	for i := range d.processors {
 		p := &d.processors[i]
 		p.sleeper.AddWaker(&p.newEndpointWaker)
@@ -389,6 +435,13 @@ func (d *dispatcher) init(rng *rand.Rand, nProcessors int) {
 		// that results in a heap-allocated function literal.
 		go p.start(&d.wg)
 	}
+}
+
+func (d *dispatcher) start() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.startLocked()
 }
 
 // close closes a dispatcher and its processors.
@@ -408,6 +461,11 @@ func (d *dispatcher) wait() {
 
 // queuePacket queues an incoming packet to the matching tcp endpoint and
 // also queues the endpoint to a processor queue for processing.
+//
+// The caller must not hold the target endpoint's segmentQueue.mu or
+// pendingProcessingMu, or the selected processor's queue mutex. checklocks
+// cannot name these locks through stackEP's interface type and the indexed
+// processor selection.
 func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.TransportEndpointID, clock tcpip.Clock, pkt *stack.PacketBuffer) {
 	d.mu.Lock()
 	closed := d.closed
@@ -417,7 +475,7 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
 		return
 	}
 
-	ep := stackEP.(*endpoint)
+	ep := stackEP.(*Endpoint)
 
 	s, err := newIncomingSegment(id, clock, pkt)
 	if err != nil {
@@ -443,7 +501,12 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
 		return
 	}
 
-	d.selectProcessor(id).queueEndpoint(ep)
+	// Only wakeup the processor if endpoint lock is not held by a user
+	// goroutine as endpoint.UnlockUser will wake up the processor if the
+	// segment queue is not empty.
+	if !ep.isOwnedByUser() {
+		d.selectProcessor(id).queueEndpoint(ep)
+	}
 }
 
 // selectProcessor uses a hash of the transport endpoint ID to queue the
@@ -485,6 +548,8 @@ func (d *dispatcher) resume() {
 }
 
 // jenkinsHasher contains state needed to for a jenkins hash.
+//
+// +stateify savable
 type jenkinsHasher struct {
 	seed uint32
 }
@@ -498,7 +563,7 @@ func (j jenkinsHasher) hash(id stack.TransportEndpointID) uint32 {
 
 	h := jenkins.Sum32(j.seed)
 	h.Write(payload[:])
-	h.Write([]byte(id.LocalAddress))
-	h.Write([]byte(id.RemoteAddress))
+	h.Write(id.LocalAddress.AsSlice())
+	h.Write(id.RemoteAddress.AsSlice())
 	return h.Sum32()
 }

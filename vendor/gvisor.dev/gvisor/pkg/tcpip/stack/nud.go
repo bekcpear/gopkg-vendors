@@ -165,6 +165,8 @@ type ReachabilityConfirmationFlags struct {
 // NUDConfigurations is the NUD configurations for the netstack. This is used
 // by the neighbor cache to operate the NUD state machine on each device in the
 // local network.
+//
+// +stateify savable
 type NUDConfigurations struct {
 	// BaseReachableTime is the base duration for computing the random reachable
 	// time.
@@ -314,26 +316,38 @@ func calcMaxRandomFactor(minRandomFactor float32) float32 {
 	return defaultMaxRandomFactor
 }
 
+// +stateify savable
+type nudStateMu struct {
+	sync.RWMutex `state:"nosave"`
+
+	// +checklocks:RWMutex
+	config NUDConfigurations
+
+	// reachableTime is the duration to wait for a REACHABLE entry to
+	// transition into STALE after inactivity. This value is calculated with
+	// the algorithm defined in RFC 4861 section 6.3.2.
+	//
+	// +checklocks:RWMutex
+	reachableTime time.Duration
+
+	// +checklocks:RWMutex
+	expiration tcpip.MonotonicTime
+	// +checklocks:RWMutex
+	prevBaseReachableTime time.Duration
+	// +checklocks:RWMutex
+	prevMinRandomFactor float32
+	// +checklocks:RWMutex
+	prevMaxRandomFactor float32
+}
+
 // NUDState stores states needed for calculating reachable time.
+//
+// +stateify savable
 type NUDState struct {
 	clock tcpip.Clock
-	rng   *rand.Rand
-
-	mu struct {
-		sync.RWMutex
-
-		config NUDConfigurations
-
-		// reachableTime is the duration to wait for a REACHABLE entry to
-		// transition into STALE after inactivity. This value is calculated with
-		// the algorithm defined in RFC 4861 section 6.3.2.
-		reachableTime time.Duration
-
-		expiration            time.Time
-		prevBaseReachableTime time.Duration
-		prevMinRandomFactor   float32
-		prevMaxRandomFactor   float32
-	}
+	// TODO(b/341946753): Restore when netstack is savable.
+	rng *rand.Rand `state:"nosave"`
+	mu  nudStateMu
 }
 
 // NewNUDState returns new NUDState using c as configuration and the specified
@@ -369,7 +383,7 @@ func (s *NUDState) ReachableTime() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.clock.Now().After(s.mu.expiration) ||
+	if s.clock.NowMonotonic().After(s.mu.expiration) ||
 		s.mu.config.BaseReachableTime != s.mu.prevBaseReachableTime ||
 		s.mu.config.MinRandomFactor != s.mu.prevMinRandomFactor ||
 		s.mu.config.MaxRandomFactor != s.mu.prevMaxRandomFactor {
@@ -398,7 +412,7 @@ func (s *NUDState) ReachableTime() time.Duration {
 //	changes.  In such cases, an implementation SHOULD ensure that a new
 //	random value gets re-computed at least once every few hours.
 //
-// s.mu MUST be locked for writing.
+// +checklocks:s.mu.RWMutex
 func (s *NUDState) recomputeReachableTimeLocked() {
 	s.mu.prevBaseReachableTime = s.mu.config.BaseReachableTime
 	s.mu.prevMinRandomFactor = s.mu.config.MinRandomFactor
@@ -418,5 +432,5 @@ func (s *NUDState) recomputeReachableTimeLocked() {
 		s.mu.reachableTime = time.Duration(reachableTime)
 	}
 
-	s.mu.expiration = s.clock.Now().Add(2 * time.Hour)
+	s.mu.expiration = s.clock.NowMonotonic().Add(2 * time.Hour)
 }

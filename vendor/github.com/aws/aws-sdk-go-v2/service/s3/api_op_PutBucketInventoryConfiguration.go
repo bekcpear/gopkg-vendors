@@ -4,79 +4,108 @@ package s3
 
 import (
 	"context"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	s3cust "github.com/aws/aws-sdk-go-v2/service/s3/internal/customizations"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"github.com/aws/smithy-go/ptr"
 )
 
-// This implementation of the PUT action adds an inventory configuration
+// This implementation of the PUT action adds an S3 Inventory configuration
 // (identified by the inventory ID) to the bucket. You can have up to 1,000
-// inventory configurations per bucket. Amazon S3 inventory generates inventories
-// of the objects in the bucket on a daily or weekly basis, and the results are
-// published to a flat file. The bucket that is inventoried is called the source
-// bucket, and the bucket where the inventory flat file is stored is called the
-// destination bucket. The destination bucket must be in the same Amazon Web
-// Services Region as the source bucket. When you configure an inventory for a
-// source bucket, you specify the destination bucket where you want the inventory
-// to be stored, and whether to generate the inventory daily or weekly. You can
-// also configure what object metadata to include and whether to inventory all
-// object versions or only current versions. For more information, see Amazon S3
-// Inventory
-// (https://docs.aws.amazon.com/AmazonS3/latest/dev/storage-inventory.html) in the
-// Amazon S3 User Guide. You must create a bucket policy on the destination bucket
-// to grant permissions to Amazon S3 to write objects to the bucket in the defined
-// location. For an example policy, see  Granting Permissions for Amazon S3
-// Inventory and Storage Class Analysis
-// (https://docs.aws.amazon.com/AmazonS3/latest/dev/example-bucket-policies.html#example-bucket-policies-use-case-9).
-// To use this operation, you must have permissions to perform the
+// inventory configurations per bucket.
+//
+// Amazon S3 inventory generates inventories of the objects in the bucket on a
+// daily or weekly basis, and the results are published to a flat file. The bucket
+// that is inventoried is called the source bucket, and the bucket where the
+// inventory flat file is stored is called the destination bucket. The destination
+// bucket must be in the same Amazon Web Services Region as the source bucket.
+//
+// When you configure an inventory for a source bucket, you specify the
+// destination bucket where you want the inventory to be stored, and whether to
+// generate the inventory daily or weekly. You can also configure what object
+// metadata to include and whether to inventory all object versions or only current
+// versions. For more information, see [Amazon S3 Inventory]in the Amazon S3 User Guide.
+//
+// You must create a bucket policy on the destination bucket to grant permissions
+// to Amazon S3 to write objects to the bucket in the defined location. For an
+// example policy, see [Granting Permissions for Amazon S3 Inventory and Storage Class Analysis].
+//
+// Directory buckets - For directory buckets, you must make requests for this API
+// operation to the Regional endpoint. These endpoints support path-style requests
+// in the format https://s3express-control.region-code.amazonaws.com/bucket-name .
+// Virtual-hosted-style requests aren't supported. For more information about
+// endpoints in Availability Zones, see [Regional and Zonal endpoints for directory buckets in Availability Zones]in the Amazon S3 User Guide. For more
+// information about endpoints in Local Zones, see [Concepts for directory buckets in Local Zones]in the Amazon S3 User Guide.
+//
+// Permissions To use this operation, you must have permission to perform the
 // s3:PutInventoryConfiguration action. The bucket owner has this permission by
-// default and can grant this permission to others. For more information about
-// permissions, see Permissions Related to Bucket Subresource Operations
-// (https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-with-s3-actions.html#using-with-s3-actions-related-to-bucket-subresources)
-// and Managing Access Permissions to Your Amazon S3 Resources
-// (https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-access-control.html)
-// in the Amazon S3 User Guide. Special Errors
+// default and can grant this permission to others.
 //
-// * HTTP 400 Bad Request Error
+// The s3:PutInventoryConfiguration permission allows a user to create an [S3 Inventory] report
+// that includes all object metadata fields available and to specify the
+// destination bucket to store the inventory. A user with read access to objects in
+// the destination bucket can also access all object metadata fields that are
+// available in the inventory report.
 //
-// *
-// Code: InvalidArgument
+//   - General purpose bucket permissions - The s3:PutInventoryConfiguration
+//     permission is required in a policy. For more information about general purpose
+//     buckets permissions, see [Using Bucket Policies and User Policies]in the Amazon S3 User Guide.
 //
-// * Cause: Invalid Argument
+//   - Directory bucket permissions - To grant access to this API operation, you
+//     must have the s3express:PutInventoryConfiguration permission in an IAM
+//     identity-based policy instead of a bucket policy. For more information about
+//     directory bucket policies and permissions, see [Amazon Web Services Identity and Access Management (IAM) for S3 Express One Zone]in the Amazon S3 User Guide.
 //
-// * HTTP 400 Bad Request
-// Error
+// To restrict access to an inventory report, see [Restricting access to an Amazon S3 Inventory report] in the Amazon S3 User Guide.
+// For more information about the metadata fields available in S3 Inventory, see [Amazon S3 Inventory lists]
+// in the Amazon S3 User Guide. For more information about permissions, see [Permissions related to bucket subresource operations]and [Identity and access management in Amazon S3]
+// in the Amazon S3 User Guide.
 //
-// * Code: TooManyConfigurations
+// HTTP Host header syntax  Directory buckets - The HTTP Host header syntax is
+// s3express-control.region-code.amazonaws.com .
 //
-// * Cause: You are attempting to create a
-// new configuration but have already reached the 1,000-configuration limit.
+// PutBucketInventoryConfiguration has the following special errors:
 //
-// *
-// HTTP 403 Forbidden Error
+// HTTP 400 Bad Request Error  Code: InvalidArgument
 //
-// * Code: AccessDenied
+// Cause: Invalid Argument
 //
-// * Cause: You are not the owner
-// of the specified bucket, or you do not have the s3:PutInventoryConfiguration
-// bucket permission to set the configuration on the bucket.
+// HTTP 400 Bad Request Error  Code: TooManyConfigurations
 //
-// Related Resources
+// Cause: You are attempting to create a new configuration but have already
+// reached the 1,000-configuration limit.
 //
-// *
-// GetBucketInventoryConfiguration
-// (https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketInventoryConfiguration.html)
+// HTTP 403 Forbidden Error  Cause: You are not the owner of the specified bucket,
+// or you do not have the s3:PutInventoryConfiguration bucket permission to set
+// the configuration on the bucket.
 //
-// *
-// DeleteBucketInventoryConfiguration
-// (https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketInventoryConfiguration.html)
+// The following operations are related to PutBucketInventoryConfiguration :
 //
-// *
-// ListBucketInventoryConfigurations
-// (https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBucketInventoryConfigurations.html)
+// [GetBucketInventoryConfiguration]
+//
+// [DeleteBucketInventoryConfiguration]
+//
+// [ListBucketInventoryConfigurations]
+//
+// You must URL encode any signed header values that contain spaces. For example,
+// if your header value is my file.txt , containing two spaces after my , you must
+// URL encode this value to my%20%20file.txt .
+//
+// [Granting Permissions for Amazon S3 Inventory and Storage Class Analysis]: https://docs.aws.amazon.com/AmazonS3/latest/dev/example-bucket-policies.html#example-bucket-policies-use-case-9
+// [Concepts for directory buckets in Local Zones]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-lzs-for-directory-buckets.html
+// [ListBucketInventoryConfigurations]: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBucketInventoryConfigurations.html
+// [S3 Inventory]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage-inventory.html
+// [Restricting access to an Amazon S3 Inventory report]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/example-bucket-policies.html#example-bucket-policies-s3-inventory
+// [Amazon S3 Inventory lists]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage-inventory.html#storage-inventory-contents
+// [Amazon Web Services Identity and Access Management (IAM) for S3 Express One Zone]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-express-security-iam.html
+// [GetBucketInventoryConfiguration]: https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketInventoryConfiguration.html
+// [Amazon S3 Inventory]: https://docs.aws.amazon.com/AmazonS3/latest/dev/storage-inventory.html
+// [Permissions related to bucket subresource operations]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-with-s3-actions.html#using-with-s3-actions-related-to-bucket-subresources
+// [Using Bucket Policies and User Policies]: https://docs.aws.amazon.com/AmazonS3/latest/dev/using-iam-policies.html
+// [DeleteBucketInventoryConfiguration]: https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketInventoryConfiguration.html
+// [Identity and access management in Amazon S3]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-access-control.html
+// [Regional and Zonal endpoints for directory buckets in Availability Zones]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/endpoint-directory-buckets-AZ.html
 func (c *Client) PutBucketInventoryConfiguration(ctx context.Context, params *PutBucketInventoryConfigurationInput, optFns ...func(*Options)) (*PutBucketInventoryConfigurationOutput, error) {
 	if params == nil {
 		params = &PutBucketInventoryConfigurationInput{}
@@ -96,6 +125,17 @@ type PutBucketInventoryConfigurationInput struct {
 
 	// The name of the bucket where the inventory configuration will be stored.
 	//
+	// Directory buckets - When you use this operation with a directory bucket, you
+	// must use path-style requests in the format
+	// https://s3express-control.region-code.amazonaws.com/bucket-name .
+	// Virtual-hosted-style requests aren't supported. Directory bucket names must be
+	// unique in the chosen Zone (Availability Zone or Local Zone). Bucket names must
+	// also follow the format bucket-base-name--zone-id--x-s3 (for example,
+	// DOC-EXAMPLE-BUCKET--usw2-az1--x-s3 ). For information about bucket naming
+	// restrictions, see [Directory bucket naming rules]in the Amazon S3 User Guide
+	//
+	// [Directory bucket naming rules]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/directory-bucket-naming-rules.html
+	//
 	// This member is required.
 	Bucket *string
 
@@ -109,11 +149,22 @@ type PutBucketInventoryConfigurationInput struct {
 	// This member is required.
 	InventoryConfiguration *types.InventoryConfiguration
 
-	// The account ID of the expected bucket owner. If the bucket is owned by a
-	// different account, the request will fail with an HTTP 403 (Access Denied) error.
+	// The account ID of the expected bucket owner. If the account ID that you provide
+	// does not match the actual owner of the bucket, the request fails with the HTTP
+	// status code 403 Forbidden (access denied).
+	//
+	// For directory buckets, this header is not supported in this API operation. If
+	// you specify this header, the request fails with the HTTP status code 501 Not
+	// Implemented .
 	ExpectedBucketOwner *string
 
 	noSmithyDocumentSerde
+}
+
+func (in *PutBucketInventoryConfigurationInput) bindEndpointParams(p *EndpointParameters) {
+
+	p.Bucket = in.Bucket
+	p.UseS3ExpressControlEndpoint = ptr.Bool(true)
 }
 
 type PutBucketInventoryConfigurationOutput struct {
@@ -132,49 +183,26 @@ func (c *Client) addOperationPutBucketInventoryConfigurationMiddlewares(stack *m
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
+	if err = addPutBucketContextMiddleware(stack); err != nil {
 		return err
 	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
+	if err = addIsExpressUserAgent(stack); err != nil {
 		return err
 	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = swapWithCustomHTTPSignerMiddleware(stack, options); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpPutBucketInventoryConfigurationValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opPutBucketInventoryConfiguration(options.Region), middleware.Before); err != nil {
 		return err
 	}
 	if err = addMetadataRetrieverMiddleware(stack); err != nil {
@@ -192,19 +220,29 @@ func (c *Client) addOperationPutBucketInventoryConfigurationMiddlewares(stack *m
 	if err = disableAcceptEncodingGzip(stack); err != nil {
 		return err
 	}
+	if err = s3cust.HandleResponseErrorWith200Status(stack); err != nil {
+		return err
+	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addSerializeImmutableHostnameBucketMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addInterceptors(stack, options); err != nil {
 		return err
 	}
 	return nil
 }
 
-func newServiceMetadataMiddleware_opPutBucketInventoryConfiguration(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "s3",
-		OperationName: "PutBucketInventoryConfiguration",
+func (v *PutBucketInventoryConfigurationInput) bucket() (string, bool) {
+	if v.Bucket == nil {
+		return "", false
 	}
+	return *v.Bucket, true
 }
 
 // getPutBucketInventoryConfigurationBucketMember returns a pointer to string

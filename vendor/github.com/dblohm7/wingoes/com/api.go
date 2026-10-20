@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build windows
+
 package com
 
 import (
@@ -108,7 +110,7 @@ func IsCurrentOSThreadMTA() bool {
 func createInstanceWithCLSCTX[T Object](clsid *CLSID, clsctx coCLSCTX) (T, error) {
 	var t T
 
-	iid := t.GetIID()
+	iid := t.IID()
 	ppunk := NewABIReceiver()
 
 	hr := coCreateInstance(

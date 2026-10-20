@@ -17,13 +17,13 @@ package stack
 import (
 	"fmt"
 
-	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/hash/jenkins"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/ports"
 )
 
+// +stateify savable
 type protocolIDs struct {
 	network   tcpip.NetworkProtocolNumber
 	transport tcpip.TransportProtocolNumber
@@ -31,8 +31,10 @@ type protocolIDs struct {
 
 // transportEndpoints manages all endpoints of a given protocol. It has its own
 // mutex so as to reduce interference between protocols.
+//
+// +stateify savable
 type transportEndpoints struct {
-	mu sync.RWMutex
+	mu transportEndpointsRWMutex `state:"nosave"`
 	// +checklocks:mu
 	endpoints map[TransportEndpointID]*endpointsByNIC
 	// rawEndpoints contains endpoints for raw sockets, which receive all
@@ -83,7 +85,7 @@ func (eps *transportEndpoints) iterEndpointsLocked(id TransportEndpointID, yield
 	// Try to find a match with the id minus the local address.
 	nid := id
 
-	nid.LocalAddress = ""
+	nid.LocalAddress = tcpip.Address{}
 	if ep, ok := eps.endpoints[nid]; ok {
 		if !yield(ep) {
 			return
@@ -92,7 +94,7 @@ func (eps *transportEndpoints) iterEndpointsLocked(id TransportEndpointID, yield
 
 	// Try to find a match with the id minus the remote part.
 	nid.LocalAddress = id.LocalAddress
-	nid.RemoteAddress = ""
+	nid.RemoteAddress = tcpip.Address{}
 	nid.RemotePort = 0
 	if ep, ok := eps.endpoints[nid]; ok {
 		if !yield(ep) {
@@ -101,7 +103,7 @@ func (eps *transportEndpoints) iterEndpointsLocked(id TransportEndpointID, yield
 	}
 
 	// Try to find a match with only the local port.
-	nid.LocalAddress = ""
+	nid.LocalAddress = tcpip.Address{}
 	if ep, ok := eps.endpoints[nid]; ok {
 		if !yield(ep) {
 			return
@@ -134,11 +136,12 @@ func (eps *transportEndpoints) findEndpointLocked(id TransportEndpointID) *endpo
 	return matchedEP
 }
 
+// +stateify savable
 type endpointsByNIC struct {
 	// seed is a random secret for a jenkins hash.
 	seed uint32
 
-	mu sync.RWMutex
+	mu endpointsByNICRWMutex `state:"nosave"`
 	// +checklocks:mu
 	endpoints map[tcpip.NICID]*multiPortEndpoint
 }
@@ -267,6 +270,8 @@ func (epsByNIC *endpointsByNIC) unregisterEndpoint(bindToDevice tcpip.NICID, t T
 // of demultiplexing: first based on the network and transport protocols, then
 // based on endpoints IDs. It should only be instantiated via
 // newTransportDemuxer.
+//
+// +stateify savable
 type transportDemuxer struct {
 	stack *Stack
 
@@ -346,7 +351,7 @@ type multiPortEndpoint struct {
 
 	flags ports.FlagCounter
 
-	mu sync.RWMutex `state:"nosave"`
+	mu multiPortEndpointRWMutex `state:"nosave"`
 	// endpoints stores the transport endpoints in the order in which they
 	// were bound. This is required for UDP SO_REUSEADDR.
 	//
@@ -393,8 +398,8 @@ func (ep *multiPortEndpoint) selectEndpoint(id TransportEndpointID, seed uint32)
 
 	h := jenkins.Sum32(seed)
 	h.Write(payload)
-	h.Write([]byte(id.LocalAddress))
-	h.Write([]byte(id.RemoteAddress))
+	h.Write(id.LocalAddress.AsSlice())
+	h.Write(id.RemoteAddress.AsSlice())
 	hash := h.Sum32()
 
 	idx := reciprocalScale(hash, uint32(len(ep.endpoints)))

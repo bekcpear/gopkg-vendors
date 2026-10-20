@@ -14,10 +14,16 @@
 package stack
 
 // PacketBufferList is a slice-backed list. All operations are O(1) unless
-// otherwise noted. It is optimized to for zero allocations when used with a
-// queueing discipline.
+// otherwise noted.
 //
-// Users should call Init() before using PacketBufferList.
+// Note: this is intentionally backed by a slice, not an intrusive list. We've
+// switched PacketBufferList back-and-forth between intrusive list and
+// slice-backed implementations, and the latter has proven to be preferable:
+//
+//   - Intrusive lists are a refcounting nightmare, as modifying the list
+//     sometimes-but-not-always modifies the list for others.
+//   - The slice-backed implementation has been benchmarked and is slightly more
+//     performant.
 //
 // +stateify savable
 type PacketBufferList struct {
@@ -54,6 +60,18 @@ func (pl *PacketBufferList) Len() int {
 //go:nosplit
 func (pl *PacketBufferList) PushBack(pb *PacketBuffer) {
 	pl.pbs = append(pl.pbs, pb)
+}
+
+// PopFront removes the first element in the list if it exists and returns it.
+//
+//go:nosplit
+func (pl *PacketBufferList) PopFront() *PacketBuffer {
+	if len(pl.pbs) == 0 {
+		return nil
+	}
+	pkt := pl.pbs[0]
+	pl.pbs = pl.pbs[1:]
+	return pkt
 }
 
 // DecRef decreases the reference count on each PacketBuffer

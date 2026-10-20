@@ -17,7 +17,6 @@ package stack
 import (
 	"fmt"
 
-	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
@@ -28,31 +27,39 @@ const (
 	maxPendingPacketsPerResolution = 256
 )
 
+// +stateify savable
 type pendingPacket struct {
 	routeInfo RouteInfo
 	pkt       *PacketBuffer
 }
 
+type packetsPendingLinkResolutionMu struct {
+	packetsPendingLinkResolutionMutex
+
+	// The packets to send once the resolver completes.
+	//
+	// The link resolution channel is used as the key for this map.
+	//
+	// +checklocks:packetsPendingLinkResolutionMutex
+	packets map[<-chan struct{}][]pendingPacket
+
+	// FIFO of channels used to cancel the oldest goroutine waiting for
+	// link-address resolution.
+	//
+	// cancelChans holds the same channels that are used as keys to packets.
+	//
+	// +checklocks:packetsPendingLinkResolutionMutex
+	cancelChans []<-chan struct{}
+}
+
 // packetsPendingLinkResolution is a queue of packets pending link resolution.
 //
 // Once link resolution completes successfully, the packets will be written.
+//
+// +stateify savable
 type packetsPendingLinkResolution struct {
 	nic *nic
-
-	mu struct {
-		sync.Mutex
-
-		// The packets to send once the resolver completes.
-		//
-		// The link resolution channel is used as the key for this map.
-		packets map[<-chan struct{}][]pendingPacket
-
-		// FIFO of channels used to cancel the oldest goroutine waiting for
-		// link-address resolution.
-		//
-		// cancelChans holds the same channels that are used as keys to packets.
-		cancelChans []<-chan struct{}
-	}
+	mu  packetsPendingLinkResolutionMu `state:"nosave"`
 }
 
 func (f *packetsPendingLinkResolution) incrementOutgoingPacketErrors(pkt *PacketBuffer) {
@@ -146,7 +153,7 @@ func (f *packetsPendingLinkResolution) enqueue(r *Route, pkt *PacketBuffer) tcpi
 	packets, ok := f.mu.packets[ch]
 	packets = append(packets, pendingPacket{
 		routeInfo: routeInfo,
-		pkt:       pkt.IncRef(),
+		pkt:       pkt.Clone(),
 	})
 
 	if len(packets) > maxPendingPacketsPerResolution {
@@ -180,6 +187,8 @@ func (f *packetsPendingLinkResolution) enqueue(r *Route, pkt *PacketBuffer) tcpi
 // newCancelChannelLocked appends the link resolution channel to a FIFO. If the
 // maximum number of pending resolutions is reached, the oldest channel will be
 // removed and its associated pending packets will be returned.
+//
+// +checklocks:f.mu.packetsPendingLinkResolutionMutex
 func (f *packetsPendingLinkResolution) newCancelChannelLocked(newCH <-chan struct{}) []pendingPacket {
 	f.mu.cancelChans = append(f.mu.cancelChans, newCH)
 	if len(f.mu.cancelChans) <= maxPendingResolutions {

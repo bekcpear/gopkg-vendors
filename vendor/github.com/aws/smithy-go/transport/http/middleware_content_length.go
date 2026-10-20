@@ -14,11 +14,14 @@ type ComputeContentLength struct {
 
 // AddComputeContentLengthMiddleware adds ComputeContentLength to the middleware
 // stack's Build step.
+//
+// Deprecated: Content-Length is now set when the request body is set via
+// Request.SetStream, so this middleware is no longer used.
 func AddComputeContentLengthMiddleware(stack *middleware.Stack) error {
 	return stack.Build.Add(&ComputeContentLength{}, middleware.After)
 }
 
-// ID the identifier for the ComputeContentLength
+// ID returns the identifier for the ComputeContentLength.
 func (m *ComputeContentLength) ID() string { return "ComputeContentLength" }
 
 // HandleBuild adds the length of the serialized request to the HTTP header
@@ -44,12 +47,6 @@ func (m *ComputeContentLength) HandleBuild(
 			"failed getting length of request stream, %w", err)
 	} else if ok {
 		req.ContentLength = n
-		if n == 0 {
-			// If the content length could be determined, and the body is empty
-			// the stream must be cleared to prevent unexpected chunk encoding.
-			req, _ = req.SetStream(nil)
-			in.Request = req
-		}
 	}
 
 	return next.HandleBuild(ctx, in)
@@ -65,7 +62,7 @@ func ValidateContentLengthHeader(stack *middleware.Stack) error {
 	return stack.Build.Add(&validateContentLength{}, middleware.After)
 }
 
-// ID the identifier for the ComputeContentLength
+// ID returns the identifier for the ComputeContentLength.
 func (m *validateContentLength) ID() string { return "ValidateContentLength" }
 
 // HandleBuild adds the length of the serialized request to the HTTP header

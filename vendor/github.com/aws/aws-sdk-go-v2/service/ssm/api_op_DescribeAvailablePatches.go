@@ -5,14 +5,14 @@ package ssm
 import (
 	"context"
 	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // Lists all patches eligible to be included in a patch baseline.
+//
+// Currently, DescribeAvailablePatches supports only the Amazon Linux 1, Amazon
+// Linux 2, and Windows Server operating systems.
 func (c *Client) DescribeAvailablePatches(ctx context.Context, params *DescribeAvailablePatchesInput, optFns ...func(*Options)) (*DescribeAvailablePatchesOutput, error) {
 	if params == nil {
 		params = &DescribeAvailablePatchesInput{}
@@ -30,67 +30,98 @@ func (c *Client) DescribeAvailablePatches(ctx context.Context, params *DescribeA
 
 type DescribeAvailablePatchesInput struct {
 
-	// Each element in the array is a structure containing a key-value pair. Windows
-	// Server Supported keys for Windows Server managed node patches include the
-	// following:
+	// Each element in the array is a structure containing a key-value pair.
 	//
-	// * PATCH_SET Sample values: OS | APPLICATION
+	// Windows Server
 	//
-	// * PRODUCT Sample
-	// values: WindowsServer2012 | Office 2010 | MicrosoftDefenderAntivirus
+	// Supported keys for Windows Server managed node patches include the following:
 	//
-	// *
-	// PRODUCT_FAMILY Sample values: Windows | Office
+	//   - PATCH_SET
 	//
-	// * MSRC_SEVERITY Sample values:
-	// ServicePacks | Important | Moderate
+	// Sample values: OS | APPLICATION
 	//
-	// * CLASSIFICATION Sample values:
-	// ServicePacks | SecurityUpdates | DefinitionUpdates
+	//   - PRODUCT
 	//
-	// * PATCH_ID Sample values:
-	// KB123456 | KB4516046
+	// Sample values: WindowsServer2012 | Office 2010 | MicrosoftDefenderAntivirus
 	//
-	// Linux When specifying filters for Linux patches, you must
-	// specify a key-pair for PRODUCT. For example, using the Command Line Interface
-	// (CLI), the following command fails: aws ssm describe-available-patches --filters
-	// Key=CVE_ID,Values=CVE-2018-3615 However, the following command succeeds: aws ssm
-	// describe-available-patches --filters Key=PRODUCT,Values=AmazonLinux2018.03
-	// Key=CVE_ID,Values=CVE-2018-3615 Supported keys for Linux managed node patches
-	// include the following:
+	//   - PRODUCT_FAMILY
 	//
-	// * PRODUCT Sample values: AmazonLinux2018.03 |
-	// AmazonLinux2.0
+	// Sample values: Windows | Office
 	//
-	// * NAME Sample values: kernel-headers | samba-python | php
+	//   - MSRC_SEVERITY
 	//
-	// *
-	// SEVERITY Sample values: Critical | Important | Medium | Low
+	// Sample values: ServicePacks | Important | Moderate
 	//
-	// * EPOCH Sample
-	// values: 0 | 1
+	//   - CLASSIFICATION
 	//
-	// * VERSION Sample values: 78.6.1 | 4.10.16
+	// Sample values: ServicePacks | SecurityUpdates | DefinitionUpdates
 	//
-	// * RELEASE Sample
-	// values: 9.56.amzn1 | 1.amzn2
+	//   - PATCH_ID
 	//
-	// * ARCH Sample values: i686 | x86_64
+	// Sample values: KB123456 | KB4516046
 	//
-	// * REPOSITORY
+	// Linux
+	//
+	// When specifying filters for Linux patches, you must specify a key-pair for
+	// PRODUCT . For example, using the Command Line Interface (CLI), the following
+	// command fails:
+	//
+	//     aws ssm describe-available-patches --filters Key=CVE_ID,Values=CVE-2018-3615
+	//
+	// However, the following command succeeds:
+	//
+	//     aws ssm describe-available-patches --filters
+	//     Key=PRODUCT,Values=AmazonLinux2018.03 Key=CVE_ID,Values=CVE-2018-3615
+	//
+	// Supported keys for Linux managed node patches include the following:
+	//
+	//   - PRODUCT
+	//
+	// Sample values: AmazonLinux2018.03 | AmazonLinux2.0
+	//
+	//   - NAME
+	//
+	// Sample values: kernel-headers | samba-python | php
+	//
+	//   - SEVERITY
+	//
+	// Sample values: Critical | Important | Medium | Low
+	//
+	//   - EPOCH
+	//
+	// Sample values: 0 | 1
+	//
+	//   - VERSION
+	//
+	// Sample values: 78.6.1 | 4.10.16
+	//
+	//   - RELEASE
+	//
+	// Sample values: 9.56.amzn1 | 1.amzn2
+	//
+	//   - ARCH
+	//
+	// Sample values: i686 | x86_64
+	//
+	//   - REPOSITORY
+	//
 	// Sample values: Core | Updates
 	//
-	// * ADVISORY_ID Sample values: ALAS-2018-1058 |
-	// ALAS2-2021-1594
+	//   - ADVISORY_ID
 	//
-	// * CVE_ID Sample values: CVE-2018-3615 | CVE-2020-1472
+	// Sample values: ALAS-2018-1058 | ALAS2-2021-1594
 	//
-	// *
-	// BUGZILLA_ID Sample values: 1463241
+	//   - CVE_ID
+	//
+	// Sample values: CVE-2018-3615 | CVE-2020-1472
+	//
+	//   - BUGZILLA_ID
+	//
+	// Sample values: 1463241
 	Filters []types.PatchOrchestratorFilter
 
 	// The maximum number of patches to return (per page).
-	MaxResults int32
+	MaxResults *int32
 
 	// The token for the next set of items to return. (You received this token from a
 	// previous call.)
@@ -123,43 +154,17 @@ func (c *Client) addOperationDescribeAvailablePatchesMiddlewares(stack *middlewa
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeAvailablePatches(options.Region), middleware.Before); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -171,16 +176,14 @@ func (c *Client) addOperationDescribeAvailablePatchesMiddlewares(stack *middlewa
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addInterceptors(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
-
-// DescribeAvailablePatchesAPIClient is a client that implements the
-// DescribeAvailablePatches operation.
-type DescribeAvailablePatchesAPIClient interface {
-	DescribeAvailablePatches(context.Context, *DescribeAvailablePatchesInput, ...func(*Options)) (*DescribeAvailablePatchesOutput, error)
-}
-
-var _ DescribeAvailablePatchesAPIClient = (*Client)(nil)
 
 // DescribeAvailablePatchesPaginatorOptions is the paginator options for
 // DescribeAvailablePatches
@@ -210,8 +213,8 @@ func NewDescribeAvailablePatchesPaginator(client DescribeAvailablePatchesAPIClie
 	}
 
 	options := DescribeAvailablePatchesPaginatorOptions{}
-	if params.MaxResults != 0 {
-		options.Limit = params.MaxResults
+	if params.MaxResults != nil {
+		options.Limit = *params.MaxResults
 	}
 
 	for _, fn := range optFns {
@@ -223,12 +226,13 @@ func NewDescribeAvailablePatchesPaginator(client DescribeAvailablePatchesAPIClie
 		client:    client,
 		params:    params,
 		firstPage: true,
+		nextToken: params.NextToken,
 	}
 }
 
 // HasMorePages returns a boolean indicating whether more pages are available
 func (p *DescribeAvailablePatchesPaginator) HasMorePages() bool {
-	return p.firstPage || p.nextToken != nil
+	return p.firstPage || (p.nextToken != nil && len(*p.nextToken) != 0)
 }
 
 // NextPage retrieves the next DescribeAvailablePatches page.
@@ -240,8 +244,15 @@ func (p *DescribeAvailablePatchesPaginator) NextPage(ctx context.Context, optFns
 	params := *p.params
 	params.NextToken = p.nextToken
 
-	params.MaxResults = p.options.Limit
+	var limit *int32
+	if p.options.Limit > 0 {
+		limit = &p.options.Limit
+	}
+	params.MaxResults = limit
 
+	optFns = append([]func(*Options){
+		addIsPaginatorUserAgent,
+	}, optFns...)
 	result, err := p.client.DescribeAvailablePatches(ctx, &params, optFns...)
 	if err != nil {
 		return nil, err
@@ -251,18 +262,20 @@ func (p *DescribeAvailablePatchesPaginator) NextPage(ctx context.Context, optFns
 	prevToken := p.nextToken
 	p.nextToken = result.NextToken
 
-	if p.options.StopOnDuplicateToken && prevToken != nil && p.nextToken != nil && *prevToken == *p.nextToken {
+	if p.options.StopOnDuplicateToken &&
+		prevToken != nil &&
+		p.nextToken != nil &&
+		*prevToken == *p.nextToken {
 		p.nextToken = nil
 	}
 
 	return result, nil
 }
 
-func newServiceMetadataMiddleware_opDescribeAvailablePatches(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "ssm",
-		OperationName: "DescribeAvailablePatches",
-	}
+// DescribeAvailablePatchesAPIClient is a client that implements the
+// DescribeAvailablePatches operation.
+type DescribeAvailablePatchesAPIClient interface {
+	DescribeAvailablePatches(context.Context, *DescribeAvailablePatchesInput, ...func(*Options)) (*DescribeAvailablePatchesOutput, error)
 }
+
+var _ DescribeAvailablePatchesAPIClient = (*Client)(nil)

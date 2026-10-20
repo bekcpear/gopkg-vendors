@@ -4,17 +4,14 @@ package ssm
 
 import (
 	"context"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // Shares a Amazon Web Services Systems Manager document (SSM document)publicly or
 // privately. If you share a document privately, you must specify the Amazon Web
-// Services user account IDs for those people who can use the document. If you
-// share a document publicly, you must specify All as the account ID.
+// Services user IDs for those people who can use the document. If you share a
+// document publicly, you must specify All as the account ID.
 func (c *Client) ModifyDocumentPermission(ctx context.Context, params *ModifyDocumentPermissionInput, optFns ...func(*Options)) (*ModifyDocumentPermissionOutput, error) {
 	if params == nil {
 		params = &ModifyDocumentPermissionInput{}
@@ -42,15 +39,16 @@ type ModifyDocumentPermissionInput struct {
 	// This member is required.
 	PermissionType types.DocumentPermissionType
 
-	// The Amazon Web Services user accounts that should have access to the document.
-	// The account IDs can either be a group of account IDs or All.
+	// The Amazon Web Services users that should have access to the document. The
+	// account IDs can either be a group of account IDs or All. You must specify a
+	// value for this parameter or the AccountIdsToRemove parameter.
 	AccountIdsToAdd []string
 
-	// The Amazon Web Services user accounts that should no longer have access to the
-	// document. The Amazon Web Services user account can either be a group of account
-	// IDs or All. This action has a higher priority than AccountIdsToAdd. If you
-	// specify an account ID to add and the same ID to remove, the system removes
-	// access to the document.
+	// The Amazon Web Services users that should no longer have access to the
+	// document. The Amazon Web Services user can either be a group of account IDs or
+	// All. This action has a higher priority than AccountIdsToAdd . If you specify an
+	// ID to add and the same ID to remove, the system removes access to the document.
+	// You must specify a value for this parameter or the AccountIdsToAdd parameter.
 	AccountIdsToRemove []string
 
 	// (Optional) The version of the document to share. If it isn't specified, the
@@ -76,46 +74,20 @@ func (c *Client) addOperationModifyDocumentPermissionMiddlewares(stack *middlewa
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpModifyDocumentPermissionValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opModifyDocumentPermission(options.Region), middleware.Before); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -127,14 +99,11 @@ func (c *Client) addOperationModifyDocumentPermissionMiddlewares(stack *middlewa
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
-	return nil
-}
-
-func newServiceMetadataMiddleware_opModifyDocumentPermission(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "ssm",
-		OperationName: "ModifyDocumentPermission",
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
 	}
+	if err = addInterceptors(stack, options); err != nil {
+		return err
+	}
+	return nil
 }

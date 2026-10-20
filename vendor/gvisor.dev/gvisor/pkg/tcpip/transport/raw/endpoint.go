@@ -30,9 +30,10 @@ import (
 	"io"
 	"time"
 
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport"
@@ -72,7 +73,7 @@ type endpoint struct {
 
 	// The following fields are initialized at creation time and are
 	// immutable.
-	stack       *stack.Stack `state:"manual"`
+	stack       *stack.Stack
 	transProto  tcpip.TransportProtocolNumber
 	waiterQueue *waiter.Queue
 	associated  bool
@@ -235,11 +236,13 @@ func (e *endpoint) Read(dst io.Writer, opts tcpip.ReadOptions) (tcpip.ReadResult
 	}
 
 	pkt := e.rcvList.Front()
-	if !opts.Peek {
+	if opts.Peek {
+		pkt.data.IncRef()
+	} else {
 		e.rcvList.Remove(pkt)
-		defer pkt.data.DecRef()
 		e.rcvBufSize -= pkt.data.Data().Size()
 	}
+	defer pkt.data.DecRef()
 
 	e.rcvMu.Unlock()
 
@@ -311,7 +314,7 @@ func (e *endpoint) Write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, tcp
 
 	if opts.To != nil {
 		// Raw sockets do not support sending to a IPv4 address on a IPv6 endpoint.
-		if netProto == header.IPv6ProtocolNumber && len(opts.To.Addr) != header.IPv6AddressSize {
+		if netProto == header.IPv6ProtocolNumber && opts.To.Addr.BitLen() != header.IPv6AddressSizeBits {
 			return 0, &tcpip.ErrInvalidOptionValue{}
 		}
 	}
@@ -326,7 +329,7 @@ func (e *endpoint) Write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, tcp
 		e.stats.WriteErrors.WriteClosed.Increment()
 	case *tcpip.ErrInvalidEndpointState:
 		e.stats.WriteErrors.InvalidEndpointState.Increment()
-	case *tcpip.ErrNoRoute, *tcpip.ErrBroadcastDisabled, *tcpip.ErrNetworkUnreachable:
+	case *tcpip.ErrHostUnreachable, *tcpip.ErrBroadcastDisabled, *tcpip.ErrNetworkUnreachable:
 		// Errors indicating any problem with IP routing of the packet.
 		e.stats.SendErrors.NoRoute.Increment()
 	default:
@@ -344,12 +347,18 @@ func (e *endpoint) write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, tcp
 	if err != nil {
 		return 0, err
 	}
+	defer ctx.Release()
 
 	if p.Len() > int(ctx.MTU()) {
 		return 0, &tcpip.ErrMessageTooLong{}
 	}
 
-	var payload bufferv2.Buffer
+	// Prevents giant buffer allocations.
+	if p.Len() > header.DatagramMaximumSize {
+		return 0, &tcpip.ErrMessageTooLong{}
+	}
+
+	var payload buffer.Buffer
 	defer payload.Release()
 	if _, err := payload.WriteFromReader(p, int64(p.Len())); err != nil {
 		return 0, &tcpip.ErrBadBuffer{}
@@ -358,15 +367,15 @@ func (e *endpoint) write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, tcp
 
 	if packetInfo := ctx.PacketInfo(); packetInfo.NetProto == header.IPv6ProtocolNumber && ipv6ChecksumOffset >= 0 {
 		// Make sure we can fit the checksum.
-		if payload.Size() < int64(ipv6ChecksumOffset+header.ChecksumSize) {
+		if payload.Size() < int64(ipv6ChecksumOffset+checksum.Size) {
 			return 0, &tcpip.ErrInvalidOptionValue{}
 		}
 
 		payloadView, _ := payload.PullUp(ipv6ChecksumOffset, int(payload.Size())-ipv6ChecksumOffset)
 		xsum := header.PseudoHeaderChecksum(e.transProto, packetInfo.LocalAddress, packetInfo.RemoteAddress, uint16(payload.Size()))
-		header.PutChecksum(payloadView.AsSlice(), 0)
-		xsum = header.ChecksumBuffer(payload, xsum)
-		header.PutChecksum(payloadView.AsSlice(), ^xsum)
+		checksum.Put(payloadView.AsSlice(), 0)
+		xsum = checksum.Combine(payload.Checksum(0), xsum)
+		checksum.Put(payloadView.AsSlice(), ^xsum)
 	}
 
 	pkt := ctx.TryNewPacketBuffer(int(ctx.PacketInfo().MaxHeaderLength), payload.Clone())
@@ -392,7 +401,7 @@ func (e *endpoint) Connect(addr tcpip.FullAddress) tcpip.Error {
 	netProto := e.net.NetProto()
 
 	// Raw sockets do not support connecting to a IPv4 address on a IPv6 endpoint.
-	if netProto == header.IPv6ProtocolNumber && len(addr.Addr) != header.IPv6AddressSize {
+	if netProto == header.IPv6ProtocolNumber && addr.Addr.BitLen() != header.IPv6AddressSizeBits {
 		return &tcpip.ErrAddressFamilyNotSupported{}
 	}
 
@@ -516,7 +525,7 @@ func (e *endpoint) SetSockOptInt(opt tcpip.SockOptInt, v int) tcpip.Error {
 		}
 
 		// Make sure the offset is aligned properly if checksum is requested.
-		if v > 0 && v%header.ChecksumSize != 0 {
+		if v > 0 && v%checksum.Size != 0 {
 			return &tcpip.ErrInvalidOptionValue{}
 		}
 
@@ -631,7 +640,7 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 			}
 
 			// If bound to an address, only accept data for that address.
-			if info.BindAddr != "" && info.BindAddr != dstAddr {
+			if info.BindAddr != (tcpip.Address{}) && info.BindAddr != dstAddr {
 				return false
 			}
 		default:
@@ -673,15 +682,15 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 		// TODO(https://gvisor.dev/issue/6517): Avoid the copy once S/R supports
 		// overlapping slices.
 		transportHeader := pkt.TransportHeader().Slice()
-		var combinedBuf bufferv2.Buffer
+		var combinedBuf buffer.Buffer
 		defer combinedBuf.Release()
 		switch info.NetProto {
 		case header.IPv4ProtocolNumber:
 			networkHeader := pkt.NetworkHeader().Slice()
-			headers := bufferv2.NewView(len(networkHeader) + len(transportHeader))
+			headers := buffer.NewView(len(networkHeader) + len(transportHeader))
 			headers.Write(networkHeader)
 			headers.Write(transportHeader)
-			combinedBuf = bufferv2.MakeWithView(headers)
+			combinedBuf = buffer.MakeWithView(headers)
 			pktBuf := pkt.Data().ToBuffer()
 			combinedBuf.Merge(&pktBuf)
 		case header.IPv6ProtocolNumber:
@@ -695,19 +704,19 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 				}
 			}
 
-			combinedBuf = bufferv2.MakeWithView(pkt.TransportHeader().View())
+			combinedBuf = buffer.MakeWithView(pkt.TransportHeader().View())
 			pktBuf := pkt.Data().ToBuffer()
 			combinedBuf.Merge(&pktBuf)
 
 			if checksumOffset := e.ipv6ChecksumOffset; checksumOffset >= 0 {
 				bufSize := int(combinedBuf.Size())
-				if bufSize < checksumOffset+header.ChecksumSize {
+				if bufSize < checksumOffset+checksum.Size {
 					// Message too small to fit checksum.
 					return false
 				}
 
 				xsum := header.PseudoHeaderChecksum(e.transProto, srcAddr, dstAddr, uint16(bufSize))
-				xsum = header.ChecksumBuffer(combinedBuf, xsum)
+				xsum = checksum.Combine(combinedBuf.Checksum(0), xsum)
 				if xsum != 0xFFFF {
 					// Invalid checksum.
 					return false

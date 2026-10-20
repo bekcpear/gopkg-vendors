@@ -6,25 +6,26 @@ import (
 	"github.com/mgechev/revive/lint"
 )
 
-// JSON is an implementation of the Formatter interface
+// JSON is an implementation of the [lint.Formatter] interface
 // which formats the errors to JSON.
 type JSON struct {
 	Metadata lint.FormatterMetadata
 }
 
-// Name returns the name of the formatter
-func (f *JSON) Name() string {
+// Name returns the name of the formatter.
+func (*JSON) Name() string {
 	return "json"
 }
 
-// jsonObject defines a JSON object of an failure
+// jsonObject defines a JSON object of an failure.
 type jsonObject struct {
-	Severity     lint.Severity
+	Severity lint.Severity `json:"Severity"`
+	//nolint:embeddedstructfieldcheck // backward compatibility
 	lint.Failure `json:",inline"`
 }
 
 // Format formats the failures gotten from the lint.
-func (f *JSON) Format(failures <-chan lint.Failure, config lint.Config) (string, error) {
+func (*JSON) Format(failures <-chan lint.Failure, config lint.Config) (string, error) {
 	var slice []jsonObject
 	for failure := range failures {
 		obj := jsonObject{}

@@ -11,19 +11,19 @@ type DisabledInterval struct {
 	RuleName string
 }
 
-// Rule defines an abstract rule interaface
+// Rule defines an abstract rule interface.
 type Rule interface {
 	Name() string
 	Apply(*File, Arguments) []Failure
 }
 
-// AbstractRule defines an abstract rule.
-type AbstractRule struct {
-	Failures []Failure
+// ConfigurableRule defines an abstract configurable rule interface.
+type ConfigurableRule interface {
+	Configure(Arguments) error
 }
 
 // ToFailurePosition returns the failure position.
-func ToFailurePosition(start token.Pos, end token.Pos, file *File) FailurePosition {
+func ToFailurePosition(start, end token.Pos, file *File) FailurePosition {
 	return FailurePosition{
 		Start: file.ToPosition(start),
 		End:   file.ToPosition(end),

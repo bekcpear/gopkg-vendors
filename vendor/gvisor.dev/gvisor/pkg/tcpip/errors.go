@@ -32,6 +32,8 @@ type Error interface {
 	fmt.Stringer
 }
 
+const maxErrno = 134
+
 // LINT.IfChange
 
 // ErrAborted indicates the operation was aborted.
@@ -274,6 +276,19 @@ func (*ErrDuplicateNICID) IgnoreStats() bool {
 }
 func (*ErrDuplicateNICID) String() string { return "duplicate nic id" }
 
+// ErrInvalidNICID indicates the operation used an invalid NIC ID.
+//
+// +stateify savable
+type ErrInvalidNICID struct{}
+
+func (*ErrInvalidNICID) isError() {}
+
+// IgnoreStats implements Error.
+func (*ErrInvalidNICID) IgnoreStats() bool {
+	return false
+}
+func (*ErrInvalidNICID) String() string { return "invalid nic id" }
+
 // ErrInvalidEndpointState indicates the endpoint is in an invalid state.
 //
 // +stateify savable
@@ -380,19 +395,45 @@ func (*ErrNoPortAvailable) IgnoreStats() bool {
 }
 func (*ErrNoPortAvailable) String() string { return "no ports are available" }
 
-// ErrNoRoute indicates the operation is not able to find a route to the
-// destination.
+// ErrHostUnreachable indicates that a destination host could not be
+// reached.
 //
 // +stateify savable
-type ErrNoRoute struct{}
+type ErrHostUnreachable struct{}
 
-func (*ErrNoRoute) isError() {}
+func (*ErrHostUnreachable) isError() {}
 
 // IgnoreStats implements Error.
-func (*ErrNoRoute) IgnoreStats() bool {
+func (*ErrHostUnreachable) IgnoreStats() bool {
 	return false
 }
-func (*ErrNoRoute) String() string { return "no route" }
+func (*ErrHostUnreachable) String() string { return "no route to host" }
+
+// ErrHostDown indicates that a destination host is down.
+//
+// +stateify savable
+type ErrHostDown struct{}
+
+func (*ErrHostDown) isError() {}
+
+// IgnoreStats implements Error.
+func (*ErrHostDown) IgnoreStats() bool {
+	return false
+}
+func (*ErrHostDown) String() string { return "host is down" }
+
+// ErrNoNet indicates that the host is not on the network.
+//
+// +stateify savable
+type ErrNoNet struct{}
+
+func (*ErrNoNet) isError() {}
+
+// IgnoreStats implements Error.
+func (*ErrNoNet) IgnoreStats() bool {
+	return false
+}
+func (*ErrNoNet) String() string { return "machine is not on the network" }
 
 // ErrNoSuchFile is used to indicate that ENOENT should be returned the to
 // calling application.
@@ -563,7 +604,7 @@ func (*ErrMissingRequiredFields) isError() {}
 func (*ErrMissingRequiredFields) IgnoreStats() bool {
 	return true
 }
-func (*ErrMissingRequiredFields) String() string { return "mising required fields" }
+func (*ErrMissingRequiredFields) String() string { return "missing required fields" }
 
 // ErrMulticastInputCannotBeOutput indicates that an input interface matches an
 // output interface in the same multicast route.
@@ -578,5 +619,23 @@ func (*ErrMulticastInputCannotBeOutput) IgnoreStats() bool {
 	return true
 }
 func (*ErrMulticastInputCannotBeOutput) String() string { return "output cannot contain input" }
+
+// ErrEndpointBusy indicates that the operation cannot be completed because the
+// endpoint is busy.
+//
+// +stateify savable
+type ErrEndpointBusy struct{}
+
+// isError implements Error.
+func (*ErrEndpointBusy) isError() {}
+
+// IgnoreStats implements Error.
+func (*ErrEndpointBusy) IgnoreStats() bool {
+	return true
+}
+
+func (*ErrEndpointBusy) String() string {
+	return "operation cannot be completed because the endpoint is busy"
+}
 
 // LINT.ThenChange(../syserr/netstack.go)

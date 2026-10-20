@@ -3,6 +3,8 @@
 package waiter
 
 import (
+	"context"
+
 	"gvisor.dev/gvisor/pkg/state"
 )
 
@@ -28,13 +30,34 @@ func (e *Entry) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(2, &e.mask)
 }
 
-func (e *Entry) afterLoad() {}
+func (e *Entry) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (e *Entry) StateLoad(stateSourceObject state.Source) {
+func (e *Entry) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &e.waiterEntry)
 	stateSourceObject.Load(1, &e.eventListener)
 	stateSourceObject.Load(2, &e.mask)
+}
+
+func (n *NoopListener) StateTypeName() string {
+	return "pkg/waiter.NoopListener"
+}
+
+func (n *NoopListener) StateFields() []string {
+	return []string{}
+}
+
+func (n *NoopListener) beforeSave() {}
+
+// +checklocksignore
+func (n *NoopListener) StateSave(stateSinkObject state.Sink) {
+	n.beforeSave()
+}
+
+func (n *NoopListener) afterLoad(context.Context) {}
+
+// +checklocksignore
+func (n *NoopListener) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 }
 
 func (q *Queue) StateTypeName() string {
@@ -55,10 +78,10 @@ func (q *Queue) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(0, &q.list)
 }
 
-func (q *Queue) afterLoad() {}
+func (q *Queue) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (q *Queue) StateLoad(stateSourceObject state.Source) {
+func (q *Queue) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &q.list)
 }
 
@@ -82,10 +105,10 @@ func (l *waiterList) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(1, &l.tail)
 }
 
-func (l *waiterList) afterLoad() {}
+func (l *waiterList) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (l *waiterList) StateLoad(stateSourceObject state.Source) {
+func (l *waiterList) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &l.head)
 	stateSourceObject.Load(1, &l.tail)
 }
@@ -110,16 +133,17 @@ func (e *waiterEntry) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(1, &e.prev)
 }
 
-func (e *waiterEntry) afterLoad() {}
+func (e *waiterEntry) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (e *waiterEntry) StateLoad(stateSourceObject state.Source) {
+func (e *waiterEntry) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &e.next)
 	stateSourceObject.Load(1, &e.prev)
 }
 
 func init() {
 	state.Register((*Entry)(nil))
+	state.Register((*NoopListener)(nil))
 	state.Register((*Queue)(nil))
 	state.Register((*waiterList)(nil))
 	state.Register((*waiterEntry)(nil))

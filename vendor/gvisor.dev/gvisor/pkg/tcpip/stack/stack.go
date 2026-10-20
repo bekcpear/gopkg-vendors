@@ -29,7 +29,7 @@ import (
 
 	"golang.org/x/time/rate"
 	"gvisor.dev/gvisor/pkg/atomicbitops"
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/log"
 	cryptorand "gvisor.dev/gvisor/pkg/rand"
 	"gvisor.dev/gvisor/pkg/sync"
@@ -44,25 +44,25 @@ const (
 	DefaultTOS = 0
 )
 
+// +stateify savable
 type transportProtocolState struct {
 	proto          TransportProtocol
-	defaultHandler func(id TransportEndpointID, pkt *PacketBuffer) bool
+	defaultHandler func(id TransportEndpointID, pkt *PacketBuffer) bool `state:"nosave"`
 }
 
-// ResumableEndpoint is an endpoint that needs to be resumed after restore.
-type ResumableEndpoint interface {
-	// Resume resumes an endpoint after restore. This can be used to restart
-	// background workers such as protocol goroutines. This must be called after
-	// all indirect dependencies of the endpoint has been restored, which
+// RestoredEndpoint is an endpoint that needs to be restored.
+type RestoredEndpoint interface {
+	// Restore restores an endpoint. This can be used to restart background
+	// workers such as protocol goroutines. This must be called after all
+	// indirect dependencies of the endpoint has been restored, which
 	// generally implies at the end of the restore process.
-	Resume(*Stack)
+	Restore(*Stack)
 }
 
-// uniqueIDGenerator is a default unique ID generator.
-type uniqueIDGenerator atomicbitops.Uint64
-
-func (u *uniqueIDGenerator) UniqueID() uint64 {
-	return ((*atomicbitops.Uint64)(u)).Add(1)
+// ResumableEndpoint is an endpoint that needs to be resumed after save.
+type ResumableEndpoint interface {
+	// Resume resumes an endpoint.
+	Resume()
 }
 
 var netRawMissingLogger = log.BasicRateLimitedLogger(time.Minute)
@@ -71,6 +71,8 @@ var netRawMissingLogger = log.BasicRateLimitedLogger(time.Minute)
 // table.
 //
 // LOCK ORDERING: mu > routeMu.
+//
+// +stateify savable
 type Stack struct {
 	transportProtocols map[tcpip.TransportProtocolNumber]*transportProtocolState
 	networkProtocols   map[tcpip.NetworkProtocolNumber]NetworkProtocol
@@ -85,37 +87,61 @@ type Stack struct {
 	stats tcpip.Stats
 
 	// routeMu protects annotated fields below.
-	routeMu sync.RWMutex
+	routeMu routeStackRWMutex `state:"nosave"`
 
+	// routeTable is a list of routes sorted by prefix length, longest (most specific) first.
 	// +checklocks:routeMu
-	routeTable []tcpip.Route
+	routeTable tcpip.RouteList `state:"nosave"`
 
-	mu                       sync.RWMutex
-	nics                     map[tcpip.NICID]*nic
+	mu stackRWMutex `state:"nosave"`
+	// +checklocks:mu
+	nics map[tcpip.NICID]*nic `state:"nosave"`
+	// +checklocks:mu
+	loopbackNIC *nic `state:"nosave"`
+	// +checklocks:mu
 	defaultForwardingEnabled map[tcpip.NetworkProtocolNumber]struct{}
 
+	// nicIDGen is used to generate NIC IDs.
+	nicIDGen atomicbitops.Int32 `state:"nosave"`
+
 	// cleanupEndpointsMu protects cleanupEndpoints.
-	cleanupEndpointsMu sync.Mutex
-	cleanupEndpoints   map[TransportEndpoint]struct{}
+	cleanupEndpointsMu cleanupEndpointsMutex `state:"nosave"`
+	// +checklocks:cleanupEndpointsMu
+	cleanupEndpoints map[TransportEndpoint]struct{}
 
 	*ports.PortManager
 
-	// If not nil, then any new endpoints will have this probe function
-	// invoked everytime they receive a TCP segment.
-	tcpProbeFunc atomic.Value // TCPProbeFunc
-
 	// clock is used to generate user-visible times.
 	clock tcpip.Clock
+
+	// clockResolution is an upper bound on the quantization interval of
+	// monotonic timestamps returned by clock.
+	clockResolution time.Duration
 
 	// handleLocal allows non-loopback interfaces to loop packets.
 	handleLocal bool
 
 	// tables are the iptables packet filtering and manipulation rules.
 	// TODO(gvisor.dev/issue/4595): S/R this field.
-	tables *IPTables
+	tables *IPTables `state:"nosave"`
 
-	// resumableEndpoints is a list of endpoints that need to be resumed if the
+	// nftables is the nftables interface for packet filtering and manipulation rules.
+	// Using atomic.Pointer for RCU lock-free reads.
+	nftables atomic.Pointer[NFTablesInterface] `state:"nosave"`
+
+	// nftablesUpdateMu serializes concurrent netlink batch modifications to nftables.
+	nftablesUpdateMu sync.Mutex `state:"nosave"`
+
+	// nftablesConfigured indicates whether NFTables is configured with at
+	// least one rule on a chain at a network hook.
+	nftablesConfigured atomicbitops.Bool
+
+	// restoredEndpoints is a list of endpoints that need to be restored if the
 	// stack is being restored.
+	restoredEndpoints []RestoredEndpoint
+
+	// resumableEndpoints is a list of endpoints that need to be resumed
+	// after save.
 	resumableEndpoints []ResumableEndpoint
 
 	// icmpRateLimiter is a global rate limiter for all ICMP messages generated
@@ -134,15 +160,13 @@ type Stack struct {
 	// integrator NUD related events.
 	nudDisp NUDDispatcher
 
-	// uniqueIDGenerator is a generator of unique identifiers.
-	uniqueIDGenerator UniqueID
-
 	// randomGenerator is an injectable pseudo random generator that can be
-	// used when a random number is required.
-	randomGenerator *rand.Rand
+	// used when a random number is required. It must not be used in
+	// security-sensitive contexts.
+	insecureRNG *rand.Rand `state:"nosave"`
 
 	// secureRNG is a cryptographically secure random number generator.
-	secureRNG io.Reader
+	secureRNG cryptorand.RNG `state:"nosave"`
 
 	// sendBufferSize holds the min/default/max send buffer sizes for
 	// endpoints other than TCP.
@@ -167,11 +191,24 @@ type Stack struct {
 	// tsOffsetSecret is the secret key for generating timestamp offsets
 	// initialized at stack startup.
 	tsOffsetSecret uint32
-}
 
-// UniqueID is an abstract generator of unique identifiers.
-type UniqueID interface {
-	UniqueID() uint64
+	// removeConf indicates whether to remove NICs and routes and terminate
+	// active connections before saving. This flag will be set to true only
+	// when resume is false.
+	removeConf bool `state:"nosave"`
+
+	// allowLiveTCPMigration allows TCP connection state to be migrated.
+	// If false, any connected TCP endpoints will be terminated
+	// during save/restore.
+	allowLiveTCPMigration bool `state:"nosave"`
+
+	// externalNetworkingDisabled indicates whether external networking is
+	// disabled. This means all non-loopback NICs are disabled.
+	externalNetworkingDisabled bool
+
+	// allowConnectedOnSave indicates whether connections should be
+	// allowed to remain connected during save.
+	allowConnectedOnSave bool
 }
 
 // NetworkProtocolFactory instantiates a network protocol.
@@ -199,6 +236,17 @@ type Options struct {
 	// If Clock is nil, tcpip.NewStdClock() will be used.
 	Clock tcpip.Clock
 
+	// ClockResolution is an upper bound on the quantization interval of
+	// timestamps returned by Clock.NowMonotonic. It should be set when the
+	// clock advances in discrete steps large enough to affect TCP loss detection;
+	// for example, some Windows monotonic clocks commonly update every 500 us.
+	// TCP RACK uses this value to avoid declaring loss based on timestamp
+	// quantization alone. It does not describe timer wake-up precision.
+	//
+	// A value of zero means that no quantization allowance is needed or known.
+	// Values less than zero are clamped to zero.
+	ClockResolution time.Duration
+
 	// Stats are optional statistic counters.
 	Stats tcpip.Stats
 
@@ -206,9 +254,6 @@ type Options struct {
 	// should be handled by the stack internally (true) or outside the
 	// stack (false).
 	HandleLocal bool
-
-	// UniqueID is an optional generator of unique identifiers.
-	UniqueID UniqueID
 
 	// NUDConfigs is the default NUD configurations used by interfaces.
 	NUDConfigs NUDConfigurations
@@ -225,6 +270,11 @@ type Options struct {
 	// operations.
 	AllowPacketEndpointWrite bool
 
+	// AllowLiveTCPMigration allows TCP connection state to be migrated.
+	// If false, any connected TCP endpoints will be terminated
+	// during save/restore.
+	AllowLiveTCPMigration bool
+
 	// RandSource is an optional source to use to generate random
 	// numbers. If omitted it defaults to a Source seeded by the data
 	// returned by the stack secure RNG.
@@ -236,6 +286,9 @@ type Options struct {
 	// used to construct the initial iptables rules.
 	// all traffic.
 	IPTables *IPTables
+
+	// NFTables is the nftables interface for packet filtering and manipulation rules.
+	NFTables NFTablesInterface
 
 	// DefaultIPTables is an optional iptables rules constructor that is called
 	// if IPTables is nil. If both fields are nil, iptables will allow all
@@ -276,29 +329,45 @@ type TransportEndpointInfo struct {
 // incompatible with the receiver.
 //
 // Preconditon: the parent endpoint mu must be held while calling this method.
-func (t *TransportEndpointInfo) AddrNetProtoLocked(addr tcpip.FullAddress, v6only bool) (tcpip.FullAddress, tcpip.NetworkProtocolNumber, tcpip.Error) {
+func (t *TransportEndpointInfo) AddrNetProtoLocked(addr tcpip.FullAddress, v6only bool, bind bool) (tcpip.FullAddress, tcpip.NetworkProtocolNumber, tcpip.Error) {
 	netProto := t.NetProto
-	switch len(addr.Addr) {
-	case header.IPv4AddressSize:
+	switch addr.Addr.BitLen() {
+	case header.IPv4AddressSizeBits:
 		netProto = header.IPv4ProtocolNumber
-	case header.IPv6AddressSize:
+	case header.IPv6AddressSizeBits:
 		if header.IsV4MappedAddress(addr.Addr) {
 			netProto = header.IPv4ProtocolNumber
-			addr.Addr = addr.Addr[header.IPv6AddressSize-header.IPv4AddressSize:]
+			addr.Addr = tcpip.AddrFrom4Slice(addr.Addr.AsSlice()[header.IPv6AddressSize-header.IPv4AddressSize:])
 			if addr.Addr == header.IPv4Any {
-				addr.Addr = ""
+				addr.Addr = tcpip.Address{}
 			}
 		}
 	}
 
-	switch len(t.ID.LocalAddress) {
-	case header.IPv4AddressSize:
-		if len(addr.Addr) == header.IPv6AddressSize {
+	switch t.ID.LocalAddress.BitLen() {
+	case header.IPv4AddressSizeBits:
+		if addr.Addr.BitLen() == header.IPv6AddressSizeBits {
 			return tcpip.FullAddress{}, 0, &tcpip.ErrInvalidEndpointState{}
 		}
-	case header.IPv6AddressSize:
-		if len(addr.Addr) == header.IPv4AddressSize {
+	case header.IPv6AddressSizeBits:
+		if addr.Addr.BitLen() == header.IPv4AddressSizeBits {
 			return tcpip.FullAddress{}, 0, &tcpip.ErrNetworkUnreachable{}
+		}
+	}
+
+	if !bind && addr.Addr.Unspecified() {
+		// If the destination address isn't set, Linux sets it to the
+		// source address. If a source address isn't set either, it
+		// sets both to the loopback address.
+		if t.ID.LocalAddress.Unspecified() {
+			switch netProto {
+			case header.IPv4ProtocolNumber:
+				addr.Addr = header.IPv4Loopback
+			case header.IPv6ProtocolNumber:
+				addr.Addr = header.IPv6Loopback
+			}
+		} else {
+			addr.Addr = t.ID.LocalAddress
 		}
 	}
 
@@ -306,7 +375,7 @@ func (t *TransportEndpointInfo) AddrNetProtoLocked(addr tcpip.FullAddress, v6onl
 	case netProto == t.NetProto:
 	case netProto == header.IPv4ProtocolNumber && t.NetProto == header.IPv6ProtocolNumber:
 		if v6only {
-			return tcpip.FullAddress{}, 0, &tcpip.ErrNoRoute{}
+			return tcpip.FullAddress{}, 0, &tcpip.ErrHostUnreachable{}
 		}
 	default:
 		return tcpip.FullAddress{}, 0, &tcpip.ErrInvalidEndpointState{}
@@ -335,13 +404,10 @@ func New(opts Options) *Stack {
 		clock = tcpip.NewStdClock()
 	}
 
-	if opts.UniqueID == nil {
-		opts.UniqueID = new(uniqueIDGenerator)
-	}
-
 	if opts.SecureRNG == nil {
 		opts.SecureRNG = cryptorand.Reader
 	}
+	secureRNG := cryptorand.RNGFrom(opts.SecureRNG)
 
 	randSrc := opts.RandSource
 	if randSrc == nil {
@@ -353,16 +419,21 @@ func New(opts Options) *Stack {
 		// we wrap it in a simple thread-safe version.
 		randSrc = &lockedRandomSource{src: rand.NewSource(v)}
 	}
-	randomGenerator := rand.New(randSrc)
+	insecureRNG := rand.New(randSrc)
 
 	if opts.IPTables == nil {
 		if opts.DefaultIPTables == nil {
 			opts.DefaultIPTables = DefaultTables
 		}
-		opts.IPTables = opts.DefaultIPTables(clock, randomGenerator)
+		opts.IPTables = opts.DefaultIPTables(clock, insecureRNG)
 	}
 
 	opts.NUDConfigs.resetInvalidFields()
+
+	clockResolution := opts.ClockResolution
+	if clockResolution < 0 {
+		clockResolution = 0
+	}
 
 	s := &Stack{
 		transportProtocols:           make(map[tcpip.TransportProtocolNumber]*transportProtocolState),
@@ -373,16 +444,16 @@ func New(opts Options) *Stack {
 		cleanupEndpoints:             make(map[TransportEndpoint]struct{}),
 		PortManager:                  ports.NewPortManager(),
 		clock:                        clock,
+		clockResolution:              clockResolution,
 		stats:                        opts.Stats.FillIn(),
 		handleLocal:                  opts.HandleLocal,
 		tables:                       opts.IPTables,
 		icmpRateLimiter:              NewICMPRateLimiter(clock),
-		seed:                         randomGenerator.Uint32(),
+		seed:                         secureRNG.Uint32(),
 		nudConfigs:                   opts.NUDConfigs,
-		uniqueIDGenerator:            opts.UniqueID,
 		nudDisp:                      opts.NUDDisp,
-		randomGenerator:              randomGenerator,
-		secureRNG:                    opts.SecureRNG,
+		insecureRNG:                  insecureRNG,
+		secureRNG:                    secureRNG,
 		sendBufferSize: tcpip.SendBufferSizeOption{
 			Min:     MinBufferSize,
 			Default: DefaultBufferSize,
@@ -393,9 +464,11 @@ func New(opts Options) *Stack {
 			Default: DefaultBufferSize,
 			Max:     DefaultMaxBufferSize,
 		},
-		tcpInvalidRateLimit: defaultTCPInvalidRateLimit,
-		tsOffsetSecret:      randomGenerator.Uint32(),
+		tcpInvalidRateLimit:   defaultTCPInvalidRateLimit,
+		tsOffsetSecret:        secureRNG.Uint32(),
+		allowLiveTCPMigration: opts.AllowLiveTCPMigration,
 	}
+	s.SetNFTables(opts.NFTables)
 
 	// Add specified network protocols.
 	for _, netProtoFactory := range opts.NetworkProtocols {
@@ -420,9 +493,13 @@ func New(opts Options) *Stack {
 	return s
 }
 
-// UniqueID returns a unique identifier.
-func (s *Stack) UniqueID() uint64 {
-	return s.uniqueIDGenerator.UniqueID()
+// NextNICID allocates the next available NIC ID and returns it.
+func (s *Stack) NextNICID() tcpip.NICID {
+	next := s.nicIDGen.Add(1)
+	if next < 0 {
+		panic("NICID overflow")
+	}
+	return tcpip.NICID(next)
 }
 
 // SetNetworkProtocolOption allows configuring individual protocol level
@@ -482,6 +559,16 @@ func (s *Stack) TransportProtocolOption(transport tcpip.TransportProtocolNumber,
 	return transProtoState.proto.Option(option)
 }
 
+// SendBufSizeProto is a protocol that can return its send buffer size.
+type SendBufSizeProto interface {
+	SendBufferSize() tcpip.TCPSendBufferSizeRangeOption
+}
+
+// TCPSendBufferLimits returns the TCP send buffer size limit.
+func (s *Stack) TCPSendBufferLimits() tcpip.TCPSendBufferSizeRangeOption {
+	return s.transportProtocols[header.TCPProtocolNumber].proto.(SendBufSizeProto).SendBufferSize()
+}
+
 // SetTransportProtocolHandler sets the per-stack default handler for the given
 // protocol.
 //
@@ -498,6 +585,16 @@ func (s *Stack) SetTransportProtocolHandler(p tcpip.TransportProtocolNumber, h f
 // scheduling work.
 func (s *Stack) Clock() tcpip.Clock {
 	return s.clock
+}
+
+// ClockResolution returns an upper bound on the quantization interval of
+// monotonic timestamps returned by the Stack's clock.
+//
+// A zero value means to trust the clock advances between reads at a precision
+// close to the precision of the value it returns; consuming code should need no
+// corrections for clock resolution.
+func (s *Stack) ClockResolution() time.Duration {
+	return s.clockResolution
 }
 
 // Stats returns a mutable copy of the current stats.
@@ -666,10 +763,6 @@ func (s *Stack) DisableMulticastForwardingForProtocol(protocol tcpip.NetworkProt
 // the specified NIC for the passed protocol.
 //
 // Returns the previous configuration on the NIC.
-//
-// TODO(https://gvisor.dev/issue/7338): Implement support for multicast
-// forwarding. Currently, setting this value is a no-op and is not ready for
-// use.
 func (s *Stack) SetNICMulticastForwarding(id tcpip.NICID, protocol tcpip.NetworkProtocolNumber, enable bool) (bool, tcpip.Error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -698,12 +791,16 @@ func (s *Stack) NICMulticastForwarding(id tcpip.NICID, protocol tcpip.NetworkPro
 
 // PortRange returns the UDP and TCP inclusive range of ephemeral ports used in
 // both IPv4 and IPv6.
+//
+// +checklocksexclude:s.PortManager.ephemeralMu
 func (s *Stack) PortRange() (uint16, uint16) {
 	return s.PortManager.PortRange()
 }
 
 // SetPortRange sets the UDP and TCP IPv4 and IPv6 ephemeral port range
 // (inclusive).
+//
+// +checklocksexclude:s.PortManager.ephemeralMu
 func (s *Stack) SetPortRange(start uint16, end uint16) tcpip.Error {
 	return s.PortManager.SetPortRange(start, end)
 }
@@ -715,35 +812,78 @@ func (s *Stack) SetPortRange(start uint16, end uint16) tcpip.Error {
 func (s *Stack) SetRouteTable(table []tcpip.Route) {
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	s.routeTable = table
+	s.routeTable.Reset()
+	for _, r := range table {
+		s.addRouteLocked(&r)
+	}
 }
 
 // GetRouteTable returns the route table which is currently in use.
 func (s *Stack) GetRouteTable() []tcpip.Route {
 	s.routeMu.RLock()
 	defer s.routeMu.RUnlock()
-	return append([]tcpip.Route(nil), s.routeTable...)
+	table := make([]tcpip.Route, 0)
+	for r := s.routeTable.Front(); r != nil; r = r.Next() {
+		table = append(table, *r)
+	}
+	return table
 }
 
 // AddRoute appends a route to the route table.
 func (s *Stack) AddRoute(route tcpip.Route) {
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	s.routeTable = append(s.routeTable, route)
+	s.addRouteLocked(&route)
 }
 
-// RemoveRoutes removes matching routes from the route table.
-func (s *Stack) RemoveRoutes(match func(tcpip.Route) bool) {
+// +checklocks:s.routeMu
+func (s *Stack) addRouteLocked(route *tcpip.Route) {
+	routePrefix := route.Destination.Prefix()
+	n := s.routeTable.Front()
+	for ; n != nil; n = n.Next() {
+		if n.Destination.Prefix() < routePrefix {
+			s.routeTable.InsertBefore(n, route)
+			return
+		}
+	}
+	s.routeTable.PushBack(route)
+}
+
+// RemoveRoutes removes matching routes from the route table, it
+// returns the number of routes that are removed.
+func (s *Stack) RemoveRoutes(match func(tcpip.Route) bool) int {
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
 
-	var filteredRoutes []tcpip.Route
-	for _, route := range s.routeTable {
-		if !match(route) {
-			filteredRoutes = append(filteredRoutes, route)
+	return s.removeRoutesLocked(match)
+}
+
+// +checklocks:s.routeMu
+func (s *Stack) removeRoutesLocked(match func(tcpip.Route) bool) int {
+	count := 0
+	for route := s.routeTable.Front(); route != nil; {
+		next := route.Next()
+		if match(*route) {
+			s.routeTable.Remove(route)
+			count++
 		}
+		route = next
 	}
-	s.routeTable = filteredRoutes
+	return count
+}
+
+// ReplaceRoute replaces the route in the routing table which matches
+// the lookup key for the routing table. If there is no match, the given
+// route will still be added to the routing table.
+// The lookup key consists of destination, ToS, scope and output interface.
+func (s *Stack) ReplaceRoute(route tcpip.Route) {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+
+	s.removeRoutesLocked(func(rt tcpip.Route) bool {
+		return rt.Equal(route)
+	})
+	s.addRouteLocked(&route)
 }
 
 // NewEndpoint creates a new transport layer endpoint of the given protocol.
@@ -788,7 +928,7 @@ func (s *Stack) NewPacketEndpoint(cooked bool, netProto tcpip.NetworkProtocolNum
 }
 
 // NICContext is an opaque pointer used to store client-supplied NIC metadata.
-type NICContext interface{}
+type NICContext any
 
 // NICOptions specifies the configuration of a NIC as it is being created.
 // The zero value creates an enabled, unnamed NIC.
@@ -808,6 +948,29 @@ type NICOptions struct {
 
 	// QDisc is the queue discipline to use for this NIC.
 	QDisc QueueingDiscipline
+
+	// DeliverLinkPackets specifies whether the NIC is responsible for
+	// delivering raw packets to packet sockets.
+	DeliverLinkPackets bool
+
+	// EnableExperimentIPOption specifies whether the NIC is responsible for
+	// passing the experiment IP option.
+	EnableExperimentIPOption bool
+
+	// Kind specifies the link kind of the NIC (e.g. "veth", "bridge").
+	Kind string
+}
+
+// GetNICByID return a network device associated with the specified ID.
+func (s *Stack) GetNICByID(id tcpip.NICID) (*nic, tcpip.Error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	n, ok := s.nics[id]
+	if !ok {
+		return nil, &tcpip.ErrNoSuchFile{}
+	}
+	return n, nil
 }
 
 // CreateNICWithOptions creates a NIC with the provided id, LinkEndpoint, and
@@ -819,6 +982,9 @@ func (s *Stack) CreateNICWithOptions(id tcpip.NICID, ep LinkEndpoint, opts NICOp
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if id == 0 {
+		return &tcpip.ErrInvalidNICID{}
+	}
 	// Make sure id is unique.
 	if _, ok := s.nics[id]; ok {
 		return &tcpip.ErrDuplicateNICID{}
@@ -840,6 +1006,12 @@ func (s *Stack) CreateNICWithOptions(id tcpip.NICID, ep LinkEndpoint, opts NICOp
 		}
 	}
 	s.nics[id] = n
+	if n.IsLoopback() {
+		s.loopbackNIC = n
+	}
+	ep.SetOnCloseAction(func() {
+		s.RemoveNIC(id)
+	})
 	if !opts.Disabled {
 		return n.enable()
 	}
@@ -913,39 +1085,125 @@ func (s *Stack) CheckNIC(id tcpip.NICID) bool {
 // RemoveNIC removes NIC and all related routes from the network stack.
 func (s *Stack) RemoveNIC(id tcpip.NICID) tcpip.Error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.removeNICLocked(id)
+	deferAct, err := s.removeNICLocked(id, true /* closeLinkEndpoint */)
+	s.mu.Unlock()
+	if deferAct != nil {
+		deferAct()
+	}
+	return err
 }
 
 // removeNICLocked removes NIC and all related routes from the network stack.
 //
-// s.mu must be locked.
-func (s *Stack) removeNICLocked(id tcpip.NICID) tcpip.Error {
+// +checklocks:s.mu
+func (s *Stack) removeNICLocked(id tcpip.NICID, closeLinkEndpoint bool) (func(), tcpip.Error) {
+	nic, ok := s.nics[id]
+	if !ok {
+		return nil, &tcpip.ErrUnknownNICID{}
+	}
+	delete(s.nics, id)
+
+	if nic.Primary != nil {
+		b := nic.Primary.NetworkLinkEndpoint.(CoordinatorNIC)
+		if err := b.DelNIC(nic); err != nil {
+			return nil, err
+		}
+	}
+
+	// Remove routes in-place. n tracks the number of routes written.
+	s.routeMu.Lock()
+	for r := s.routeTable.Front(); r != nil; {
+		next := r.Next()
+		if r.NIC == id {
+			s.routeTable.Remove(r)
+		}
+		r = next
+	}
+	s.routeMu.Unlock()
+
+	if s.loopbackNIC == nic {
+		s.loopbackNIC = nil
+	}
+	return nic.remove(closeLinkEndpoint)
+}
+
+// GetNICCoordinatorID returns the ID of the coordinator device of a NIC.
+func (s *Stack) GetNICCoordinatorID(id tcpip.NICID) (tcpip.NICID, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if nic, ok := s.nics[id]; ok {
+		if nic.Primary != nil {
+			return nic.Primary.id, true
+		}
+	}
+	return 0, false
+}
+
+// SetNICCoordinator sets a coordinator device.
+func (s *Stack) SetNICCoordinator(id tcpip.NICID, mid tcpip.NICID) tcpip.Error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	nic, ok := s.nics[id]
 	if !ok {
 		return &tcpip.ErrUnknownNICID{}
 	}
-	if nic.IsLoopback() {
+	// Setting a coordinator for a coordinator NIC is not allowed.
+	if _, ok := nic.NetworkLinkEndpoint.(CoordinatorNIC); ok {
+		return &tcpip.ErrNoSuchFile{}
+	}
+	m, ok := s.nics[mid]
+	if !ok {
+		return &tcpip.ErrUnknownNICID{}
+	}
+	b, ok := m.NetworkLinkEndpoint.(CoordinatorNIC)
+	if !ok {
 		return &tcpip.ErrNotSupported{}
 	}
-	delete(s.nics, id)
-
-	// Remove routes in-place. n tracks the number of routes written.
-	s.routeMu.Lock()
-	n := 0
-	for i, r := range s.routeTable {
-		s.routeTable[i] = tcpip.Route{}
-		if r.NIC != id {
-			// Keep this route.
-			s.routeTable[n] = r
-			n++
-		}
+	if err := b.AddNIC(nic); err != nil {
+		return err
 	}
-	s.routeTable = s.routeTable[:n]
-	s.routeMu.Unlock()
+	nic.Primary = m
+	return nil
+}
 
-	return nic.remove()
+// SetNICAddress sets the hardware address which is identified by the nic ID.
+func (s *Stack) SetNICAddress(id tcpip.NICID, addr tcpip.LinkAddress) tcpip.Error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nic, ok := s.nics[id]
+	if !ok {
+		return &tcpip.ErrUnknownNICID{}
+	}
+	nic.NetworkLinkEndpoint.SetLinkAddress(addr)
+	return nil
+}
+
+// SetNICName sets a NIC's name.
+func (s *Stack) SetNICName(id tcpip.NICID, name string) tcpip.Error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nic, ok := s.nics[id]
+	if !ok {
+		return &tcpip.ErrUnknownNICID{}
+	}
+	nic.name = name
+	return nil
+}
+
+// SetNICMTU sets a NIC's MTU.
+func (s *Stack) SetNICMTU(id tcpip.NICID, mtu uint32) tcpip.Error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nic, ok := s.nics[id]
+	if !ok {
+		return &tcpip.ErrUnknownNICID{}
+	}
+	nic.NetworkLinkEndpoint.SetMTU(mtu)
+	return nil
 }
 
 // NICInfo captures the name and addresses assigned to a NIC.
@@ -981,6 +1239,12 @@ type NICInfo struct {
 	// MulticastForwarding holds the forwarding status for each network endpoint
 	// that supports multicast forwarding.
 	MulticastForwarding map[tcpip.NetworkProtocolNumber]bool
+
+	// Primary is the index of the main controlling interface in a bonded setup.
+	Primary tcpip.NICID
+
+	// Kind specifies the link kind of the NIC (e.g. "veth", "bridge").
+	Kind string
 }
 
 // HasNIC returns true if the NICID is defined in the stack.
@@ -991,65 +1255,88 @@ func (s *Stack) HasNIC(id tcpip.NICID) bool {
 	return ok
 }
 
+type forwardingFn func(tcpip.NetworkProtocolNumber) (bool, tcpip.Error)
+
+func forwardingValue(forwardingFn forwardingFn, proto tcpip.NetworkProtocolNumber, nicID tcpip.NICID, fnName string) (forward bool, ok bool) {
+	switch forwarding, err := forwardingFn(proto); err.(type) {
+	case nil:
+		return forwarding, true
+	case *tcpip.ErrUnknownProtocol:
+		panic(fmt.Sprintf("expected network protocol %d to be available on NIC %d", proto, nicID))
+	case *tcpip.ErrNotSupported:
+		// Not all network protocols support forwarding.
+	default:
+		panic(fmt.Sprintf("nic(id=%d).%s(%d): %s", nicID, fnName, proto, err))
+	}
+	return false, false
+}
+
+// precondition: s.mu is held.
+func (s *Stack) nicInfo(nic *nic, id tcpip.NICID) *NICInfo {
+	flags := NICStateFlags{
+		Up:          true, // Netstack interfaces are always up.
+		Running:     nic.Enabled(),
+		Promiscuous: nic.Promiscuous(),
+		Loopback:    nic.IsLoopback(),
+	}
+
+	netStats := make(map[tcpip.NetworkProtocolNumber]NetworkEndpointStats)
+	for proto, netEP := range nic.networkEndpoints {
+		netStats[proto] = netEP.Stats()
+	}
+
+	info := NICInfo{
+		Name:                nic.name,
+		LinkAddress:         nic.NetworkLinkEndpoint.LinkAddress(),
+		ProtocolAddresses:   nic.primaryAddresses(),
+		Flags:               flags,
+		MTU:                 nic.NetworkLinkEndpoint.MTU(),
+		Stats:               nic.stats.local,
+		NetworkStats:        netStats,
+		Context:             nic.context,
+		ARPHardwareType:     nic.NetworkLinkEndpoint.ARPHardwareType(),
+		Forwarding:          make(map[tcpip.NetworkProtocolNumber]bool),
+		MulticastForwarding: make(map[tcpip.NetworkProtocolNumber]bool),
+		Kind:                nic.kind,
+	}
+
+	for proto := range s.networkProtocols {
+		if forwarding, ok := forwardingValue(nic.forwarding, proto, id, "forwarding"); ok {
+			info.Forwarding[proto] = forwarding
+		}
+
+		if multicastForwarding, ok := forwardingValue(nic.multicastForwarding, proto, id, "multicastForwarding"); ok {
+			info.MulticastForwarding[proto] = multicastForwarding
+		}
+	}
+
+	if nic.Primary != nil {
+		info.Primary = nic.Primary.id
+	}
+
+	return &info
+}
+
+// SingleNICInfo returns the NICInfo for the given NICID.
+func (s *Stack) SingleNICInfo(id tcpip.NICID) (*NICInfo, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if nic, ok := s.nics[id]; !ok {
+		return nil, false
+	} else {
+		return s.nicInfo(nic, id), true
+	}
+}
+
 // NICInfo returns a map of NICIDs to their associated information.
 func (s *Stack) NICInfo() map[tcpip.NICID]NICInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	type forwardingFn func(tcpip.NetworkProtocolNumber) (bool, tcpip.Error)
-	forwardingValue := func(forwardingFn forwardingFn, proto tcpip.NetworkProtocolNumber, nicID tcpip.NICID, fnName string) (forward bool, ok bool) {
-		switch forwarding, err := forwardingFn(proto); err.(type) {
-		case nil:
-			return forwarding, true
-		case *tcpip.ErrUnknownProtocol:
-			panic(fmt.Sprintf("expected network protocol %d to be available on NIC %d", proto, nicID))
-		case *tcpip.ErrNotSupported:
-			// Not all network protocols support forwarding.
-		default:
-			panic(fmt.Sprintf("nic(id=%d).%s(%d): %s", nicID, fnName, proto, err))
-		}
-		return false, false
-	}
-
 	nics := make(map[tcpip.NICID]NICInfo)
 	for id, nic := range s.nics {
-		flags := NICStateFlags{
-			Up:          true, // Netstack interfaces are always up.
-			Running:     nic.Enabled(),
-			Promiscuous: nic.Promiscuous(),
-			Loopback:    nic.IsLoopback(),
-		}
-
-		netStats := make(map[tcpip.NetworkProtocolNumber]NetworkEndpointStats)
-		for proto, netEP := range nic.networkEndpoints {
-			netStats[proto] = netEP.Stats()
-		}
-
-		info := NICInfo{
-			Name:                nic.name,
-			LinkAddress:         nic.NetworkLinkEndpoint.LinkAddress(),
-			ProtocolAddresses:   nic.primaryAddresses(),
-			Flags:               flags,
-			MTU:                 nic.NetworkLinkEndpoint.MTU(),
-			Stats:               nic.stats.local,
-			NetworkStats:        netStats,
-			Context:             nic.context,
-			ARPHardwareType:     nic.NetworkLinkEndpoint.ARPHardwareType(),
-			Forwarding:          make(map[tcpip.NetworkProtocolNumber]bool),
-			MulticastForwarding: make(map[tcpip.NetworkProtocolNumber]bool),
-		}
-
-		for proto := range s.networkProtocols {
-			if forwarding, ok := forwardingValue(nic.forwarding, proto, id, "forwarding"); ok {
-				info.Forwarding[proto] = forwarding
-			}
-
-			if multicastForwarding, ok := forwardingValue(nic.multicastForwarding, proto, id, "multicastForwarding"); ok {
-				info.MulticastForwarding[proto] = multicastForwarding
-			}
-		}
-
-		nics[id] = info
+		nics[id] = *s.nicInfo(nic, id)
 	}
 	return nics
 }
@@ -1138,9 +1425,9 @@ func (s *Stack) GetMainNICAddress(id tcpip.NICID, protocol tcpip.NetworkProtocol
 	return nic.PrimaryAddress(protocol)
 }
 
-func (s *Stack) getAddressEP(nic *nic, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber) AssignableAddressEndpoint {
-	if len(localAddr) == 0 {
-		return nic.primaryEndpoint(netProto, remoteAddr)
+func (s *Stack) getAddressEP(nic *nic, localAddr, remoteAddr, srcHint tcpip.Address, netProto tcpip.NetworkProtocolNumber) AssignableAddressEndpoint {
+	if localAddr.BitLen() == 0 {
+		return nic.primaryEndpoint(netProto, remoteAddr, srcHint)
 	}
 	return nic.findEndpoint(netProto, localAddr, CanBePrimaryEndpoint)
 }
@@ -1150,13 +1437,16 @@ func (s *Stack) getAddressEP(nic *nic, localAddr, remoteAddr tcpip.Address, netP
 //
 // Returns nil if validation fails.
 func (s *Stack) NewRouteForMulticast(nicID tcpip.NICID, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber) *Route {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	nic, ok := s.nics[nicID]
 	if !ok || !nic.Enabled() {
 		return nil
 	}
 
-	if addressEndpoint := s.getAddressEP(nic, "" /* localAddr */, remoteAddr, netProto); addressEndpoint != nil {
-		return constructAndValidateRoute(netProto, addressEndpoint, nic, nic, "" /* gateway */, "" /* localAddr */, remoteAddr, s.handleLocal, false /* multicastLoop */)
+	if addressEndpoint := s.getAddressEP(nic, tcpip.Address{} /* localAddr */, remoteAddr, tcpip.Address{} /* srcHint */, netProto); addressEndpoint != nil {
+		return constructAndValidateRoute(netProto, addressEndpoint, nic, nic, tcpip.Address{} /* gateway */, tcpip.Address{} /* localAddr */, remoteAddr, s.handleLocal, false /* multicastLoop */, 0 /* mtu */)
 	}
 	return nil
 }
@@ -1164,7 +1454,7 @@ func (s *Stack) NewRouteForMulticast(nicID tcpip.NICID, remoteAddr tcpip.Address
 // findLocalRouteFromNICRLocked is like findLocalRouteRLocked but finds a route
 // from the specified NIC.
 //
-// Precondition: s.mu must be read locked.
+// +checklocksread:s.mu
 func (s *Stack) findLocalRouteFromNICRLocked(localAddressNIC *nic, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber) *Route {
 	localAddressEndpoint := localAddressNIC.getAddressOrCreateTempInner(netProto, localAddr, false /* createTemp */, NeverPrimaryEndpoint)
 	if localAddressEndpoint == nil {
@@ -1212,18 +1502,57 @@ func (s *Stack) findLocalRouteFromNICRLocked(localAddressNIC *nic, localAddr, re
 	return r
 }
 
+func (s *Stack) loopbackLocalRoute(localAddressNIC *nic, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber) *Route {
+	localAddressEndpoint := localAddressNIC.getAddressOrCreateTempInner(netProto, localAddr, true /* createTemp */, NeverPrimaryEndpoint)
+	if localAddressEndpoint == nil {
+		return nil
+	}
+
+	r := makeLocalRoute(
+		netProto,
+		localAddr,
+		remoteAddr,
+		localAddressNIC,
+		localAddressNIC,
+		localAddressEndpoint,
+	)
+
+	if r.IsOutboundBroadcast() {
+		r.Release()
+		return nil
+	}
+
+	return r
+}
+
 // findLocalRouteRLocked returns a local route.
 //
 // A local route is a route to some remote address which the stack owns. That
 // is, a local route is a route where packets never have to leave the stack.
 //
-// Precondition: s.mu must be read locked.
+// +checklocksread:s.mu
 func (s *Stack) findLocalRouteRLocked(localAddressNICID tcpip.NICID, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber) *Route {
-	if len(localAddr) == 0 {
+	if localAddr.BitLen() == 0 {
 		localAddr = remoteAddr
 	}
 
 	if localAddressNICID == 0 {
+		if s.loopbackNIC != nil {
+			// Send all packets directed to local ip addresses through the loopback device.
+			for _, nic := range s.nics {
+				if !nic.hasAddress(netProto, remoteAddr) {
+					continue
+				}
+				if isSubnetBroadcastOnNIC(nic, netProto, remoteAddr) {
+					break
+				}
+				if r := s.loopbackLocalRoute(s.loopbackNIC, localAddr, remoteAddr, netProto); r != nil {
+					return r
+				}
+				break
+			}
+		}
+
 		for _, localAddressNIC := range s.nics {
 			if r := s.findLocalRouteFromNICRLocked(localAddressNIC, localAddr, remoteAddr, netProto); r != nil {
 				return r
@@ -1259,6 +1588,28 @@ func isNICForwarding(nic *nic, proto tcpip.NetworkProtocolNumber) bool {
 	}
 }
 
+// findRouteWithLocalAddrFromAnyInterfaceRLocked returns a route to the given
+// destination address, leaving through the given NIC.
+//
+// Rather than preferring to find a route that uses a local address assigned to
+// the outgoing interface, it finds any NIC that holds a matching local address
+// endpoint.
+//
+// +checklocksread:s.mu
+func (s *Stack) findRouteWithLocalAddrFromAnyInterfaceRLocked(outgoingNIC *nic, localAddr, remoteAddr, srcHint, gateway tcpip.Address, netProto tcpip.NetworkProtocolNumber, multicastLoop bool, mtu uint32) *Route {
+	for _, aNIC := range s.nics {
+		addressEndpoint := s.getAddressEP(aNIC, localAddr, remoteAddr, srcHint, netProto)
+		if addressEndpoint == nil {
+			continue
+		}
+
+		if r := constructAndValidateRoute(netProto, addressEndpoint, aNIC /* localAddressNIC */, outgoingNIC, gateway, localAddr, remoteAddr, s.handleLocal, multicastLoop, mtu); r != nil {
+			return r
+		}
+	}
+	return nil
+}
+
 // FindRoute creates a route to the given destination address, leaving through
 // the given NIC and local address (if provided).
 //
@@ -1268,11 +1619,16 @@ func isNICForwarding(nic *nic, proto tcpip.NetworkProtocolNumber) bool {
 // leave through any interface unless the route is link-local.
 //
 // If no local address is provided, the stack will select a local address. If no
-// remote address is provided, the stack wil use a remote address equal to the
+// remote address is provided, the stack will use a remote address equal to the
 // local address.
 func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber, multicastLoop bool) (*Route, tcpip.Error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// Reject attempts to use unsupported protocols.
+	if !s.CheckNetworkProtocol(netProto) {
+		return nil, &tcpip.ErrUnknownProtocol{}
+	}
 
 	isLinkLocal := header.IsV6LinkLocalUnicastAddress(remoteAddr) || header.IsV6LinkLocalMulticastAddress(remoteAddr)
 	isLocalBroadcast := remoteAddr == header.IPv4Broadcast
@@ -1290,17 +1646,18 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 	// through the interface if the interface is valid and enabled.
 	if id != 0 && !needRoute {
 		if nic, ok := s.nics[id]; ok && nic.Enabled() {
-			if addressEndpoint := s.getAddressEP(nic, localAddr, remoteAddr, netProto); addressEndpoint != nil {
+			if addressEndpoint := s.getAddressEP(nic, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto); addressEndpoint != nil {
 				return makeRoute(
 					netProto,
-					"", /* gateway */
+					tcpip.Address{}, /* gateway */
 					localAddr,
 					remoteAddr,
-					nic, /* outboundNIC */
+					nic, /* outgoingNIC */
 					nic, /* localAddressNIC*/
 					addressEndpoint,
 					s.handleLocal,
 					multicastLoop,
+					0, /* mtu */
 				), nil
 			}
 		}
@@ -1319,8 +1676,8 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 		s.routeMu.RLock()
 		defer s.routeMu.RUnlock()
 
-		for _, route := range s.routeTable {
-			if len(remoteAddr) != 0 && !route.Destination.Contains(remoteAddr) {
+		for route := s.routeTable.Front(); route != nil; route = route.Next() {
+			if remoteAddr.BitLen() != 0 && !route.Destination.Contains(remoteAddr) {
 				continue
 			}
 
@@ -1330,12 +1687,12 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 			}
 
 			if id == 0 || id == route.NIC {
-				if addressEndpoint := s.getAddressEP(nic, localAddr, remoteAddr, netProto); addressEndpoint != nil {
+				if addressEndpoint := s.getAddressEP(nic, localAddr, remoteAddr, route.SourceHint, netProto); addressEndpoint != nil {
 					var gateway tcpip.Address
 					if needRoute {
 						gateway = route.Gateway
 					}
-					r := constructAndValidateRoute(netProto, addressEndpoint, nic /* outgoingNIC */, nic /* outgoingNIC */, gateway, localAddr, remoteAddr, s.handleLocal, multicastLoop)
+					r := constructAndValidateRoute(netProto, addressEndpoint, nic /* outgoingNIC */, nic /* outgoingNIC */, gateway, localAddr, remoteAddr, s.handleLocal, multicastLoop, route.MTU)
 					if r == nil {
 						panic(fmt.Sprintf("non-forwarding route validation failed with route table entry = %#v, id = %d, localAddr = %s, remoteAddr = %s", route, id, localAddr, remoteAddr))
 					}
@@ -1343,15 +1700,28 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 				}
 			}
 
-			// If the stack has forwarding enabled and we haven't found a valid route
-			// to the remote address yet, keep track of the first valid route. We
-			// keep iterating because we prefer routes that let us use a local
-			// address that is assigned to the outgoing interface. There is no
-			// requirement to do this from any RFC but simply a choice made to better
-			// follow a strong host model which the netstack follows at the time of
-			// writing.
-			if onlyGlobalAddresses && chosenRoute == (tcpip.Route{}) && isNICForwarding(nic, netProto) {
-				chosenRoute = route
+			// If the stack has forwarding enabled, we haven't found a valid route to
+			// the remote address yet, and we are routing locally generated traffic,
+			// keep track of the first valid route. We keep iterating because we
+			// prefer routes that let us use a local address that is assigned to the
+			// outgoing interface. There is no requirement to do this from any RFC
+			// but simply a choice made to better follow a strong host model which
+			// the netstack follows at the time of writing.
+			//
+			// Note that for incoming traffic that we are forwarding (for which the
+			// NIC and local address are unspecified), we do not keep iterating, as
+			// there is no reason to prefer routes that let us use a local address
+			// when routing forwarded (as opposed to locally-generated) traffic.
+			locallyGenerated := (id != 0 || localAddr != tcpip.Address{})
+			if onlyGlobalAddresses && chosenRoute.Equal(tcpip.Route{}) && isNICForwarding(nic, netProto) {
+				if locallyGenerated {
+					chosenRoute = *route
+					continue
+				}
+
+				if r := s.findRouteWithLocalAddrFromAnyInterfaceRLocked(nic, localAddr, remoteAddr, route.SourceHint, route.Gateway, netProto, multicastLoop, route.MTU); r != nil {
+					return r
+				}
 			}
 		}
 
@@ -1360,7 +1730,7 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 		return r, nil
 	}
 
-	if chosenRoute != (tcpip.Route{}) {
+	if !chosenRoute.Equal(tcpip.Route{}) {
 		// At this point we know the stack has forwarding enabled since chosenRoute is
 		// only set when forwarding is enabled.
 		nic, ok := s.nics[chosenRoute.NIC]
@@ -1377,34 +1747,27 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 		// Use the specified NIC to get the local address endpoint.
 		if id != 0 {
 			if aNIC, ok := s.nics[id]; ok {
-				if addressEndpoint := s.getAddressEP(aNIC, localAddr, remoteAddr, netProto); addressEndpoint != nil {
-					if r := constructAndValidateRoute(netProto, addressEndpoint, aNIC /* localAddressNIC */, nic /* outgoingNIC */, gateway, localAddr, remoteAddr, s.handleLocal, multicastLoop); r != nil {
+				if addressEndpoint := s.getAddressEP(aNIC, localAddr, remoteAddr, chosenRoute.SourceHint, netProto); addressEndpoint != nil {
+					if r := constructAndValidateRoute(netProto, addressEndpoint, aNIC /* localAddressNIC */, nic /* outgoingNIC */, gateway, localAddr, remoteAddr, s.handleLocal, multicastLoop, chosenRoute.MTU); r != nil {
 						return r, nil
 					}
 				}
 			}
 
-			return nil, &tcpip.ErrNoRoute{}
+			return nil, &tcpip.ErrNetworkUnreachable{}
 		}
 
 		if id == 0 {
 			// If an interface is not specified, try to find a NIC that holds the local
 			// address endpoint to construct a route.
-			for _, aNIC := range s.nics {
-				addressEndpoint := s.getAddressEP(aNIC, localAddr, remoteAddr, netProto)
-				if addressEndpoint == nil {
-					continue
-				}
-
-				if r := constructAndValidateRoute(netProto, addressEndpoint, aNIC /* localAddressNIC */, nic /* outgoingNIC */, gateway, localAddr, remoteAddr, s.handleLocal, multicastLoop); r != nil {
-					return r, nil
-				}
+			if r := s.findRouteWithLocalAddrFromAnyInterfaceRLocked(nic, localAddr, remoteAddr, chosenRoute.SourceHint, gateway, netProto, multicastLoop, chosenRoute.MTU); r != nil {
+				return r, nil
 			}
 		}
 	}
 
 	if needRoute {
-		return nil, &tcpip.ErrNoRoute{}
+		return nil, &tcpip.ErrNetworkUnreachable{}
 	}
 	if header.IsV6LoopbackAddress(remoteAddr) {
 		return nil, &tcpip.ErrBadLocalAddress{}
@@ -1422,7 +1785,10 @@ func (s *Stack) CheckNetworkProtocol(protocol tcpip.NetworkProtocolNumber) bool 
 // CheckDuplicateAddress performs duplicate address detection for the address on
 // the specified interface.
 func (s *Stack) CheckDuplicateAddress(nicID tcpip.NICID, protocol tcpip.NetworkProtocolNumber, addr tcpip.Address, h DADCompletionHandler) (DADCheckAddressDisposition, tcpip.Error) {
+	s.mu.RLock()
 	nic, ok := s.nics[nicID]
+	s.mu.RUnlock()
+
 	if !ok {
 		return 0, &tcpip.ErrUnknownNICID{}
 	}
@@ -1556,7 +1922,7 @@ func (s *Stack) AddStaticNeighbor(nicID tcpip.NICID, protocol tcpip.NetworkProto
 }
 
 // RemoveNeighbor removes an IP to MAC address association previously created
-// either automically or by AddStaticNeighbor. Returns ErrBadAddress if there
+// either automatically or by AddStaticNeighbor. Returns ErrBadAddress if there
 // is no association with the provided address.
 func (s *Stack) RemoveNeighbor(nicID tcpip.NICID, protocol tcpip.NetworkProtocolNumber, addr tcpip.Address) tcpip.Error {
 	s.mu.RLock()
@@ -1642,16 +2008,26 @@ func (s *Stack) UnregisterRawTransportEndpoint(netProto tcpip.NetworkProtocolNum
 
 // RegisterRestoredEndpoint records e as an endpoint that has been restored on
 // this stack.
-func (s *Stack) RegisterRestoredEndpoint(e ResumableEndpoint) {
+func (s *Stack) RegisterRestoredEndpoint(e RestoredEndpoint) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.restoredEndpoints = append(s.restoredEndpoints, e)
+}
+
+// RegisterResumableEndpoint records e as an endpoint that has to be resumed.
+func (s *Stack) RegisterResumableEndpoint(e ResumableEndpoint) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.resumableEndpoints = append(s.resumableEndpoints, e)
-	s.mu.Unlock()
 }
 
 // RegisteredEndpoints returns all endpoints which are currently registered.
 func (s *Stack) RegisteredEndpoints() []TransportEndpoint {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	var es []TransportEndpoint
 	for _, e := range s.demux.protocol {
 		es = append(es, e.transportEndpoints()...)
@@ -1662,11 +2038,12 @@ func (s *Stack) RegisteredEndpoints() []TransportEndpoint {
 // CleanupEndpoints returns endpoints currently in the cleanup state.
 func (s *Stack) CleanupEndpoints() []TransportEndpoint {
 	s.cleanupEndpointsMu.Lock()
+	defer s.cleanupEndpointsMu.Unlock()
+
 	es := make([]TransportEndpoint, 0, len(s.cleanupEndpoints))
 	for e := range s.cleanupEndpoints {
 		es = append(es, e)
 	}
-	s.cleanupEndpointsMu.Unlock()
 	return es
 }
 
@@ -1674,10 +2051,11 @@ func (s *Stack) CleanupEndpoints() []TransportEndpoint {
 // for restoring a stack after a save.
 func (s *Stack) RestoreCleanupEndpoints(es []TransportEndpoint) {
 	s.cleanupEndpointsMu.Lock()
+	defer s.cleanupEndpointsMu.Unlock()
+
 	for _, e := range es {
 		s.cleanupEndpoints[e] = struct{}{}
 	}
-	s.cleanupEndpointsMu.Unlock()
 }
 
 // Close closes all currently registered transport endpoints.
@@ -1716,15 +2094,29 @@ func (s *Stack) Wait() {
 		p.Wait()
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	deferActs := make([]func(), 0)
 
+	s.mu.Lock()
 	for id, n := range s.nics {
 		// Remove NIC to ensure that qDisc goroutines are correctly
 		// terminated on stack teardown.
-		s.removeNICLocked(id)
+		act, _ := s.removeNICLocked(id, true /* closeLinkEndpoint */)
 		n.NetworkLinkEndpoint.Wait()
+		if act != nil {
+			deferActs = append(deferActs, act)
+		}
 	}
+	s.mu.Unlock()
+
+	for _, act := range deferActs {
+		act()
+	}
+}
+
+// Destroy destroys the stack with all endpoints.
+func (s *Stack) Destroy() {
+	s.Close()
+	s.Wait()
 }
 
 // Pause pauses any protocol level background workers.
@@ -1734,17 +2126,84 @@ func (s *Stack) Pause() {
 	}
 }
 
-// Resume restarts the stack after a restore. This must be called after the
+func (s *Stack) getNICs() map[tcpip.NICID]*nic {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	nics := s.nics
+	return nics
+}
+
+// ResetConfig resets the stack's NICs and ID generator.
+func (s *Stack) ResetConfig() {
+	nics := make(map[tcpip.NICID]*nic)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nics = nics
+	s.loopbackNIC = nil
+	s.nicIDGen.Store(0)
+}
+
+// ReplaceConfig replaces config in the loaded stack.
+func (s *Stack) ReplaceConfig(st *Stack) {
+	if st == nil {
+		panic("stack.Stack cannot be nil when replacing config")
+	}
+
+	// Update route table.
+	s.SetRouteTable(st.GetRouteTable())
+
+	nics := st.getNICs()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Update iptables and nftables.
+	s.tables = st.IPTables()
+	s.SetNFTables(st.NFTables())
+	for id, nic := range nics {
+		nic.stack = s
+		s.nics[id] = nic
+		if nic.IsLoopback() {
+			s.loopbackNIC = nic
+		} else if s.externalNetworkingDisabled {
+			nic.disable()
+		}
+		_ = s.NextNICID()
+	}
+}
+
+// Restore restarts the stack after a restore. This must be called after the
 // entire system has been restored.
+func (s *Stack) Restore() {
+	// RestoredEndpoint.Restore() may call other methods on s, so we can't hold
+	// s.mu while restoring the endpoints.
+	s.mu.Lock()
+	eps := s.restoredEndpoints
+	s.restoredEndpoints = nil
+	s.mu.Unlock()
+	for _, e := range eps {
+		e.Restore(s)
+	}
+
+	// Make sure all the endpoints are loaded correctly before resuming the
+	// protocol level background workers.
+	tcpip.AsyncLoading.Wait()
+
+	// Now restore any protocol level background workers.
+	for _, p := range s.transportProtocols {
+		p.proto.Restore()
+	}
+}
+
+// Resume resumes the stack after a save.
 func (s *Stack) Resume() {
-	// ResumableEndpoint.Resume() may call other methods on s, so we can't hold
-	// s.mu while resuming the endpoints.
 	s.mu.Lock()
 	eps := s.resumableEndpoints
 	s.resumableEndpoints = nil
 	s.mu.Unlock()
 	for _, e := range eps {
-		e.Resume(s)
+		e.Resume()
 	}
 	// Now resume any protocol level background workers.
 	for _, p := range s.transportProtocols {
@@ -1763,10 +2222,7 @@ func (s *Stack) RegisterPacketEndpoint(nicID tcpip.NICID, netProto tcpip.Network
 	if nicID == 0 {
 		// Register with each NIC.
 		for _, nic := range s.nics {
-			if err := nic.registerPacketEndpoint(netProto, ep); err != nil {
-				s.unregisterPacketEndpointLocked(0, netProto, ep)
-				return err
-			}
+			nic.registerPacketEndpoint(netProto, ep)
 		}
 		return nil
 	}
@@ -1776,9 +2232,7 @@ func (s *Stack) RegisterPacketEndpoint(nicID tcpip.NICID, netProto tcpip.Network
 	if !ok {
 		return &tcpip.ErrUnknownNICID{}
 	}
-	if err := nic.registerPacketEndpoint(netProto, ep); err != nil {
-		return err
-	}
+	nic.registerPacketEndpoint(netProto, ep)
 
 	return nil
 }
@@ -1792,6 +2246,7 @@ func (s *Stack) UnregisterPacketEndpoint(nicID tcpip.NICID, netProto tcpip.Netwo
 	s.unregisterPacketEndpointLocked(nicID, netProto, ep)
 }
 
+// +checklocks:s.mu
 func (s *Stack) unregisterPacketEndpointLocked(nicID tcpip.NICID, netProto tcpip.NetworkProtocolNumber, ep PacketEndpoint) {
 	// If no NIC is specified, unregister on all devices.
 	if nicID == 0 {
@@ -1812,7 +2267,13 @@ func (s *Stack) unregisterPacketEndpointLocked(nicID tcpip.NICID, netProto tcpip
 
 // WritePacketToRemote writes a payload on the specified NIC using the provided
 // network protocol and remote link address.
-func (s *Stack) WritePacketToRemote(nicID tcpip.NICID, remote tcpip.LinkAddress, netProto tcpip.NetworkProtocolNumber, payload bufferv2.Buffer) tcpip.Error {
+func (s *Stack) WritePacketToRemote(nicID tcpip.NICID, remote tcpip.LinkAddress, netProto tcpip.NetworkProtocolNumber, payload buffer.Buffer) tcpip.Error {
+	return s.WritePacketToRemoteWithMark(nicID, remote, netProto, payload, 0)
+}
+
+// WritePacketToRemoteWithMark writes a payload on the specified NIC using the
+// provided network protocol, remote link address, and packet mark.
+func (s *Stack) WritePacketToRemoteWithMark(nicID tcpip.NICID, remote tcpip.LinkAddress, netProto tcpip.NetworkProtocolNumber, payload buffer.Buffer, mark uint32) tcpip.Error {
 	s.mu.Lock()
 	nic, ok := s.nics[nicID]
 	s.mu.Unlock()
@@ -1822,6 +2283,7 @@ func (s *Stack) WritePacketToRemote(nicID tcpip.NICID, remote tcpip.LinkAddress,
 	pkt := NewPacketBuffer(PacketBufferOptions{
 		ReserveHeaderBytes: int(nic.MaxHeaderLength()),
 		Payload:            payload,
+		Mark:               mark,
 	})
 	defer pkt.DecRef()
 	pkt.NetworkProtocolNumber = netProto
@@ -1830,7 +2292,13 @@ func (s *Stack) WritePacketToRemote(nicID tcpip.NICID, remote tcpip.LinkAddress,
 
 // WriteRawPacket writes data directly to the specified NIC without adding any
 // headers.
-func (s *Stack) WriteRawPacket(nicID tcpip.NICID, proto tcpip.NetworkProtocolNumber, payload bufferv2.Buffer) tcpip.Error {
+func (s *Stack) WriteRawPacket(nicID tcpip.NICID, proto tcpip.NetworkProtocolNumber, payload buffer.Buffer) tcpip.Error {
+	return s.WriteRawPacketWithMark(nicID, proto, payload, 0)
+}
+
+// WriteRawPacketWithMark writes data directly to the specified NIC without adding any
+// headers, setting the specified packet mark.
+func (s *Stack) WriteRawPacketWithMark(nicID tcpip.NICID, proto tcpip.NetworkProtocolNumber, payload buffer.Buffer, mark uint32) tcpip.Error {
 	s.mu.RLock()
 	nic, ok := s.nics[nicID]
 	s.mu.RUnlock()
@@ -1840,10 +2308,11 @@ func (s *Stack) WriteRawPacket(nicID tcpip.NICID, proto tcpip.NetworkProtocolNum
 
 	pkt := NewPacketBuffer(PacketBufferOptions{
 		Payload: payload,
+		Mark:    mark,
 	})
 	defer pkt.DecRef()
 	pkt.NetworkProtocolNumber = proto
-	return nic.writeRawPacket(pkt)
+	return nic.writeRawPacketWithLinkHeaderInPayload(pkt)
 }
 
 // NetworkProtocolInstance returns the protocol instance in the stack for the
@@ -1864,41 +2333,6 @@ func (s *Stack) TransportProtocolInstance(num tcpip.TransportProtocolNumber) Tra
 		return pState.proto
 	}
 	return nil
-}
-
-// AddTCPProbe installs a probe function that will be invoked on every segment
-// received by a given TCP endpoint. The probe function is passed a copy of the
-// TCP endpoint state before and after processing of the segment.
-//
-// NOTE: TCPProbe is added only to endpoints created after this call. Endpoints
-// created prior to this call will not call the probe function.
-//
-// Further, installing two different probes back to back can result in some
-// endpoints calling the first one and some the second one. There is no
-// guarantee provided on which probe will be invoked. Ideally this should only
-// be called once per stack.
-func (s *Stack) AddTCPProbe(probe TCPProbeFunc) {
-	s.tcpProbeFunc.Store(probe)
-}
-
-// GetTCPProbe returns the TCPProbeFunc if installed with AddTCPProbe, nil
-// otherwise.
-func (s *Stack) GetTCPProbe() TCPProbeFunc {
-	p := s.tcpProbeFunc.Load()
-	if p == nil {
-		return nil
-	}
-	return p.(TCPProbeFunc)
-}
-
-// RemoveTCPProbe removes an installed TCP probe.
-//
-// NOTE: This only ensures that endpoints created after this call do not
-// have a probe attached. Endpoints already created will continue to invoke
-// TCP probe.
-func (s *Stack) RemoveTCPProbe() {
-	// This must be TCPProbeFunc(nil) because atomic.Value.Store(nil) panics.
-	s.tcpProbeFunc.Store(TCPProbeFunc(nil))
 }
 
 // JoinGroup joins the given multicast group on the given NIC.
@@ -1938,6 +2372,49 @@ func (s *Stack) IsInGroup(nicID tcpip.NICID, multicastAddr tcpip.Address) (bool,
 // IPTables returns the stack's iptables.
 func (s *Stack) IPTables() *IPTables {
 	return s.tables
+}
+
+// SetIPTables sets the stack's iptables.
+func (s *Stack) SetIPTables(tables *IPTables) {
+	s.tables = tables
+}
+
+// NFTables returns the stack's nftables.
+func (s *Stack) NFTables() NFTablesInterface {
+	val := s.nftables.Load()
+	if val == nil {
+		return nil
+	}
+	return *val
+}
+
+// SetNFTables sets the stack's nftables.
+func (s *Stack) SetNFTables(nft NFTablesInterface) {
+	if nft == nil {
+		s.nftables.Store(nil)
+	} else {
+		s.nftables.Store(&nft)
+	}
+}
+
+// LockNFTablesUpdate locks the stack's nftables update mutex for netlink batch modification.
+func (s *Stack) LockNFTablesUpdate() {
+	s.nftablesUpdateMu.Lock()
+}
+
+// UnlockNFTablesUpdate unlocks the stack's nftables update mutex.
+func (s *Stack) UnlockNFTablesUpdate() {
+	s.nftablesUpdateMu.Unlock()
+}
+
+// IsNFTablesConfigured returns true if the stack has nftables configured.
+func (s *Stack) IsNFTablesConfigured() bool {
+	return s.nftablesConfigured.Load()
+}
+
+// SetNFTablesConfigured sets whether the stack has nftables configured.
+func (s *Stack) SetNFTablesConfigured(configured bool) {
+	s.nftablesConfigured.Store(configured)
 }
 
 // ICMPLimit returns the maximum number of ICMP messages that can be sent
@@ -2020,15 +2497,16 @@ func (s *Stack) Seed() uint32 {
 	return s.seed
 }
 
-// Rand returns a reference to a pseudo random generator that can be used
-// to generate random numbers as required.
-func (s *Stack) Rand() *rand.Rand {
-	return s.randomGenerator
+// InsecureRNG returns a reference to a pseudo random generator that can be used
+// to generate random numbers as required. It is not cryptographically secure
+// and should not be used for security sensitive work.
+func (s *Stack) InsecureRNG() *rand.Rand {
+	return s.insecureRNG
 }
 
 // SecureRNG returns the stack's cryptographically secure random number
 // generator.
-func (s *Stack) SecureRNG() io.Reader {
+func (s *Stack) SecureRNG() cryptorand.RNG {
 	return s.secureRNG
 }
 
@@ -2131,4 +2609,99 @@ func (s *Stack) IsSubnetBroadcast(nicID tcpip.NICID, protocol tcpip.NetworkProto
 // operations.
 func (s *Stack) PacketEndpointWriteSupported() bool {
 	return s.packetEndpointWriteSupported
+}
+
+// SetNICStack moves the network device to the specified network namespace.
+func (s *Stack) SetNICStack(id tcpip.NICID, peer *Stack) (tcpip.NICID, tcpip.Error) {
+	s.mu.Lock()
+	nic, ok := s.nics[id]
+	if !ok {
+		s.mu.Unlock()
+		return 0, &tcpip.ErrUnknownNICID{}
+	}
+	if s == peer {
+		s.mu.Unlock()
+		return id, nil
+	}
+
+	linkEp := nic.NetworkLinkEndpoint.(LinkEndpoint)
+	name := nic.Name()
+
+	deferAct, err := s.removeNICLocked(id, false /* closeLinkEndpoint */)
+	s.mu.Unlock()
+	if deferAct != nil {
+		deferAct()
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	id = tcpip.NICID(peer.NextNICID())
+	return id, peer.CreateNICWithOptions(id, linkEp, NICOptions{Name: name})
+}
+
+// SetRemoveConf sets the removeConf in stack to the given value.
+func (s *Stack) SetRemoveConf(removeConf bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.removeConf = removeConf
+}
+
+// GetRemoveConf gets the removeConf from stack.
+func (s *Stack) GetRemoveConf() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.removeConf
+}
+
+// SetAllowConnectedOnSave sets allowConnectedOnSave in stack with the given value.
+func (s *Stack) SetAllowConnectedOnSave(allowConnectedOnSave bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allowConnectedOnSave = allowConnectedOnSave
+}
+
+// GetAllowConnectedOnSave gets the allowConnectedOnSave from stack.
+func (s *Stack) GetAllowConnectedOnSave() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.allowConnectedOnSave
+}
+
+// AllowLiveTCPMigration returns if TCP connections can be migrated.
+func (s *Stack) AllowLiveTCPMigration() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.allowLiveTCPMigration
+}
+
+// SetAllowLiveTCPMigration sets if TCP connections can be migrated.
+func (s *Stack) SetAllowLiveTCPMigration(allow bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allowLiveTCPMigration = allow
+}
+
+// DisableAllNonLoopbackNICs disables all non-loopback NICs in the stack.
+func (s *Stack) DisableAllNonLoopbackNICs() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.externalNetworkingDisabled = true
+	for _, nic := range s.nics {
+		if !nic.IsLoopback() {
+			nic.disable()
+		}
+	}
+}
+
+// EnableAllNonLoopbackNICs enables all non-loopback NICs in the stack.
+func (s *Stack) EnableAllNonLoopbackNICs() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.externalNetworkingDisabled = false
+	for _, nic := range s.nics {
+		if !nic.IsLoopback() {
+			nic.enable()
+		}
+	}
 }

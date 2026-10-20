@@ -4,11 +4,8 @@ package ssm
 
 import (
 	"context"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"time"
 )
 
@@ -30,12 +27,13 @@ func (c *Client) GetPatchBaseline(ctx context.Context, params *GetPatchBaselineI
 
 type GetPatchBaselineInput struct {
 
-	// The ID of the patch baseline to retrieve. To retrieve information about an
-	// Amazon Web Services managed patch baseline, specify the full Amazon Resource
-	// Name (ARN) of the baseline. For example, for the baseline
-	// AWS-AmazonLinuxDefaultPatchBaseline, specify
+	// The ID of the patch baseline to retrieve.
+	//
+	// To retrieve information about an Amazon Web Services managed patch baseline,
+	// specify the full Amazon Resource Name (ARN) of the baseline. For example, for
+	// the baseline AWS-AmazonLinuxDefaultPatchBaseline , specify
 	// arn:aws:ssm:us-east-2:733109147000:patchbaseline/pb-0e392de35e7c563b7 instead of
-	// pb-0e392de35e7c563b7.
+	// pb-0e392de35e7c563b7 .
 	//
 	// This member is required.
 	BaselineId *string
@@ -56,9 +54,16 @@ type GetPatchBaselineOutput struct {
 	ApprovedPatchesComplianceLevel types.PatchComplianceLevel
 
 	// Indicates whether the list of approved patches includes non-security updates
-	// that should be applied to the managed nodes. The default value is false. Applies
-	// to Linux managed nodes only.
-	ApprovedPatchesEnableNonSecurity bool
+	// that should be applied to the managed nodes. The default value is false .
+	// Applies to Linux managed nodes only.
+	ApprovedPatchesEnableNonSecurity *bool
+
+	// Indicates the compliance status of managed nodes for which security-related
+	// patches are available but were not approved. This preference is specified when
+	// the CreatePatchBaseline or UpdatePatchBaseline commands are run.
+	//
+	// Applies to Windows Server managed nodes only.
+	AvailableSecurityUpdatesComplianceStatus types.PatchComplianceStatus
 
 	// The ID of the retrieved patch baseline.
 	BaselineId *string
@@ -112,46 +117,20 @@ func (c *Client) addOperationGetPatchBaselineMiddlewares(stack *middleware.Stack
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpGetPatchBaselineValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opGetPatchBaseline(options.Region), middleware.Before); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -163,14 +142,11 @@ func (c *Client) addOperationGetPatchBaselineMiddlewares(stack *middleware.Stack
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
-	return nil
-}
-
-func newServiceMetadataMiddleware_opGetPatchBaseline(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "ssm",
-		OperationName: "GetPatchBaseline",
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
 	}
+	if err = addInterceptors(stack, options); err != nil {
+		return err
+	}
+	return nil
 }

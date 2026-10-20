@@ -35,7 +35,7 @@ func (borderRadius *borderRadiusTracker) updateCorner(rules []css_ast.Rule, corn
 	borderRadius.corners[corner] = new
 }
 
-func (borderRadius *borderRadiusTracker) mangleCorners(rules []css_ast.Rule, decl *css_ast.RDeclaration, index int, minifyWhitespace bool) {
+func (borderRadius *borderRadiusTracker) mangleCorners(rules []css_ast.Rule, decl *css_ast.RDeclaration, minifyWhitespace bool) {
 	// Reset if we see a change in the "!important" flag
 	if borderRadius.important != decl.Important {
 		borderRadius.corners = [4]borderRadiusCorner{}
@@ -87,7 +87,7 @@ func (borderRadius *borderRadiusTracker) mangleCorners(rules []css_ast.Rule, dec
 			firstToken:  t,
 			secondToken: t,
 			unitSafety:  unitSafety,
-			ruleIndex:   uint32(index),
+			ruleIndex:   uint32(len(rules) - 1),
 		})
 	}
 
@@ -105,7 +105,7 @@ func (borderRadius *borderRadiusTracker) mangleCorners(rules []css_ast.Rule, dec
 	borderRadius.compactRules(rules, decl.KeyRange, minifyWhitespace)
 }
 
-func (borderRadius *borderRadiusTracker) mangleCorner(rules []css_ast.Rule, decl *css_ast.RDeclaration, index int, minifyWhitespace bool, corner int) {
+func (borderRadius *borderRadiusTracker) mangleCorner(rules []css_ast.Rule, decl *css_ast.RDeclaration, minifyWhitespace bool, corner int) {
 	// Reset if we see a change in the "!important" flag
 	if borderRadius.important != decl.Important {
 		borderRadius.corners = [4]borderRadiusCorner{}
@@ -145,7 +145,7 @@ func (borderRadius *borderRadiusTracker) mangleCorner(rules []css_ast.Rule, decl
 			firstToken:    firstToken,
 			secondToken:   secondToken,
 			unitSafety:    unitSafety,
-			ruleIndex:     uint32(index),
+			ruleIndex:     uint32(len(rules) - 1),
 			wasSingleRule: true,
 		})
 		borderRadius.compactRules(rules, decl.KeyRange, minifyWhitespace)
@@ -189,6 +189,7 @@ func (borderRadius *borderRadiusTracker) compactRules(rules []css_ast.Rule, keyR
 			whitespace = css_ast.WhitespaceBefore | css_ast.WhitespaceAfter
 		}
 		tokens = append(tokens, css_ast.Token{
+			Loc:        tokens[len(tokens)-1].Loc,
 			Kind:       css_lexer.TDelimSlash,
 			Text:       "/",
 			Whitespace: whitespace,
@@ -197,17 +198,20 @@ func (borderRadius *borderRadiusTracker) compactRules(rules []css_ast.Rule, keyR
 	}
 
 	// Remove all of the existing declarations
-	rules[borderRadius.corners[0].ruleIndex] = css_ast.Rule{}
-	rules[borderRadius.corners[1].ruleIndex] = css_ast.Rule{}
-	rules[borderRadius.corners[2].ruleIndex] = css_ast.Rule{}
-	rules[borderRadius.corners[3].ruleIndex] = css_ast.Rule{}
+	var minLoc logger.Loc
+	for i, corner := range borderRadius.corners {
+		if loc := rules[corner.ruleIndex].Loc; i == 0 || loc.Start < minLoc.Start {
+			minLoc = loc
+		}
+		rules[corner.ruleIndex] = css_ast.Rule{}
+	}
 
 	// Insert the combined declaration where the last rule was
-	rules[borderRadius.corners[3].ruleIndex].Data = &css_ast.RDeclaration{
+	rules[borderRadius.corners[3].ruleIndex] = css_ast.Rule{Loc: minLoc, Data: &css_ast.RDeclaration{
 		Key:       css_ast.DBorderRadius,
 		KeyText:   "border-radius",
 		Value:     tokens,
 		KeyRange:  keyRange,
 		Important: borderRadius.important,
-	}
+	}}
 }

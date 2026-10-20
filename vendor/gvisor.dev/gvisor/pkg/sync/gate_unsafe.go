@@ -110,8 +110,8 @@ func (g *Gate) leaveClosed() {
 	if atomic.LoadUintptr(&g.closingG) == 0 {
 		return
 	}
-	if g := atomic.SwapUintptr(&g.closingG, 0); g > preparingG {
-		goready(g, 0)
+	if cG := atomic.SwapUintptr(&g.closingG, 0); cG > preparingG {
+		goready(cG, 0)
 	}
 }
 
@@ -133,15 +133,16 @@ func (g *Gate) Close() {
 		panic("concurrent Close of sync.Gate")
 	}
 
-	if g := atomic.SwapUintptr(&g.closingG, preparingG); g != 0 {
-		panic(fmt.Sprintf("invalid sync.Gate.closingG during Close: %#x", g))
+	if cG := atomic.SwapUintptr(&g.closingG, preparingG); cG != 0 {
+		panic(fmt.Sprintf("invalid sync.Gate.closingG during Close: %#x", cG))
 	}
 	if atomic.LoadInt32(&g.userCount) == math.MinInt32 {
 		// The last call to Leave arrived while we were setting up closingG.
 		return
 	}
-	// WaitReasonSemacquire/TraceEvGoBlockSync are consistent with WaitGroup.
-	gopark(gateCommit, gohacks.Noescape(unsafe.Pointer(&g.closingG)), WaitReasonSemacquire, TraceEvGoBlockSync, 0)
+	// WaitReasonSemacquire/TraceBlockSync are consistent with WaitGroup.
+	gopark(gateCommit, gohacks.Noescape(unsafe.Pointer(&g.closingG)), WaitReasonSemacquire, TraceBlockSync, 0)
+	RaceAcquire(unsafe.Pointer(&g.closingG))
 }
 
 //go:norace

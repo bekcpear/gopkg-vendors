@@ -17,6 +17,8 @@
 
 package cpuid
 
+import "context"
+
 // Static is a static CPUID function.
 //
 // +stateify savable
@@ -24,7 +26,9 @@ type Static map[In]Out
 
 // Fixed converts the FeatureSet to a fixed set.
 func (fs FeatureSet) Fixed() FeatureSet {
-	return fs.ToStatic().ToFeatureSet()
+	sfs := fs.ToStatic().ToFeatureSet()
+	sfs.hwCap = fs.hwCap
+	return sfs
 }
 
 // ToStatic converts a FeatureSet to a Static function.
@@ -86,22 +90,23 @@ func (s Static) ToFeatureSet() FeatureSet {
 		ns[k] = v
 	}
 	ns.normalize()
-	return FeatureSet{ns}
+	return FeatureSet{ns, hwCap{}}
 }
 
 // afterLoad calls normalize.
-func (s Static) afterLoad() {
+func (s Static) afterLoad(context.Context) {
 	s.normalize()
 }
 
 // normalize normalizes FPU sizes.
 func (s Static) normalize() {
 	// Override local FPU sizes, which must be fixed.
-	fs := FeatureSet{s}
+	fs := FeatureSet{s, hwCap{}}
 	if fs.HasFeature(X86FeatureXSAVE) {
 		in := In{Eax: uint32(xSaveInfo)}
 		out := s[in]
-		out.Ecx = maxXsaveSize
+		out.Ecx = max(out.Ecx, maxXsaveSize)
+		out.Ebx = max(out.Ebx, xsaveSize)
 		s[in] = out
 	}
 }

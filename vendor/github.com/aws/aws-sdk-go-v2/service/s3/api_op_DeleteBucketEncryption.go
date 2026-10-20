@@ -4,33 +4,56 @@ package s3
 
 import (
 	"context"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	s3cust "github.com/aws/aws-sdk-go-v2/service/s3/internal/customizations"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"github.com/aws/smithy-go/ptr"
 )
 
-// This implementation of the DELETE action removes default encryption from the
-// bucket. For information about the Amazon S3 default encryption feature, see
-// Amazon S3 Default Bucket Encryption
-// (https://docs.aws.amazon.com/AmazonS3/latest/dev/bucket-encryption.html) in the
-// Amazon S3 User Guide. To use this operation, you must have permissions to
-// perform the s3:PutEncryptionConfiguration action. The bucket owner has this
-// permission by default. The bucket owner can grant this permission to others. For
-// more information about permissions, see Permissions Related to Bucket
-// Subresource Operations
-// (https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-with-s3-actions.html#using-with-s3-actions-related-to-bucket-subresources)
-// and Managing Access Permissions to your Amazon S3 Resources
-// (https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-access-control.html)
-// in the Amazon S3 User Guide. Related Resources
+// This implementation of the DELETE action resets the default encryption for the
+// bucket as server-side encryption with Amazon S3 managed keys (SSE-S3).
 //
-// * PutBucketEncryption
-// (https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketEncryption.html)
+//   - General purpose buckets - For information about the bucket default
+//     encryption feature, see [Amazon S3 Bucket Default Encryption]in the Amazon S3 User Guide.
 //
-// *
-// GetBucketEncryption
-// (https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketEncryption.html)
+//   - Directory buckets - For directory buckets, there are only two supported
+//     options for server-side encryption: SSE-S3 and SSE-KMS. For information about
+//     the default encryption configuration in directory buckets, see [Setting default server-side encryption behavior for directory buckets].
+//
+// Permissions
+//
+//   - General purpose bucket permissions - The s3:PutEncryptionConfiguration
+//     permission is required in a policy. The bucket owner has this permission by
+//     default. The bucket owner can grant this permission to others. For more
+//     information about permissions, see [Permissions Related to Bucket Operations]and [Managing Access Permissions to Your Amazon S3 Resources].
+//
+//   - Directory bucket permissions - To grant access to this API operation, you
+//     must have the s3express:PutEncryptionConfiguration permission in an IAM
+//     identity-based policy instead of a bucket policy. Cross-account access to this
+//     API operation isn't supported. This operation can only be performed by the
+//     Amazon Web Services account that owns the resource. For more information about
+//     directory bucket policies and permissions, see [Amazon Web Services Identity and Access Management (IAM) for S3 Express One Zone]in the Amazon S3 User Guide.
+//
+// HTTP Host header syntax  Directory buckets - The HTTP Host header syntax is
+// s3express-control.region-code.amazonaws.com .
+//
+// The following operations are related to DeleteBucketEncryption :
+//
+// [PutBucketEncryption]
+//
+// [GetBucketEncryption]
+//
+// You must URL encode any signed header values that contain spaces. For example,
+// if your header value is my file.txt , containing two spaces after my , you must
+// URL encode this value to my%20%20file.txt .
+//
+// [GetBucketEncryption]: https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketEncryption.html
+// [PutBucketEncryption]: https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketEncryption.html
+// [Setting default server-side encryption behavior for directory buckets]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-express-bucket-encryption.html
+// [Amazon S3 Bucket Default Encryption]: https://docs.aws.amazon.com/AmazonS3/latest/dev/bucket-encryption.html
+// [Managing Access Permissions to Your Amazon S3 Resources]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-access-control.html
+// [Permissions Related to Bucket Operations]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-with-s3-actions.html#using-with-s3-actions-related-to-bucket-subresources
+// [Amazon Web Services Identity and Access Management (IAM) for S3 Express One Zone]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-express-security-iam.html
 func (c *Client) DeleteBucketEncryption(ctx context.Context, params *DeleteBucketEncryptionInput, optFns ...func(*Options)) (*DeleteBucketEncryptionOutput, error) {
 	if params == nil {
 		params = &DeleteBucketEncryptionInput{}
@@ -51,14 +74,36 @@ type DeleteBucketEncryptionInput struct {
 	// The name of the bucket containing the server-side encryption configuration to
 	// delete.
 	//
+	// Directory buckets - When you use this operation with a directory bucket, you
+	// must use path-style requests in the format
+	// https://s3express-control.region-code.amazonaws.com/bucket-name .
+	// Virtual-hosted-style requests aren't supported. Directory bucket names must be
+	// unique in the chosen Zone (Availability Zone or Local Zone). Bucket names must
+	// also follow the format bucket-base-name--zone-id--x-s3 (for example,
+	// DOC-EXAMPLE-BUCKET--usw2-az1--x-s3 ). For information about bucket naming
+	// restrictions, see [Directory bucket naming rules]in the Amazon S3 User Guide
+	//
+	// [Directory bucket naming rules]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/directory-bucket-naming-rules.html
+	//
 	// This member is required.
 	Bucket *string
 
-	// The account ID of the expected bucket owner. If the bucket is owned by a
-	// different account, the request will fail with an HTTP 403 (Access Denied) error.
+	// The account ID of the expected bucket owner. If the account ID that you provide
+	// does not match the actual owner of the bucket, the request fails with the HTTP
+	// status code 403 Forbidden (access denied).
+	//
+	// For directory buckets, this header is not supported in this API operation. If
+	// you specify this header, the request fails with the HTTP status code 501 Not
+	// Implemented .
 	ExpectedBucketOwner *string
 
 	noSmithyDocumentSerde
+}
+
+func (in *DeleteBucketEncryptionInput) bindEndpointParams(p *EndpointParameters) {
+
+	p.Bucket = in.Bucket
+	p.UseS3ExpressControlEndpoint = ptr.Bool(true)
 }
 
 type DeleteBucketEncryptionOutput struct {
@@ -77,49 +122,26 @@ func (c *Client) addOperationDeleteBucketEncryptionMiddlewares(stack *middleware
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
+	if err = addPutBucketContextMiddleware(stack); err != nil {
 		return err
 	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
+	if err = addIsExpressUserAgent(stack); err != nil {
 		return err
 	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = swapWithCustomHTTPSignerMiddleware(stack, options); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpDeleteBucketEncryptionValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDeleteBucketEncryption(options.Region), middleware.Before); err != nil {
 		return err
 	}
 	if err = addMetadataRetrieverMiddleware(stack); err != nil {
@@ -137,19 +159,29 @@ func (c *Client) addOperationDeleteBucketEncryptionMiddlewares(stack *middleware
 	if err = disableAcceptEncodingGzip(stack); err != nil {
 		return err
 	}
+	if err = s3cust.HandleResponseErrorWith200Status(stack); err != nil {
+		return err
+	}
 	if err = addRequestResponseLogging(stack, options); err != nil {
+		return err
+	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addSerializeImmutableHostnameBucketMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addInterceptors(stack, options); err != nil {
 		return err
 	}
 	return nil
 }
 
-func newServiceMetadataMiddleware_opDeleteBucketEncryption(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "s3",
-		OperationName: "DeleteBucketEncryption",
+func (v *DeleteBucketEncryptionInput) bucket() (string, bool) {
+	if v.Bucket == nil {
+		return "", false
 	}
+	return *v.Bucket, true
 }
 
 // getDeleteBucketEncryptionBucketMember returns a pointer to string denoting a

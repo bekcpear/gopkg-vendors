@@ -12,13 +12,20 @@ const (
 	MsgID_None MsgID = iota
 
 	// JavaScript
+	MsgID_JS_AssertToWith
+	MsgID_JS_AssertTypeJSON
 	MsgID_JS_AssignToConstant
+	MsgID_JS_AssignToDefine
 	MsgID_JS_AssignToImport
+	MsgID_JS_BigInt
 	MsgID_JS_CallImportNamespace
+	MsgID_JS_ClassNameWillThrow
 	MsgID_JS_CommonJSVariableInESM
+	MsgID_JS_ConfusingTypeScriptCast
 	MsgID_JS_DeleteSuperProperty
 	MsgID_JS_DirectEval
 	MsgID_JS_DuplicateCase
+	MsgID_JS_DuplicateClassMember
 	MsgID_JS_DuplicateObjectKey
 	MsgID_JS_EmptyImportMeta
 	MsgID_JS_EqualsNaN
@@ -30,6 +37,9 @@ const (
 	MsgID_JS_PrivateNameWillThrow
 	MsgID_JS_SemicolonAfterReturn
 	MsgID_JS_SuspiciousBooleanNot
+	MsgID_JS_SuspiciousDefine
+	MsgID_JS_SuspiciousLogicalOperator
+	MsgID_JS_SuspiciousNullishCoalescing
 	MsgID_JS_ThisIsUndefinedInESM
 	MsgID_JS_UnsupportedDynamicImport
 	MsgID_JS_UnsupportedJSXComment
@@ -41,16 +51,18 @@ const (
 	MsgID_CSS_InvalidAtCharset
 	MsgID_CSS_InvalidAtImport
 	MsgID_CSS_InvalidAtLayer
-	MsgID_CSS_InvalidAtNest
 	MsgID_CSS_InvalidCalc
 	MsgID_CSS_JSCommentInCSS
+	MsgID_CSS_UndefinedComposesFrom
 	MsgID_CSS_UnsupportedAtCharset
 	MsgID_CSS_UnsupportedAtNamespace
 	MsgID_CSS_UnsupportedCSSProperty
+	MsgID_CSS_UnsupportedCSSNesting
 
 	// Bundler
 	MsgID_Bundler_AmbiguousReexport
 	MsgID_Bundler_DifferentPathCase
+	MsgID_Bundler_EmptyGlob
 	MsgID_Bundler_IgnoredBareImport
 	MsgID_Bundler_IgnoredDynamicImport
 	MsgID_Bundler_ImportIsUndefined
@@ -58,12 +70,12 @@ const (
 
 	// Source maps
 	MsgID_SourceMap_InvalidSourceMappings
-	MsgID_SourceMap_SectionsInSourceMap
 	MsgID_SourceMap_MissingSourceMap
 	MsgID_SourceMap_UnsupportedSourceMapComment
 
 	// package.json
 	MsgID_PackageJSON_FIRST // Keep this first
+	MsgID_PackageJSON_DeadCondition
 	MsgID_PackageJSON_InvalidBrowser
 	MsgID_PackageJSON_InvalidImportsOrExports
 	MsgID_PackageJSON_InvalidSideEffects
@@ -71,15 +83,15 @@ const (
 	MsgID_PackageJSON_LAST // Keep this last
 
 	// tsconfig.json
-	MsgID_TsconfigJSON_FIRST // Keep this first
-	MsgID_TsconfigJSON_Cycle
-	MsgID_TsconfigJSON_InvalidImportsNotUsedAsValues
-	MsgID_TsconfigJSON_InvalidJSX
-	MsgID_TsconfigJSON_InvalidModuleSuffixes
-	MsgID_TsconfigJSON_InvalidPaths
-	MsgID_TsconfigJSON_InvalidTarget
-	MsgID_TsconfigJSON_Missing
-	MsgID_TsconfigJSON_LAST // Keep this last
+	MsgID_TSConfigJSON_FIRST // Keep this first
+	MsgID_TSConfigJSON_Cycle
+	MsgID_TSConfigJSON_InvalidImportsNotUsedAsValues
+	MsgID_TSConfigJSON_InvalidJSX
+	MsgID_TSConfigJSON_InvalidPaths
+	MsgID_TSConfigJSON_InvalidTarget
+	MsgID_TSConfigJSON_InvalidTopLevelOption
+	MsgID_TSConfigJSON_Missing
+	MsgID_TSConfigJSON_LAST // Keep this last
 
 	MsgID_END // Keep this at the end (used only for tests)
 )
@@ -87,20 +99,34 @@ const (
 func StringToMsgIDs(str string, logLevel LogLevel, overrides map[MsgID]LogLevel) {
 	switch str {
 	// JS
+	case "assert-to-with":
+		overrides[MsgID_JS_AssertToWith] = logLevel
+	case "assert-type-json":
+		overrides[MsgID_JS_AssertTypeJSON] = logLevel
 	case "assign-to-constant":
 		overrides[MsgID_JS_AssignToConstant] = logLevel
+	case "assign-to-define":
+		overrides[MsgID_JS_AssignToDefine] = logLevel
 	case "assign-to-import":
 		overrides[MsgID_JS_AssignToImport] = logLevel
+	case "bigint":
+		overrides[MsgID_JS_BigInt] = logLevel
 	case "call-import-namespace":
 		overrides[MsgID_JS_CallImportNamespace] = logLevel
+	case "class-name-will-throw":
+		overrides[MsgID_JS_ClassNameWillThrow] = logLevel
 	case "commonjs-variable-in-esm":
 		overrides[MsgID_JS_CommonJSVariableInESM] = logLevel
+	case "confusing-typescript-cast":
+		overrides[MsgID_JS_ConfusingTypeScriptCast] = logLevel
 	case "delete-super-property":
 		overrides[MsgID_JS_DeleteSuperProperty] = logLevel
 	case "direct-eval":
 		overrides[MsgID_JS_DirectEval] = logLevel
 	case "duplicate-case":
 		overrides[MsgID_JS_DuplicateCase] = logLevel
+	case "duplicate-class-member":
+		overrides[MsgID_JS_DuplicateClassMember] = logLevel
 	case "duplicate-object-key":
 		overrides[MsgID_JS_DuplicateObjectKey] = logLevel
 	case "empty-import-meta":
@@ -123,6 +149,12 @@ func StringToMsgIDs(str string, logLevel LogLevel, overrides map[MsgID]LogLevel)
 		overrides[MsgID_JS_SemicolonAfterReturn] = logLevel
 	case "suspicious-boolean-not":
 		overrides[MsgID_JS_SuspiciousBooleanNot] = logLevel
+	case "suspicious-define":
+		overrides[MsgID_JS_SuspiciousDefine] = logLevel
+	case "suspicious-logical-operator":
+		overrides[MsgID_JS_SuspiciousLogicalOperator] = logLevel
+	case "suspicious-nullish-coalescing":
+		overrides[MsgID_JS_SuspiciousNullishCoalescing] = logLevel
 	case "this-is-undefined-in-esm":
 		overrides[MsgID_JS_ThisIsUndefinedInESM] = logLevel
 	case "unsupported-dynamic-import":
@@ -141,26 +173,30 @@ func StringToMsgIDs(str string, logLevel LogLevel, overrides map[MsgID]LogLevel)
 		overrides[MsgID_CSS_InvalidAtCharset] = logLevel
 	case "invalid-@import":
 		overrides[MsgID_CSS_InvalidAtImport] = logLevel
-	case "invalid-@nest":
-		overrides[MsgID_CSS_InvalidAtNest] = logLevel
 	case "invalid-@layer":
 		overrides[MsgID_CSS_InvalidAtLayer] = logLevel
 	case "invalid-calc":
 		overrides[MsgID_CSS_InvalidCalc] = logLevel
 	case "js-comment-in-css":
 		overrides[MsgID_CSS_JSCommentInCSS] = logLevel
+	case "undefined-composes-from":
+		overrides[MsgID_CSS_UndefinedComposesFrom] = logLevel
 	case "unsupported-@charset":
 		overrides[MsgID_CSS_UnsupportedAtCharset] = logLevel
 	case "unsupported-@namespace":
 		overrides[MsgID_CSS_UnsupportedAtNamespace] = logLevel
 	case "unsupported-css-property":
 		overrides[MsgID_CSS_UnsupportedCSSProperty] = logLevel
+	case "unsupported-css-nesting":
+		overrides[MsgID_CSS_UnsupportedCSSNesting] = logLevel
 
 	// Bundler
 	case "ambiguous-reexport":
 		overrides[MsgID_Bundler_AmbiguousReexport] = logLevel
 	case "different-path-case":
 		overrides[MsgID_Bundler_DifferentPathCase] = logLevel
+	case "empty-glob":
+		overrides[MsgID_Bundler_EmptyGlob] = logLevel
 	case "ignored-bare-import":
 		overrides[MsgID_Bundler_IgnoredBareImport] = logLevel
 	case "ignored-dynamic-import":
@@ -173,8 +209,6 @@ func StringToMsgIDs(str string, logLevel LogLevel, overrides map[MsgID]LogLevel)
 	// Source maps
 	case "invalid-source-mappings":
 		overrides[MsgID_SourceMap_InvalidSourceMappings] = logLevel
-	case "sections-in-source-map":
-		overrides[MsgID_SourceMap_SectionsInSourceMap] = logLevel
 	case "missing-source-map":
 		overrides[MsgID_SourceMap_MissingSourceMap] = logLevel
 	case "unsupported-source-map-comment":
@@ -186,7 +220,7 @@ func StringToMsgIDs(str string, logLevel LogLevel, overrides map[MsgID]LogLevel)
 		}
 
 	case "tsconfig.json":
-		for i := MsgID_TsconfigJSON_FIRST; i <= MsgID_TsconfigJSON_LAST; i++ {
+		for i := MsgID_TSConfigJSON_FIRST; i <= MsgID_TSConfigJSON_LAST; i++ {
 			overrides[i] = logLevel
 		}
 
@@ -196,112 +230,144 @@ func StringToMsgIDs(str string, logLevel LogLevel, overrides map[MsgID]LogLevel)
 	}
 }
 
+// These are stored together to make it less accident-prone to edit them
+type msgIDInfo struct {
+	name string
+	vsID vsID
+}
+
 func MsgIDToString(id MsgID) string {
+	return msgIDToInfo(id).name
+}
+
+func msgIDToInfo(id MsgID) msgIDInfo {
 	switch id {
 	// JS
+	case MsgID_JS_AssertToWith:
+		return msgIDInfo{name: "assert-to-with", vsID: vsID_JS_AssertToWith}
+	case MsgID_JS_AssertTypeJSON:
+		return msgIDInfo{name: "assert-type-json", vsID: vsID_JS_AssertTypeJSON}
 	case MsgID_JS_AssignToConstant:
-		return "assign-to-constant"
+		return msgIDInfo{name: "assign-to-constant", vsID: vsID_JS_AssignToConstant}
+	case MsgID_JS_AssignToDefine:
+		return msgIDInfo{name: "assign-to-define", vsID: vsID_JS_AssignToDefine}
 	case MsgID_JS_AssignToImport:
-		return "assign-to-import"
+		return msgIDInfo{name: "assign-to-import", vsID: vsID_JS_AssignToImport}
+	case MsgID_JS_BigInt:
+		return msgIDInfo{name: "bigint", vsID: vsID_JS_BigInt}
 	case MsgID_JS_CallImportNamespace:
-		return "call-import-namespace"
+		return msgIDInfo{name: "call-import-namespace", vsID: vsID_JS_CallImportNamespace}
+	case MsgID_JS_ClassNameWillThrow:
+		return msgIDInfo{name: "class-name-will-throw", vsID: vsID_JS_ClassNameWillThrow}
 	case MsgID_JS_CommonJSVariableInESM:
-		return "commonjs-variable-in-esm"
+		return msgIDInfo{name: "commonjs-variable-in-esm", vsID: vsID_JS_CommonJSVariableInESM}
+	case MsgID_JS_ConfusingTypeScriptCast:
+		return msgIDInfo{name: "confusing-typescript-cast", vsID: vsID_JS_ConfusingTypeScriptCast}
 	case MsgID_JS_DeleteSuperProperty:
-		return "delete-super-property"
+		return msgIDInfo{name: "delete-super-property", vsID: vsID_JS_DeleteSuperProperty}
 	case MsgID_JS_DirectEval:
-		return "direct-eval"
+		return msgIDInfo{name: "direct-eval", vsID: vsID_JS_DirectEval}
 	case MsgID_JS_DuplicateCase:
-		return "duplicate-case"
+		return msgIDInfo{name: "duplicate-case", vsID: vsID_JS_DuplicateCase}
+	case MsgID_JS_DuplicateClassMember:
+		return msgIDInfo{name: "duplicate-class-member", vsID: vsID_JS_DuplicateClassMember}
 	case MsgID_JS_DuplicateObjectKey:
-		return "duplicate-object-key"
+		return msgIDInfo{name: "duplicate-object-key", vsID: vsID_JS_DuplicateObjectKey}
 	case MsgID_JS_EmptyImportMeta:
-		return "empty-import-meta"
+		return msgIDInfo{name: "empty-import-meta", vsID: vsID_JS_EmptyImportMeta}
 	case MsgID_JS_EqualsNaN:
-		return "equals-nan"
+		return msgIDInfo{name: "equals-nan", vsID: vsID_JS_EqualsNaN}
 	case MsgID_JS_EqualsNegativeZero:
-		return "equals-negative-zero"
+		return msgIDInfo{name: "equals-negative-zero", vsID: vsID_JS_EqualsNegativeZero}
 	case MsgID_JS_EqualsNewObject:
-		return "equals-new-object"
+		return msgIDInfo{name: "equals-new-object", vsID: vsID_JS_EqualsNewObject}
 	case MsgID_JS_HTMLCommentInJS:
-		return "html-comment-in-js"
+		return msgIDInfo{name: "html-comment-in-js", vsID: vsID_JS_HTMLCommentInJS}
 	case MsgID_JS_ImpossibleTypeof:
-		return "impossible-typeof"
+		return msgIDInfo{name: "impossible-typeof", vsID: vsID_JS_ImpossibleTypeof}
 	case MsgID_JS_IndirectRequire:
-		return "indirect-require"
+		return msgIDInfo{name: "indirect-require", vsID: vsID_JS_IndirectRequire}
 	case MsgID_JS_PrivateNameWillThrow:
-		return "private-name-will-throw"
+		return msgIDInfo{name: "private-name-will-throw", vsID: vsID_JS_PrivateNameWillThrow}
 	case MsgID_JS_SemicolonAfterReturn:
-		return "semicolon-after-return"
+		return msgIDInfo{name: "semicolon-after-return", vsID: vsID_JS_SemicolonAfterReturn}
 	case MsgID_JS_SuspiciousBooleanNot:
-		return "suspicious-boolean-not"
+		return msgIDInfo{name: "suspicious-boolean-not", vsID: vsID_JS_SuspiciousBooleanNot}
+	case MsgID_JS_SuspiciousDefine:
+		return msgIDInfo{name: "suspicious-define", vsID: vsID_JS_SuspiciousDefine}
+	case MsgID_JS_SuspiciousLogicalOperator:
+		return msgIDInfo{name: "suspicious-logical-operator", vsID: vsID_JS_SuspiciousLogicalOperator}
+	case MsgID_JS_SuspiciousNullishCoalescing:
+		return msgIDInfo{name: "suspicious-nullish-coalescing", vsID: vsID_JS_SuspiciousNullishCoalescing}
 	case MsgID_JS_ThisIsUndefinedInESM:
-		return "this-is-undefined-in-esm"
+		return msgIDInfo{name: "this-is-undefined-in-esm", vsID: vsID_JS_ThisIsUndefinedInESM}
 	case MsgID_JS_UnsupportedDynamicImport:
-		return "unsupported-dynamic-import"
+		return msgIDInfo{name: "unsupported-dynamic-import", vsID: vsID_JS_UnsupportedDynamicImport}
 	case MsgID_JS_UnsupportedJSXComment:
-		return "unsupported-jsx-comment"
+		return msgIDInfo{name: "unsupported-jsx-comment", vsID: vsID_JS_UnsupportedJSXComment}
 	case MsgID_JS_UnsupportedRegExp:
-		return "unsupported-regexp"
+		return msgIDInfo{name: "unsupported-regexp", vsID: vsID_JS_UnsupportedRegExp}
 	case MsgID_JS_UnsupportedRequireCall:
-		return "unsupported-require-call"
+		return msgIDInfo{name: "unsupported-require-call", vsID: vsID_JS_UnsupportedRequireCall}
 
 	// CSS
 	case MsgID_CSS_CSSSyntaxError:
-		return "css-syntax-error"
+		return msgIDInfo{name: "css-syntax-error", vsID: vsID_CSS_CSSSyntaxError}
 	case MsgID_CSS_InvalidAtCharset:
-		return "invalid-@charset"
+		return msgIDInfo{name: "invalid-@charset", vsID: vsID_CSS_InvalidAtCharset}
 	case MsgID_CSS_InvalidAtImport:
-		return "invalid-@import"
-	case MsgID_CSS_InvalidAtNest:
-		return "invalid-@nest"
+		return msgIDInfo{name: "invalid-@import", vsID: vsID_CSS_InvalidAtImport}
 	case MsgID_CSS_InvalidAtLayer:
-		return "invalid-@layer"
+		return msgIDInfo{name: "invalid-@layer", vsID: vsID_CSS_InvalidAtLayer}
 	case MsgID_CSS_InvalidCalc:
-		return "invalid-calc"
+		return msgIDInfo{name: "invalid-calc", vsID: vsID_CSS_InvalidCalc}
 	case MsgID_CSS_JSCommentInCSS:
-		return "js-comment-in-css"
+		return msgIDInfo{name: "js-comment-in-css", vsID: vsID_CSS_JSCommentInCSS}
+	case MsgID_CSS_UndefinedComposesFrom:
+		return msgIDInfo{name: "undefined-composes-from", vsID: vsID_CSS_UndefinedComposesFrom}
 	case MsgID_CSS_UnsupportedAtCharset:
-		return "unsupported-@charset"
+		return msgIDInfo{name: "unsupported-@charset", vsID: vsID_CSS_UnsupportedAtCharset}
 	case MsgID_CSS_UnsupportedAtNamespace:
-		return "unsupported-@namespace"
+		return msgIDInfo{name: "unsupported-@namespace", vsID: vsID_CSS_UnsupportedAtNamespace}
 	case MsgID_CSS_UnsupportedCSSProperty:
-		return "unsupported-css-property"
+		return msgIDInfo{name: "unsupported-css-property", vsID: vsID_CSS_UnsupportedCSSProperty}
+	case MsgID_CSS_UnsupportedCSSNesting:
+		return msgIDInfo{name: "unsupported-css-nesting", vsID: vsID_CSS_UnsupportedCSSNesting}
 
 	// Bundler
 	case MsgID_Bundler_AmbiguousReexport:
-		return "ambiguous-reexport"
+		return msgIDInfo{name: "ambiguous-reexport", vsID: vsID_Bundler_AmbiguousReexport}
 	case MsgID_Bundler_DifferentPathCase:
-		return "different-path-case"
+		return msgIDInfo{name: "different-path-case", vsID: vsID_Bundler_DifferentPathCase}
+	case MsgID_Bundler_EmptyGlob:
+		return msgIDInfo{name: "empty-glob", vsID: vsID_Bundler_EmptyGlob}
 	case MsgID_Bundler_IgnoredBareImport:
-		return "ignored-bare-import"
+		return msgIDInfo{name: "ignored-bare-import", vsID: vsID_Bundler_IgnoredBareImport}
 	case MsgID_Bundler_IgnoredDynamicImport:
-		return "ignored-dynamic-import"
+		return msgIDInfo{name: "ignored-dynamic-import", vsID: vsID_Bundler_IgnoredDynamicImport}
 	case MsgID_Bundler_ImportIsUndefined:
-		return "import-is-undefined"
+		return msgIDInfo{name: "import-is-undefined", vsID: vsID_Bundler_ImportIsUndefined}
 	case MsgID_Bundler_RequireResolveNotExternal:
-		return "require-resolve-not-external"
+		return msgIDInfo{name: "require-resolve-not-external", vsID: vsID_Bundler_RequireResolveNotExternal}
 
 	// Source maps
 	case MsgID_SourceMap_InvalidSourceMappings:
-		return "invalid-source-mappings"
-	case MsgID_SourceMap_SectionsInSourceMap:
-		return "sections-in-source-map"
+		return msgIDInfo{name: "invalid-source-mappings", vsID: vsID_SourceMap_InvalidSourceMappings}
 	case MsgID_SourceMap_MissingSourceMap:
-		return "missing-source-map"
+		return msgIDInfo{name: "missing-source-map", vsID: vsID_SourceMap_MissingSourceMap}
 	case MsgID_SourceMap_UnsupportedSourceMapComment:
-		return "unsupported-source-map-comment"
+		return msgIDInfo{name: "unsupported-source-map-comment", vsID: vsID_SourceMap_UnsupportedSourceMapComment}
 
 	default:
 		if id >= MsgID_PackageJSON_FIRST && id <= MsgID_PackageJSON_LAST {
-			return "package.json"
+			return msgIDInfo{name: "package.json", vsID: vsID_PackageJSON}
 		}
-		if id >= MsgID_TsconfigJSON_FIRST && id <= MsgID_TsconfigJSON_LAST {
-			return "tsconfig.json"
+		if id >= MsgID_TSConfigJSON_FIRST && id <= MsgID_TSConfigJSON_LAST {
+			return msgIDInfo{name: "tsconfig.json", vsID: vsID_TSConfigJSON}
 		}
 	}
 
-	return ""
+	return msgIDInfo{}
 }
 
 // Some message IDs are more diverse internally than externally (in case we

@@ -14,47 +14,47 @@
 
 package tcp
 
-import (
-	"gvisor.dev/gvisor/pkg/sync"
-)
-
 // segmentQueue is a bounded, thread-safe queue of TCP segments.
 //
 // +stateify savable
 type segmentQueue struct {
-	mu     sync.Mutex  `state:"nosave"`
-	list   segmentList `state:"wait"`
-	ep     *endpoint
+	mu segmentQueueMutex `state:"nosave"`
+	// +checklocks:mu
+	list segmentList `state:"wait"`
+	ep   *Endpoint
+	// +checklocks:mu
 	frozen bool
 }
 
-// emptyLocked determines if the queue is empty.
-// Preconditions: q.mu must be held.
+// emptyLocked is equivalent to empty with q.mu already held.
+//
+// +checklocks:q.mu
 func (q *segmentQueue) emptyLocked() bool {
 	return q.list.Empty()
 }
 
 // empty determines if the queue is empty.
+//
+// +checklocksexclude:q.mu
 func (q *segmentQueue) empty() bool {
 	q.mu.Lock()
-	r := q.emptyLocked()
-	q.mu.Unlock()
-
-	return r
+	defer q.mu.Unlock()
+	return q.emptyLocked()
 }
 
 // enqueue adds the given segment to the queue.
 //
-// Returns true when the segment is successfully added to the queue, in which
-// case ownership of the reference is transferred to the queue. And returns
-// false if the queue is full, in which case ownership is retained by the
-// caller.
+// If enqueue succeeds, the queue acquires its own reference and returns true.
+// Otherwise it returns false. The caller retains its reference in either case.
+//
+// +checklocksexclude:q.mu
 func (q *segmentQueue) enqueue(s *segment) bool {
-	// q.ep.receiveBufferParams() must be called without holding q.mu to
-	// avoid lock order inversion.
 	bufSz := q.ep.ops.GetReceiveBufferSize()
 	used := q.ep.receiveMemUsed()
+
 	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	// Allow zero sized segments (ACK/FIN/RSTs etc even if the segment queue
 	// is currently full).
 	allow := (used <= int(bufSz) || s.payloadSize() == 0) && !q.frozen
@@ -65,7 +65,6 @@ func (q *segmentQueue) enqueue(s *segment) bool {
 		// Set the owner now that the endpoint owns the segment.
 		s.setOwner(q.ep, recvQ)
 	}
-	q.mu.Unlock()
 
 	return allow
 }
@@ -73,13 +72,16 @@ func (q *segmentQueue) enqueue(s *segment) bool {
 // dequeue removes and returns the next segment from queue, if one exists.
 // Ownership is transferred to the caller, who is responsible for decrementing
 // the ref count when done.
+//
+// +checklocksexclude:q.mu
 func (q *segmentQueue) dequeue() *segment {
 	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	s := q.list.Front()
 	if s != nil {
 		q.list.Remove(s)
 	}
-	q.mu.Unlock()
 
 	return s
 }
@@ -87,16 +89,20 @@ func (q *segmentQueue) dequeue() *segment {
 // freeze prevents any more segments from being added to the queue. i.e all
 // future segmentQueue.enqueue will return false and not add the segment to the
 // queue till the queue is unfroze with a corresponding segmentQueue.thaw call.
+//
+// +checklocksexclude:q.mu
 func (q *segmentQueue) freeze() {
 	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.frozen = true
-	q.mu.Unlock()
 }
 
 // thaw unfreezes a previously frozen queue using segmentQueue.freeze() and
 // allows new segments to be queued again.
+//
+// +checklocksexclude:q.mu
 func (q *segmentQueue) thaw() {
 	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.frozen = false
-	q.mu.Unlock()
 }

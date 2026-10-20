@@ -98,7 +98,7 @@ func (v *Value) Format() {
 func (v *Value) normalize() bool {
 	switch v2 := v.Value.(type) {
 	case Literal:
-		// Format string.
+		// Normalize string if there are escape characters.
 		if v2.Kind() == '"' && bytes.IndexByte(v2, '\\') >= 0 {
 			v.Value = String(v2.String())
 		}
@@ -114,15 +114,16 @@ func (v *Value) normalize() bool {
 
 		// If there is only whitespace between the name and colon,
 		// or between the value and comma, then remove the whitespace.
-		v2.rangeValues(func(v *Value) bool {
-			if !v.AfterExtra.hasComment() {
-				v.AfterExtra = nil
+		for v3 := range v2.allValues() {
+			if !v3.AfterExtra.hasComment() {
+				v3.AfterExtra = nil
 			}
-			return true
-		})
+		}
 
 		// Normalize all sub-values.
-		v2.rangeValues((*Value).normalize)
+		for v3 := range v2.allValues() {
+			v3.normalize()
+		}
 	}
 	return true
 }
@@ -568,7 +569,9 @@ func (v *Value) alignObjectValues() bool {
 
 	// Recursively align all sub-objects.
 	if comp, ok := v.Value.(composite); ok {
-		comp.rangeValues((*Value).alignObjectValues)
+		for v2 := range comp.allValues() {
+			v2.alignObjectValues()
+		}
 	}
 	return true
 }
@@ -578,9 +581,11 @@ func (v Value) hasNewline(checkTopLevelExtra bool) bool {
 		return true
 	}
 	if comp, ok := v.Value.(composite); ok {
-		return !comp.rangeValues(func(v *Value) bool {
-			return !v.hasNewline(true)
-		})
+		for v := range comp.allValues() {
+			if v.hasNewline(true) {
+				return true
+			}
+		}
 	}
 	return false
 }

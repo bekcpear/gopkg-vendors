@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build windows
+
 package wingoes
 
 import (
@@ -9,9 +11,6 @@ import (
 
 	"golang.org/x/sys/windows"
 )
-
-// HRESULT is equivalent to the HRESULT type in the Win32 SDK for C/C++.
-type HRESULT int32
 
 // Error represents various error codes that may be encountered when coding
 // against Windows APIs, including HRESULTs, windows.NTStatus, and windows.Errno.
@@ -22,17 +21,20 @@ type Error HRESULT
 
 const (
 	hrS_OK                 = HRESULT(0)
-	hrE_ABORT              = HRESULT(-((0x80004004 ^ 0xFFFFFFFF)+1))
-	hrE_FAIL               = HRESULT(-((0x80004005 ^ 0xFFFFFFFF)+1))
-	hrE_NOINTERFACE        = HRESULT(-((0x80004002 ^ 0xFFFFFFFF)+1))
-	hrE_NOTIMPL            = HRESULT(-((0x80004001 ^ 0xFFFFFFFF)+1))
-	hrE_POINTER            = HRESULT(-((0x80004003 ^ 0xFFFFFFFF)+1))
-	hrE_UNEXPECTED         = HRESULT(-((0x8000FFFF ^ 0xFFFFFFFF)+1))
-	hrTYPE_E_WRONGTYPEKIND = HRESULT(-((0x8002802A ^ 0xFFFFFFFF)+1))
+	hrE_ABORT              = HRESULT(-((0x80004004 ^ 0xFFFFFFFF) + 1))
+	hrE_FAIL               = HRESULT(-((0x80004005 ^ 0xFFFFFFFF) + 1))
+	hrE_NOINTERFACE        = HRESULT(-((0x80004002 ^ 0xFFFFFFFF) + 1))
+	hrE_NOTIMPL            = HRESULT(-((0x80004001 ^ 0xFFFFFFFF) + 1))
+	hrE_POINTER            = HRESULT(-((0x80004003 ^ 0xFFFFFFFF) + 1))
+	hrE_UNEXPECTED         = HRESULT(-((0x8000FFFF ^ 0xFFFFFFFF) + 1))
 )
 
+// S_FALSE is a peculiar HRESULT value which means that the call executed
+// successfully, but returned false as its result.
+const S_FALSE = HRESULT(1)
+
 var (
-	// genericError encodes a Error whose message string is very generic.
+	// genericError encodes an Error whose message string is very generic.
 	genericError = Error(hresultFromFacilityAndCode(hrFail, facilityWin32, hrCode(windows.ERROR_UNIDENTIFIED_ERROR)))
 )
 
@@ -62,7 +64,7 @@ const (
 )
 
 const (
-	facilityWin32 hrFacility = 7
+	facilityWin32 = hrFacility(7)
 )
 
 // Succeeded returns true when hr is successful, but its actual error code
@@ -74,6 +76,14 @@ func (hr HRESULT) Succeeded() bool {
 // Failed returns true when hr contains a failure code.
 func (hr HRESULT) Failed() bool {
 	return hr < 0
+}
+
+func (hr HRESULT) String() string {
+	return fmt.Sprintf("0x%08X", uint32(hr))
+}
+
+func (hr HRESULT) GoString() string {
+	return fmt.Sprintf("%T(0x%08X)", hr, uint32(hr))
 }
 
 func (hr HRESULT) isNT() bool {
@@ -101,8 +111,8 @@ func (hr HRESULT) code() hrCode {
 }
 
 const (
-	hrFail    failBit = true
-	hrSuccess failBit = false
+	hrFail    = failBit(true)
+	hrSuccess = failBit(false)
 )
 
 func hresultFromFacilityAndCode(isFail failBit, f hrFacility, c hrCode) HRESULT {
@@ -115,7 +125,7 @@ func hresultFromFacilityAndCode(isFail failBit, f hrFacility, c hrCode) HRESULT 
 	return HRESULT(r)
 }
 
-// ErrorFromErrno creates a Error from e.
+// ErrorFromErrno creates an Error from e.
 func ErrorFromErrno(e windows.Errno) Error {
 	if e == windows.ERROR_SUCCESS {
 		return Error(hrS_OK)
@@ -132,7 +142,7 @@ func ErrorFromErrno(e windows.Errno) Error {
 	return Error(hresultFromFacilityAndCode(hrFail, facilityWin32, hrCode(e)))
 }
 
-// ErrorFromNTStatus creates a Error from s.
+// ErrorFromNTStatus creates an Error from s.
 func ErrorFromNTStatus(s windows.NTStatus) Error {
 	if s == windows.STATUS_SUCCESS {
 		return Error(hrS_OK)
@@ -140,25 +150,31 @@ func ErrorFromNTStatus(s windows.NTStatus) Error {
 	return Error(HRESULT(s) | hrFacilityNTBit)
 }
 
-// ErrorFromHRESULT creates a Error from hr.
+// ErrorFromHRESULT creates an Error from hr.
 func ErrorFromHRESULT(hr HRESULT) Error {
 	return Error(hr)
 }
 
-// NewError converts e into a Error if e's type is supported. It returns
+// SupportedErrorTypes is a type constraint describing the possible types
+// that may be used as inputs to [NewError].
+type SupportedErrorTypes interface {
+	Error | HRESULT | windows.Errno | windows.NTStatus
+}
+
+// NewError converts e into an Error if e's type is supported. It returns
 // both the Error and a bool indicating whether the conversion was successful.
-func NewError(e any) (Error, bool) {
-	switch v := e.(type) {
+func NewError[E SupportedErrorTypes](e E) (Error) {
+	switch v := any(e).(type) {
 	case Error:
-		return v, true
+		return v
 	case windows.NTStatus:
-		return ErrorFromNTStatus(v), true
+		return ErrorFromNTStatus(v)
 	case windows.Errno:
-		return ErrorFromErrno(v), true
+		return ErrorFromErrno(v)
 	case HRESULT:
-		return ErrorFromHRESULT(v), true
+		return ErrorFromHRESULT(v)
 	default:
-		return ErrorFromHRESULT(hrTYPE_E_WRONGTYPEKIND), false
+		panic(fmt.Sprintf("Unsupported error type %T", v))
 	}
 }
 
@@ -214,7 +230,7 @@ func (e Error) toErrno(f errnoFailHandler) windows.Errno {
 // AsError converts the Error to a windows.Errno, but panics if not possible.
 func (e Error) AsErrno() windows.Errno {
 	handler := func(hr HRESULT) windows.Errno {
-		panic(fmt.Sprintf("wingoes.Error: Called AsErrno on a non-convertable HRESULT 0x%08X", uint32(hr)))
+		panic(fmt.Sprintf("wingoes.Error: Called AsErrno on a non-convertable %#v", hr))
 		return windows.ERROR_UNIDENTIFIED_ERROR
 	}
 
@@ -240,7 +256,7 @@ func (e Error) toNTStatus(f ntStatusFailHandler) windows.NTStatus {
 // AsNTStatus converts the Error to a windows.NTStatus, but panics if not possible.
 func (e Error) AsNTStatus() windows.NTStatus {
 	handler := func(hr HRESULT) windows.NTStatus {
-		panic(fmt.Sprintf("windows.Error: Called AsNTStatus on a non-NTSTATUS HRESULT 0x%08X", uint32(hr)))
+		panic(fmt.Sprintf("windows.Error: Called AsNTStatus on a non-NTSTATUS %#v", hr))
 		return windows.STATUS_UNSUCCESSFUL
 	}
 
@@ -302,4 +318,21 @@ func (e Error) Error() string {
 	for ; lenExclNul > 0 && (buf[lenExclNul-1] == '\n' || buf[lenExclNul-1] == '\r'); lenExclNul-- {
 	}
 	return windows.UTF16ToString(buf[:lenExclNul])
+}
+
+// Unwrap permits extraction of underlying windows.NTStatus or windows.Errno
+// errors that are encoded within e.
+func (e Error) Unwrap() error {
+	// Order is important! We need earlier checks to exclude certain things that
+	// would otherwise be (in this case) false positives in later checks!
+	switch {
+	case e.IsOK():
+		return nil
+	case e.IsAvailableAsNTStatus():
+		return e.AsNTStatus()
+	case e.IsAvailableAsErrno():
+		return e.AsErrno()
+	default:
+		return nil
+	}
 }

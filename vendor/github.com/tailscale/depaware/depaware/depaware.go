@@ -14,10 +14,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strings"
 	"unicode"
@@ -26,16 +27,55 @@ import (
 	"github.com/pkg/diff/write"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/imports"
+	"golang.org/x/tools/txtar"
 )
 
 var (
-	check  = flag.Bool("check", false, "if true, check whether dependencies match the depaware.txt file")
-	update = flag.Bool("update", false, "if true, update the depaware.txt file")
-	osList = flag.String("goos", "linux,darwin,windows", "comma-separated list of GOOS values")
+	check      = flag.Bool("check", false, "if true, check whether dependencies match the depaware.txt file")
+	update     = flag.Bool("update", false, "if true, update the depaware.txt file")
+	dumpSrc    = flag.Bool("dumpsrc", false, "if non-empty, dump the source of package")
+	fileName   = flag.String("file", "depaware.txt", "name of the file to write")
+	osList     = flag.String("goos", "linux,darwin,windows", "comma-separated list of GOOS values")
+	tags       = flag.String("tags", "", "comma-separated list of build tags to use when loading packages")
+	internal   = flag.Bool("internal", false, "if true, include internal packages in the output")
+	showVendor = flag.Bool("vendor", false, "if true, show the vendor/ prefix in import paths")
+	cgoFlag    = flag.String("cgo", "", "either '' (auto), 'true' or 'false' for whether cgo should be enabled")
+	cpuProfile = flag.String("cpuprofile", "", "if non-empty, write CPU profile to this file")
+	memProfile = flag.String("memprofile", "", "if non-empty, write memory profile to this file")
 )
 
 func Main() {
 	flag.Parse()
+	if *cpuProfile != "" {
+		f, err := os.Create(*cpuProfile)
+		if err != nil {
+			log.Fatalf("creating cpu profile: %v", err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			log.Fatalf("starting cpu profile: %v", err)
+		}
+		// Order matters: f.Close runs after StopCPUProfile (LIFO).
+		defer f.Close()
+		defer pprof.StopCPUProfile()
+	}
+	if *memProfile != "" {
+		defer func() {
+			f, err := os.Create(*memProfile)
+			if err != nil {
+				log.Fatalf("creating mem profile: %v", err)
+			}
+			runtime.GC()
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				log.Fatalf("writing mem profile: %v", err)
+			}
+			f.Close()
+		}()
+	}
+	if *dumpSrc {
+		if *check || *update {
+			log.Fatalf("-check and -update can't be use with -dumpsrc")
+		}
+	}
 	if *check && *update {
 		log.Fatalf("-check and -update can't be used together")
 	}
@@ -50,6 +90,20 @@ func Main() {
 		}
 	}
 	for i, pkg := range ipaths {
+		if *dumpSrc {
+			var ar *txtar.Archive
+			var err error
+			if fi, statErr := os.Stat(pkg); statErr == nil && !fi.IsDir() {
+				ar, err = dumpSourceBinary(pkg)
+			} else {
+				ar, err = dumpSource(pkg, *cgoFlag)
+			}
+			if err != nil {
+				log.Fatal(err)
+			}
+			os.Stdout.Write(txtar.Format(ar))
+			continue
+		}
 		process(pkg)
 		// If we're printing to stdout, and there are more packages to come,
 		// add an extra newline.
@@ -63,12 +117,20 @@ func process(pkg string) {
 	geese := strings.Split(*osList, ",")
 	var d deps
 	var dir string
+	var buildFlags []string
+	if *tags != "" {
+		buildFlags = append(buildFlags, "-tags", *tags)
+	}
 	for _, goos := range geese {
 		env := os.Environ()
-		env = append(env, "GOARCH=amd64", "GOOS="+goos, "CGO_ENABLED=1")
+		env = append(env, "GOARCH=amd64", "GOOS="+goos)
+		if *cgoFlag != "" {
+			env = append(env, "CGO_ENABLED="+*cgoFlag)
+		}
 		cfg := &packages.Config{
-			Mode: packages.NeedImports | packages.NeedDeps | packages.NeedFiles | packages.NeedName,
-			Env:  env,
+			Mode:       packages.NeedImports | packages.NeedDeps | packages.NeedFiles | packages.NeedName,
+			Env:        env,
+			BuildFlags: buildFlags,
 		}
 
 		pkgs, err := packages.Load(cfg, pkg)
@@ -77,8 +139,8 @@ func process(pkg string) {
 		}
 
 		packages.Visit(pkgs, nil, func(p *packages.Package) {
-			for imp := range p.Imports {
-				d.AddEdge(p.PkgPath, imp)
+			for _, impPkg := range p.Imports {
+				d.AddEdge(p.PkgPath, impPkg.PkgPath)
 			}
 			if p.PkgPath == pkg {
 				if dir == "" && len(p.GoFiles) > 0 {
@@ -107,8 +169,8 @@ func process(pkg string) {
 
 	// Parse existing depaware.txt, if present,
 	// to get the existing dependency source the file lists.
-	daFile := filepath.Join(dir, "depaware.txt")
-	daContents, daErr := ioutil.ReadFile(daFile)
+	daFile := filepath.Join(dir, *fileName)
+	daContents, daErr := os.ReadFile(daFile)
 	var preferredWhy map[string]string
 	if daErr == nil {
 		preferredWhy = parsePreferredWhy(bytes.NewReader(daContents))
@@ -149,7 +211,7 @@ func process(pkg string) {
 			opts = append(opts, write.TerminalColor())
 		}
 		fmt.Fprintf(os.Stderr, "The list of dependencies in %s is out of date.\n\n", daFile)
-		err := diff.Text("before", "after", daContents, buf.Bytes(), os.Stderr, opts...)
+		err := writePatch(daFile, daContents, buf.Bytes(), os.Stderr, opts...)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -157,13 +219,26 @@ func process(pkg string) {
 	}
 
 	if *update {
-		if err := ioutil.WriteFile(daFile, buf.Bytes(), 0644); err != nil {
+		if err := os.WriteFile(daFile, buf.Bytes(), 0644); err != nil {
 			log.Fatal(err)
 		}
 		return
 	}
 
 	os.Stdout.Write(buf.Bytes())
+}
+
+func writePatch(fileName string, before, after []byte, w io.Writer, opts ...write.Option) error {
+	wd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	fileName, err = filepath.Rel(wd, fileName)
+	if err != nil {
+		return err
+	}
+	fileName = filepath.ToSlash(fileName)
+	return diff.Text(fileName, fileName, before, after, w, opts...)
 }
 
 type pkgGOOS struct {
@@ -208,8 +283,10 @@ func (d *deps) Why(pkg string, preferredWhy map[string]string) string {
 }
 
 func (d *deps) AddEdge(from, to string) {
-	from = imports.VendorlessPath(from)
-	to = imports.VendorlessPath(to)
+	if !*showVendor {
+		from = imports.VendorlessPath(from)
+		to = imports.VendorlessPath(to)
+	}
 	if d.DepTo == nil {
 		d.DepTo = make(map[string][]string)
 		d.UsesUnsafe = make(map[string]bool)
@@ -223,8 +300,10 @@ func (d *deps) AddEdge(from, to string) {
 }
 
 func (d *deps) AddDep(pkg, goos string) {
-	pkg = imports.VendorlessPath(pkg)
-	if isBoringPackage(pkg) {
+	if !*showVendor {
+		pkg = imports.VendorlessPath(pkg)
+	}
+	if !*internal && isInternalPackage(pkg) {
 		return
 	}
 	if !stringsContains(d.Deps, pkg) {
@@ -245,7 +324,7 @@ func stringsContains(ss []string, s string) bool {
 	return false
 }
 
-func isBoringPackage(pkg string) bool {
+func isInternalPackage(pkg string) bool {
 	return strings.HasPrefix(pkg, "internal/") ||
 		strings.HasPrefix(pkg, "runtime/internal/") ||
 		pkg == "runtime" || pkg == "runtime/cgo" || pkg == "unsafe" ||

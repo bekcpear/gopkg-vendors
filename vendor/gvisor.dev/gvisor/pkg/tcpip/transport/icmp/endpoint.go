@@ -19,9 +19,10 @@ import (
 	"io"
 	"time"
 
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/ports"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -56,28 +57,30 @@ type endpoint struct {
 
 	// The following fields are initialized at creation time and are
 	// immutable.
-	stack       *stack.Stack `state:"manual"`
+	stack       *stack.Stack
 	transProto  tcpip.TransportProtocolNumber
 	waiterQueue *waiter.Queue
-	uniqueID    uint64
 	net         network.Endpoint
 	stats       tcpip.TransportEndpointStats
 	ops         tcpip.SocketOptions
 
-	// The following fields are used to manage the receive queue, and are
-	// protected by rcvMu.
-	rcvMu      sync.Mutex `state:"nosave"`
-	rcvReady   bool
-	rcvList    icmpPacketList
+	// The following fields are used to manage the receive queue.
+	rcvMu sync.Mutex `state:"nosave"`
+	// +checklocks:rcvMu
+	rcvReady bool
+	// +checklocks:rcvMu
+	rcvList icmpPacketList
+	// +checklocks:rcvMu
 	rcvBufSize int
-	rcvClosed  bool
-
-	// The following fields are protected by the mu mutex.
-	mu sync.RWMutex `state:"nosave"`
-	// frozen indicates if the packets should be delivered to the endpoint
-	// during restore.
+	// +checklocks:rcvMu
+	rcvClosed bool
+	// frozen prevents packet delivery during save/restore.
+	// +checklocks:rcvMu
 	frozen bool
-	ident  uint16
+
+	mu sync.RWMutex `state:"nosave"`
+	// +checklocks:mu
+	ident uint16
 }
 
 func newEndpoint(s *stack.Stack, netProto tcpip.NetworkProtocolNumber, transProto tcpip.TransportProtocolNumber, waiterQueue *waiter.Queue) (tcpip.Endpoint, tcpip.Error) {
@@ -85,7 +88,6 @@ func newEndpoint(s *stack.Stack, netProto tcpip.NetworkProtocolNumber, transProt
 		stack:       s,
 		transProto:  transProto,
 		waiterQueue: waiterQueue,
-		uniqueID:    s.UniqueID(),
 	}
 	ep.ops.InitHandler(ep, ep.stack, tcpip.GetStackSendBufferLimits, tcpip.GetStackReceiveBufferLimits)
 	ep.ops.SetSendBufferSize(32*1024, false /* notify */)
@@ -107,11 +109,6 @@ func newEndpoint(s *stack.Stack, netProto tcpip.NetworkProtocolNumber, transProt
 // WakeupWriters implements tcpip.SocketOptionsHandler.
 func (e *endpoint) WakeupWriters() {
 	e.net.MaybeSignalWritable()
-}
-
-// UniqueID implements stack.TransportEndpoint.UniqueID.
-func (e *endpoint) UniqueID() uint64 {
-	return e.uniqueID
 }
 
 // Abort implements stack.TransportEndpoint.Abort.
@@ -182,11 +179,13 @@ func (e *endpoint) Read(dst io.Writer, opts tcpip.ReadOptions) (tcpip.ReadResult
 	}
 
 	p := e.rcvList.Front()
-	if !opts.Peek {
+	if opts.Peek {
+		p.data.IncRef()
+	} else {
 		e.rcvList.Remove(p)
-		defer p.data.DecRef()
 		e.rcvBufSize -= p.data.Data().Size()
 	}
+	defer p.data.DecRef()
 
 	e.rcvMu.Unlock()
 
@@ -299,7 +298,7 @@ func (e *endpoint) Write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, tcp
 		e.stats.WriteErrors.WriteClosed.Increment()
 	case *tcpip.ErrInvalidEndpointState:
 		e.stats.WriteErrors.InvalidEndpointState.Increment()
-	case *tcpip.ErrNoRoute, *tcpip.ErrBroadcastDisabled, *tcpip.ErrNetworkUnreachable:
+	case *tcpip.ErrHostUnreachable, *tcpip.ErrBroadcastDisabled, *tcpip.ErrNetworkUnreachable:
 		// Errors indicating any problem with IP routing of the packet.
 		e.stats.SendErrors.NoRoute.Increment()
 	default:
@@ -336,7 +335,12 @@ func (e *endpoint) write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, tcp
 	}
 	defer ctx.Release()
 
-	v := bufferv2.NewView(p.Len())
+	// Prevents giant buffer allocations.
+	if p.Len() > header.DatagramMaximumSize {
+		return 0, &tcpip.ErrMessageTooLong{}
+	}
+
+	v := buffer.NewView(p.Len())
 	defer v.Release()
 	if _, err := io.CopyN(v, p, int64(p.Len())); err != nil {
 		return 0, &tcpip.ErrBadBuffer{}
@@ -400,12 +404,12 @@ func (e *endpoint) GetSockOpt(opt tcpip.GettableSocketOption) tcpip.Error {
 	return e.net.GetSockOpt(opt)
 }
 
-func send4(s *stack.Stack, ctx *network.WriteContext, ident uint16, data *bufferv2.View, maxHeaderLength uint16) tcpip.Error {
+func send4(s *stack.Stack, ctx *network.WriteContext, ident uint16, data *buffer.View, maxHeaderLength uint16) tcpip.Error {
 	if data.Size() < header.ICMPv4MinimumSize {
 		return &tcpip.ErrInvalidEndpointState{}
 	}
 
-	pkt := ctx.TryNewPacketBuffer(header.ICMPv4MinimumSize+int(maxHeaderLength), bufferv2.Buffer{})
+	pkt := ctx.TryNewPacketBuffer(header.ICMPv4MinimumSize+int(maxHeaderLength), buffer.Buffer{})
 	if pkt == nil {
 		return &tcpip.ErrWouldBlock{}
 	}
@@ -425,7 +429,7 @@ func send4(s *stack.Stack, ctx *network.WriteContext, ident uint16, data *buffer
 	}
 
 	icmpv4.SetChecksum(0)
-	icmpv4.SetChecksum(^header.Checksum(icmpv4, header.Checksum(data.AsSlice(), 0)))
+	icmpv4.SetChecksum(^checksum.Checksum(icmpv4, checksum.Checksum(data.AsSlice(), 0)))
 	pkt.Data().AppendView(data.Clone())
 
 	// Because this icmp endpoint is implemented in the transport layer, we can
@@ -442,12 +446,12 @@ func send4(s *stack.Stack, ctx *network.WriteContext, ident uint16, data *buffer
 	return nil
 }
 
-func send6(s *stack.Stack, ctx *network.WriteContext, ident uint16, data *bufferv2.View, src, dst tcpip.Address, maxHeaderLength uint16) tcpip.Error {
+func send6(s *stack.Stack, ctx *network.WriteContext, ident uint16, data *buffer.View, src, dst tcpip.Address, maxHeaderLength uint16) tcpip.Error {
 	if data.Size() < header.ICMPv6EchoMinimumSize {
 		return &tcpip.ErrInvalidEndpointState{}
 	}
 
-	pkt := ctx.TryNewPacketBuffer(header.ICMPv6MinimumSize+int(maxHeaderLength), bufferv2.Buffer{})
+	pkt := ctx.TryNewPacketBuffer(header.ICMPv6MinimumSize+int(maxHeaderLength), buffer.Buffer{})
 	if pkt == nil {
 		return &tcpip.ErrWouldBlock{}
 	}
@@ -465,13 +469,13 @@ func send6(s *stack.Stack, ctx *network.WriteContext, ident uint16, data *buffer
 	}
 
 	pkt.Data().AppendView(data.Clone())
-	dataRange := pkt.Data().AsRange()
+	pktData := pkt.Data()
 	icmpv6.SetChecksum(header.ICMPv6Checksum(header.ICMPv6ChecksumParams{
 		Header:      icmpv6,
 		Src:         src,
 		Dst:         dst,
-		PayloadCsum: dataRange.Checksum(),
-		PayloadLen:  dataRange.Size(),
+		PayloadCsum: pktData.Checksum(),
+		PayloadLen:  pktData.Size(),
 	}))
 
 	// Because this icmp endpoint is implemented in the transport layer, we can
@@ -498,20 +502,22 @@ func (e *endpoint) Connect(addr tcpip.FullAddress) tcpip.Error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	ident := e.ident
 	err := e.net.ConnectAndThen(addr, func(netProto tcpip.NetworkProtocolNumber, previousID, nextID stack.TransportEndpointID) tcpip.Error {
-		nextID.LocalPort = e.ident
+		nextID.LocalPort = ident
 
 		nextID, err := e.registerWithStack(netProto, nextID)
 		if err != nil {
 			return err
 		}
 
-		e.ident = nextID.LocalPort
+		ident = nextID.LocalPort
 		return nil
 	})
 	if err != nil {
 		return err
 	}
+	e.ident = ident
 
 	e.rcvMu.Lock()
 	e.rcvReady = true
@@ -578,7 +584,7 @@ func (e *endpoint) registerWithStack(netProto tcpip.NetworkProtocolNumber, id st
 	}
 
 	// We need to find a port for the endpoint.
-	_, err := e.stack.PickEphemeralPort(e.stack.Rand(), func(p uint16) (bool, tcpip.Error) {
+	_, err := e.stack.PickEphemeralPort(e.stack.SecureRNG(), func(p uint16) (bool, tcpip.Error) {
 		id.LocalPort = p
 		err := e.stack.RegisterTransportEndpoint([]tcpip.NetworkProtocolNumber{netProto}, e.transProto, id, e, ports.Flags{}, bindToDevice)
 		switch err.(type) {
@@ -594,6 +600,7 @@ func (e *endpoint) registerWithStack(netProto tcpip.NetworkProtocolNumber, id st
 	return id, err
 }
 
+// +checklocks:e.mu
 func (e *endpoint) bindLocked(addr tcpip.FullAddress) tcpip.Error {
 	// Don't allow binding once endpoint is not in the initial state
 	// anymore.
@@ -601,6 +608,7 @@ func (e *endpoint) bindLocked(addr tcpip.FullAddress) tcpip.Error {
 		return &tcpip.ErrInvalidEndpointState{}
 	}
 
+	var ident uint16
 	err := e.net.BindAndThen(addr, func(boundNetProto tcpip.NetworkProtocolNumber, boundAddr tcpip.Address) tcpip.Error {
 		id := stack.TransportEndpointID{
 			LocalPort:    addr.Port,
@@ -611,12 +619,13 @@ func (e *endpoint) bindLocked(addr tcpip.FullAddress) tcpip.Error {
 			return err
 		}
 
-		e.ident = id.LocalPort
+		ident = id.LocalPort
 		return nil
 	})
 	if err != nil {
 		return err
 	}
+	e.ident = ident
 
 	e.rcvMu.Lock()
 	e.rcvReady = true
@@ -635,7 +644,7 @@ func (e *endpoint) isBroadcastOrMulticast(nicID tcpip.NICID, addr tcpip.Address)
 // Bind binds the endpoint to a specific local address and port.
 // Specifying a NIC is optional.
 func (e *endpoint) Bind(addr tcpip.FullAddress) tcpip.Error {
-	if len(addr.Addr) != 0 && e.isBroadcastOrMulticast(addr.NIC, addr.Addr) {
+	if addr.Addr.BitLen() != 0 && e.isBroadcastOrMulticast(addr.NIC, addr.Addr) {
 		return &tcpip.ErrBadLocalAddress{}
 	}
 
@@ -815,15 +824,15 @@ func (e *endpoint) SocketOptions() *tcpip.SocketOptions {
 
 // freeze prevents any more packets from being delivered to the endpoint.
 func (e *endpoint) freeze() {
-	e.mu.Lock()
+	e.rcvMu.Lock()
 	e.frozen = true
-	e.mu.Unlock()
+	e.rcvMu.Unlock()
 }
 
 // thaw unfreezes a previously frozen endpoint using endpoint.freeze() allows
 // new packets to be delivered again.
 func (e *endpoint) thaw() {
-	e.mu.Lock()
+	e.rcvMu.Lock()
 	e.frozen = false
-	e.mu.Unlock()
+	e.rcvMu.Unlock()
 }

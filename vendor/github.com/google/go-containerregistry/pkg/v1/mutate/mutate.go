@@ -21,12 +21,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"path/filepath"
+	"maps"
+	"path"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/google/go-containerregistry/internal/gzip"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/match"
@@ -36,6 +36,11 @@ import (
 )
 
 const whiteoutPrefix = ".wh."
+
+// opaqueWhiteout marks a directory as opaque: all entries from lower layers under
+// its parent directory are hidden. It shares the whiteoutPrefix, so it must be
+// matched exactly and handled before the generic per-file whiteout logic.
+const opaqueWhiteout = ".wh..wh..opq"
 
 // Addendum contains layers and history to be appended
 // to a base image
@@ -116,9 +121,33 @@ func Config(base v1.Image, cfg v1.Config) (v1.Image, error) {
 	return ConfigFile(base, cf)
 }
 
-// Annotatable represents a manifest that can carry annotations.
-type Annotatable interface {
-	partial.WithRawManifest
+// Subject mutates the subject on an image or index manifest.
+//
+// The input is expected to be a v1.Image or v1.ImageIndex, and
+// returns the same type. You can type-assert the result like so:
+//
+//	img := Subject(empty.Image, subj).(v1.Image)
+//
+// Or for an index:
+//
+//	idx := Subject(empty.Index, subj).(v1.ImageIndex)
+//
+// If the input is not an Image or ImageIndex, the result will
+// attempt to lazily annotate the raw manifest.
+func Subject(f partial.WithRawManifest, subject v1.Descriptor) partial.WithRawManifest {
+	if img, ok := f.(v1.Image); ok {
+		return &image{
+			base:    img,
+			subject: &subject,
+		}
+	}
+	if idx, ok := f.(v1.ImageIndex); ok {
+		return &index{
+			base:    idx,
+			subject: &subject,
+		}
+	}
+	return arbitraryRawManifest{a: f, subject: &subject}
 }
 
 // Annotations mutates the annotations on an annotatable image or index manifest.
@@ -126,37 +155,38 @@ type Annotatable interface {
 // The annotatable input is expected to be a v1.Image or v1.ImageIndex, and
 // returns the same type. You can type-assert the result like so:
 //
-//     img := Annotations(empty.Image, map[string]string{
-//         "foo": "bar",
-//     }).(v1.Image)
+//	img := Annotations(empty.Image, map[string]string{
+//	    "foo": "bar",
+//	}).(v1.Image)
 //
 // Or for an index:
 //
-//     idx := Annotations(empty.Index, map[string]string{
-//         "foo": "bar",
-//     }).(v1.ImageIndex)
+//	idx := Annotations(empty.Index, map[string]string{
+//	    "foo": "bar",
+//	}).(v1.ImageIndex)
 //
 // If the input Annotatable is not an Image or ImageIndex, the result will
 // attempt to lazily annotate the raw manifest.
-func Annotations(f Annotatable, anns map[string]string) Annotatable {
+func Annotations(f partial.WithRawManifest, anns map[string]string) partial.WithRawManifest {
 	if img, ok := f.(v1.Image); ok {
 		return &image{
 			base:        img,
-			annotations: anns,
+			annotations: maps.Clone(anns),
 		}
 	}
 	if idx, ok := f.(v1.ImageIndex); ok {
 		return &index{
 			base:        idx,
-			annotations: anns,
+			annotations: maps.Clone(anns),
 		}
 	}
-	return arbitraryRawManifest{f, anns}
+	return arbitraryRawManifest{a: f, anns: maps.Clone(anns)}
 }
 
 type arbitraryRawManifest struct {
-	a    Annotatable
-	anns map[string]string
+	a       partial.WithRawManifest
+	anns    map[string]string
+	subject *v1.Descriptor
 }
 
 func (a arbitraryRawManifest) RawManifest() ([]byte, error) {
@@ -164,7 +194,7 @@ func (a arbitraryRawManifest) RawManifest() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var m map[string]interface{}
+	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, err
 	}
@@ -178,6 +208,9 @@ func (a arbitraryRawManifest) RawManifest() ([]byte, error) {
 		}
 	} else {
 		m["annotations"] = a.anns
+	}
+	if a.subject != nil {
+		m["subject"] = a.subject
 	}
 	return json.Marshal(m)
 }
@@ -239,82 +272,158 @@ func extract(img v1.Image, w io.Writer) error {
 	defer tarWriter.Close()
 
 	fileMap := map[string]bool{}
+	// opaqueDirs holds directories opaqued by an upper layer; entries under them
+	// from lower (later-iterated) layers are hidden.
+	opaqueDirs := map[string]bool{}
 
 	layers, err := img.Layers()
 	if err != nil {
 		return fmt.Errorf("retrieving image layers: %w", err)
 	}
+
 	// we iterate through the layers in reverse order because it makes handling
 	// whiteout layers more efficient, since we can just keep track of the removed
 	// files as we see .wh. layers and ignore those in previous layers.
 	for i := len(layers) - 1; i >= 0; i-- {
-		layer := layers[i]
-		layerReader, err := layer.Uncompressed()
-		if err != nil {
-			return fmt.Errorf("reading layer contents: %w", err)
-		}
-		defer layerReader.Close()
-		tarReader := tar.NewReader(layerReader)
-		for {
-			header, err := tarReader.Next()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return fmt.Errorf("reading tar: %w", err)
-			}
-
-			// Some tools prepend everything with "./", so if we don't Clean the
-			// name, we may have duplicate entries, which angers tar-split.
-			header.Name = filepath.Clean(header.Name)
-
-			basename := filepath.Base(header.Name)
-			dirname := filepath.Dir(header.Name)
-			tombstone := strings.HasPrefix(basename, whiteoutPrefix)
-			if tombstone {
-				basename = basename[len(whiteoutPrefix):]
-			}
-
-			// check if we have seen value before
-			// if we're checking a directory, don't filepath.Join names
-			var name string
-			if header.Typeflag == tar.TypeDir {
-				name = header.Name
-			} else {
-				name = filepath.Join(dirname, basename)
-			}
-
-			if _, ok := fileMap[name]; ok {
-				continue
-			}
-
-			// check for a whited out parent directory
-			if inWhiteoutDir(fileMap, name) {
-				continue
-			}
-
-			// mark file as handled. non-directory implicitly tombstones
-			// any entries with a matching (or child) name
-			fileMap[name] = tombstone || !(header.Typeflag == tar.TypeDir)
-			if !tombstone {
-				tarWriter.WriteHeader(header)
-				if header.Size > 0 {
-					if _, err := io.CopyN(tarWriter, tarReader, header.Size); err != nil {
-						return err
-					}
-				}
-			}
+		if err := extractLayer(tarWriter, fileMap, opaqueDirs, layers[i]); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func inWhiteoutDir(fileMap map[string]bool, file string) bool {
+func extractLayer(tarWriter *tar.Writer, fileMap, opaqueDirs map[string]bool, layer v1.Layer) error {
+	// Opaque markers in this layer hide only lower layers, so stage them and
+	// promote to opaqueDirs after the whole layer is processed.
+	layerOpaque := map[string]bool{}
+
+	layerReader, err := layer.Uncompressed()
+	if err != nil {
+		return fmt.Errorf("reading layer contents: %w", err)
+	}
+	defer layerReader.Close()
+
+	tarReader := tar.NewReader(layerReader)
 	for {
-		if file == "" {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
 			break
 		}
-		dirname := filepath.Dir(file)
+		if err != nil {
+			return fmt.Errorf("reading tar: %w", err)
+		}
+
+		// Some tools prepend everything with "./", so if we don't Clean the
+		// name, we may have duplicate entries, which angers tar-split.
+		header.Name = path.Clean(header.Name)
+		if unsafeArchivePath(header.Name) {
+			return fmt.Errorf("unsafe tar path %q", header.Name)
+		}
+
+		// Reject relative symlinks and hardlinks whose targets escape the
+		// image rootfs. Relative targets are resolved against the symlink's
+		// own directory: if the clean result starts with ".." the link would
+		// leave the rootfs. Relative symlinks that stay within the rootfs
+		// (common for glibc, C toolchains, etc.) are preserved unchanged.
+		// Absolute targets are left as-is; see #2238 for ongoing discussion
+		// on whether they should be pruned.
+		if header.Typeflag == tar.TypeSymlink || header.Typeflag == tar.TypeLink {
+			if unsafeRelativeLink(header.Name, header.Linkname) {
+				continue
+			}
+		}
+
+		// force PAX format to remove Name/Linkname length limit of 100 characters
+		// required by USTAR and to not depend on internal tar package guess which
+		// prefers USTAR over PAX
+		header.Format = tar.FormatPAX
+
+		basename := path.Base(header.Name)
+		dirname := path.Dir(header.Name)
+
+		// An opaque marker hides all lower-layer entries under dirname. It shares
+		// the whiteout prefix, so handle it before the generic per-file logic.
+		if basename == opaqueWhiteout {
+			layerOpaque[dirname] = true
+			continue
+		}
+
+		tombstone := strings.HasPrefix(basename, whiteoutPrefix)
+		if tombstone {
+			basename = basename[len(whiteoutPrefix):]
+		}
+
+		// check if we have seen value before
+		// if we're checking a directory, don't filepath.Join names
+		var name string
+		if header.Typeflag == tar.TypeDir {
+			name = header.Name
+		} else {
+			name = path.Join(dirname, basename)
+		}
+
+		if _, ok := fileMap[name]; ok && !tombstone {
+			continue
+		}
+
+		// check for a whited out parent directory
+		if inWhiteoutDir(fileMap, name) {
+			continue
+		}
+
+		// check for a parent directory opaqued by an upper layer
+		if inOpaqueDir(opaqueDirs, name) {
+			continue
+		}
+
+		// mark file as handled. non-directory implicitly tombstones
+		// any entries with a matching (or child) name
+		fileMap[name] = tombstone || (header.Typeflag != tar.TypeDir)
+		if !tombstone {
+			if err := tarWriter.WriteHeader(header); err != nil {
+				return err
+			}
+			if header.Size > 0 {
+				if _, err := io.CopyN(tarWriter, tarReader, header.Size); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	// Opaque dirs found in this layer now hide entries in lower layers.
+	for d := range layerOpaque {
+		opaqueDirs[d] = true
+	}
+
+	// Drain any bytes the tar.Reader did not consume (trailing data after the
+	// end-of-archive marker) so the underlying verifying reader reaches io.EOF
+	// and the layer's digest is verified. Without this, a layer whose contents
+	// do not match the manifest's layer digest is extracted without error.
+	// pkg/v1/validate/layer.go performs the same drain.
+	if _, err := io.Copy(io.Discard, layerReader); err != nil {
+		return fmt.Errorf("verifying layer: %w", err)
+	}
+	return nil
+}
+
+func inOpaqueDir(opaqueDirs map[string]bool, file string) bool {
+	for file != "" {
+		dirname := path.Dir(file)
+		if file == dirname {
+			break
+		}
+		if opaqueDirs[dirname] {
+			return true
+		}
+		file = dirname
+	}
+	return false
+}
+
+func inWhiteoutDir(fileMap map[string]bool, file string) bool {
+	for file != "" {
+		dirname := path.Dir(file)
 		if file == dirname {
 			break
 		}
@@ -326,8 +435,42 @@ func inWhiteoutDir(fileMap map[string]bool, file string) bool {
 	return false
 }
 
+func unsafeArchivePath(name string) bool {
+	clean := cleanArchivePath(name)
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return true
+	}
+	if strings.HasPrefix(name, "\\") {
+		return true
+	}
+	return hasWindowsDrivePrefix(clean)
+}
+
+func unsafeRelativeLink(name, linkname string) bool {
+	clean := cleanArchivePath(linkname)
+	if path.IsAbs(clean) {
+		return false
+	}
+	if hasWindowsDrivePrefix(clean) {
+		return true
+	}
+	resolved := path.Clean(path.Join(path.Dir(name), clean)) //nolint:gosec // G305: path is only used for validation, not file I/O
+	return strings.HasPrefix(resolved, "..")
+}
+
+func cleanArchivePath(name string) string {
+	return path.Clean(strings.ReplaceAll(name, "\\", "/"))
+}
+
+func hasWindowsDrivePrefix(name string) bool {
+	return len(name) >= 2 &&
+		(('A' <= name[0] && name[0] <= 'Z') || ('a' <= name[0] && name[0] <= 'z')) &&
+		name[1] == ':'
+}
+
 // Time sets all timestamps in an image to the given timestamp.
-func Time(img v1.Image, t time.Time) (v1.Image, error) {
+// Layers are rewritten as dockerv2+gzip unless opts say otherwise.
+func Time(img v1.Image, t time.Time, opts ...tarball.LayerOption) (v1.Image, error) {
 	newImage := empty.Image
 
 	layers, err := img.Layers()
@@ -335,24 +478,42 @@ func Time(img v1.Image, t time.Time) (v1.Image, error) {
 		return nil, fmt.Errorf("getting image layers: %w", err)
 	}
 
-	// Strip away all timestamps from layers
-	newLayers := make([]v1.Layer, len(layers))
-	for idx, layer := range layers {
-		newLayer, err := layerTime(layer, t)
-		if err != nil {
-			return nil, fmt.Errorf("setting layer times: %w", err)
-		}
-		newLayers[idx] = newLayer
-	}
-
-	newImage, err = AppendLayers(newImage, newLayers...)
-	if err != nil {
-		return nil, fmt.Errorf("appending layers: %w", err)
-	}
-
 	ocf, err := img.ConfigFile()
 	if err != nil {
 		return nil, fmt.Errorf("getting original config file: %w", err)
+	}
+
+	addendums := make([]Addendum, max(len(ocf.History), len(layers)))
+	var historyIdx, addendumIdx int
+	for layerIdx := 0; layerIdx < len(layers); addendumIdx, layerIdx = addendumIdx+1, layerIdx+1 {
+		newLayer := layerTime(layers[layerIdx], t, opts...)
+
+		// try to search for the history entry that corresponds to this layer
+		for ; historyIdx < len(ocf.History); historyIdx++ {
+			addendums[addendumIdx].History = ocf.History[historyIdx]
+			// if it's an EmptyLayer, do not set the Layer and have the Addendum with just the History
+			// and move on to the next History entry
+			if ocf.History[historyIdx].EmptyLayer {
+				addendumIdx++
+				continue
+			}
+			// otherwise, we can exit from the cycle
+			historyIdx++
+			break
+		}
+		if addendumIdx < len(addendums) {
+			addendums[addendumIdx].Layer = newLayer
+		}
+	}
+
+	// add all leftover History entries
+	for ; historyIdx < len(ocf.History); historyIdx, addendumIdx = historyIdx+1, addendumIdx+1 {
+		addendums[addendumIdx].History = ocf.History[historyIdx]
+	}
+
+	newImage, err = Append(newImage, addendums...)
+	if err != nil {
+		return nil, fmt.Errorf("appending layers: %w", err)
 	}
 
 	cf, err := newImage.ConfigFile()
@@ -377,13 +538,35 @@ func Time(img v1.Image, t time.Time) (v1.Image, error) {
 		h.Comment = ocf.History[i].Comment
 		h.EmptyLayer = ocf.History[i].EmptyLayer
 		// Explicitly ignore Author field; which hinders reproducibility
+		h.Author = ""
 		cfg.History[i] = h
 	}
 
 	return ConfigFile(newImage, cfg)
 }
 
-func layerTime(layer v1.Layer, t time.Time) (v1.Layer, error) {
+func layerTime(layer v1.Layer, t time.Time, opts ...tarball.LayerOption) v1.Layer {
+	return &timeLayer{inner: layer, t: t, opts: opts}
+}
+
+type timeLayer struct {
+	inner v1.Layer
+	t     time.Time
+	opts  []tarball.LayerOption
+
+	once     sync.Once
+	material v1.Layer
+	err      error
+}
+
+func (l *timeLayer) materialize() error {
+	l.once.Do(func() {
+		l.material, l.err = materializeLayerTime(l.inner, l.t, l.opts...)
+	})
+	return l.err
+}
+
+func materializeLayerTime(layer v1.Layer, t time.Time, opts ...tarball.LayerOption) (v1.Layer, error) {
 	layerReader, err := layer.Uncompressed()
 	if err != nil {
 		return nil, fmt.Errorf("getting layer: %w", err)
@@ -404,16 +587,28 @@ func layerTime(layer v1.Layer, t time.Time) (v1.Layer, error) {
 		}
 
 		header.ModTime = t
+
+		//PAX and GNU Format support additional timestamps in the header
+		if header.Format == tar.FormatPAX || header.Format == tar.FormatGNU {
+			header.AccessTime = t
+			header.ChangeTime = t
+		}
+
 		if err := tarWriter.WriteHeader(header); err != nil {
 			return nil, fmt.Errorf("writing tar header: %w", err)
 		}
 
 		if header.Typeflag == tar.TypeReg {
-			// TODO(#1168): This should be lazy, and not buffer the entire layer contents.
 			if _, err = io.CopyN(tarWriter, tarReader, header.Size); err != nil {
 				return nil, fmt.Errorf("writing layer file: %w", err)
 			}
 		}
+	}
+
+	// Drain trailing bytes so the underlying verifying reader reaches io.EOF
+	// and the layer digest is verified (see extractLayer).
+	if _, err := io.Copy(io.Discard, layerReader); err != nil {
+		return nil, fmt.Errorf("verifying layer: %w", err)
 	}
 
 	if err := tarWriter.Close(); err != nil {
@@ -421,24 +616,65 @@ func layerTime(layer v1.Layer, t time.Time) (v1.Layer, error) {
 	}
 
 	b := w.Bytes()
-	// gzip the contents, then create the layer
 	opener := func() (io.ReadCloser, error) {
-		return gzip.ReadCloser(ioutil.NopCloser(bytes.NewReader(b))), nil
+		return io.NopCloser(bytes.NewReader(b)), nil
 	}
-	layer, err = tarball.LayerFromOpener(opener)
+	newLayer, err := tarball.LayerFromOpener(opener, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating layer: %w", err)
 	}
 
-	return layer, nil
+	return newLayer, nil
+}
+
+func (l *timeLayer) Compressed() (io.ReadCloser, error) {
+	if err := l.materialize(); err != nil {
+		return nil, err
+	}
+	return l.material.Compressed()
+}
+
+func (l *timeLayer) Uncompressed() (io.ReadCloser, error) {
+	if err := l.materialize(); err != nil {
+		return nil, err
+	}
+	return l.material.Uncompressed()
+}
+
+func (l *timeLayer) Size() (int64, error) {
+	if err := l.materialize(); err != nil {
+		return 0, err
+	}
+	return l.material.Size()
+}
+
+func (l *timeLayer) DiffID() (v1.Hash, error) {
+	if err := l.materialize(); err != nil {
+		return v1.Hash{}, err
+	}
+	return l.material.DiffID()
+}
+
+func (l *timeLayer) Digest() (v1.Hash, error) {
+	if err := l.materialize(); err != nil {
+		return v1.Hash{}, err
+	}
+	return l.material.Digest()
+}
+
+func (l *timeLayer) MediaType() (types.MediaType, error) {
+	if err := l.materialize(); err != nil {
+		return "", err
+	}
+	return l.material.MediaType()
 }
 
 // Canonical is a helper function to combine Time and configFile
 // to remove any randomness during a docker build.
-func Canonical(img v1.Image) (v1.Image, error) {
+func Canonical(img v1.Image, opts ...tarball.LayerOption) (v1.Image, error) {
 	// Set all timestamps to 0
 	created := time.Time{}
-	img, err := Time(img, created)
+	img, err := Time(img, created, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -453,7 +689,7 @@ func Canonical(img v1.Image) (v1.Image, error) {
 
 	cfg.Container = ""
 	cfg.Config.Hostname = ""
-	cfg.DockerVersion = ""
+	cfg.DockerVersion = "" //nolint:staticcheck // Field will be removed in next release
 
 	return ConfigFile(img, cfg)
 }
@@ -467,6 +703,8 @@ func MediaType(img v1.Image, mt types.MediaType) v1.Image {
 }
 
 // ConfigMediaType modifies the MediaType() of the given image's Config.
+//
+// If !mt.IsConfig(), this will be the image's artifactType in any indexes it's a part of.
 func ConfigMediaType(img v1.Image, mt types.MediaType) v1.Image {
 	return &image{
 		base:            img,

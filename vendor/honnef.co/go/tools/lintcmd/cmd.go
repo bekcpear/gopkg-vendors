@@ -8,14 +8,17 @@ import (
 	"flag"
 	"fmt"
 	"go/token"
+	stdversion "go/version"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -30,16 +33,51 @@ import (
 	"golang.org/x/tools/go/buildutil"
 )
 
-type BuildConfig struct {
+type buildConfig struct {
 	Name  string
 	Envs  []string
 	Flags []string
 }
 
+type caseFoldedString struct {
+	s string
+}
+
+func makeCaseFoldedString(s string) caseFoldedString {
+	return caseFoldedString{strings.ToLower(s)}
+}
+
+func makeCaseFoldedStrings(ss []string) []caseFoldedString {
+	out := make([]caseFoldedString, len(ss))
+	for i, s := range ss {
+		out[i] = makeCaseFoldedString(s)
+	}
+	return out
+}
+
+func (cs caseFoldedString) String() string {
+	return cs.s
+}
+
+func (cs caseFoldedString) Index(idx int) byte {
+	return cs.s[idx]
+}
+
+func (cs caseFoldedString) Slice(start, end int) caseFoldedString {
+	if end == -1 {
+		end = len(cs.s)
+	}
+	return caseFoldedString{cs.s[start:end]}
+}
+
+func (cs caseFoldedString) Length() int {
+	return len(cs.s)
+}
+
 // Command represents a linter command line tool.
 type Command struct {
 	name           string
-	analyzers      map[string]*lint.Analyzer
+	analyzers      map[caseFoldedString]*lint.Analyzer
 	version        string
 	machineVersion string
 
@@ -76,7 +114,7 @@ type Command struct {
 func NewCommand(name string) *Command {
 	cmd := &Command{
 		name:           name,
-		analyzers:      map[string]*lint.Analyzer{},
+		analyzers:      map[caseFoldedString]*lint.Analyzer{},
 		version:        "devel",
 		machineVersion: "devel",
 	}
@@ -107,7 +145,7 @@ func (cmd *Command) FlagSet() *flag.FlagSet {
 // To add analysis.Analyzer analyzers without providing structured documentation, use AddBareAnalyzers.
 func (cmd *Command) AddAnalyzers(as ...*lint.Analyzer) {
 	for _, a := range as {
-		cmd.analyzers[a.Analyzer.Name] = a
+		cmd.analyzers[makeCaseFoldedString(a.Analyzer.Name)] = a
 	}
 }
 
@@ -120,13 +158,13 @@ func (cmd *Command) AddBareAnalyzers(as ...*analysis.Analyzer) {
 			text = a.Doc[idx+2:]
 		}
 
-		doc := &lint.Documentation{
+		doc := &lint.RawDocumentation{
 			Title:    title,
 			Text:     text,
 			Severity: lint.SeverityWarning,
 		}
 
-		cmd.analyzers[a.Name] = &lint.Analyzer{
+		cmd.analyzers[makeCaseFoldedString(a.Name)] = &lint.Analyzer{
 			Doc:      doc,
 			Analyzer: a,
 		}
@@ -193,11 +231,15 @@ func (v *versionFlag) Set(s string) error {
 	if s == "module" {
 		*v = "module"
 	} else {
-		var vf lint.VersionFlag
-		if err := vf.Set(s); err != nil {
-			return err
+		orig := s
+		if !strings.HasPrefix(s, "go") {
+			s = "go" + s
 		}
-		*v = versionFlag(s)
+		if stdversion.IsValid(s) {
+			*v = versionFlag(s)
+		} else {
+			return fmt.Errorf("%q is not a valid Go version", orig)
+		}
 	}
 	return nil
 }
@@ -208,12 +250,12 @@ func (v *versionFlag) Set(s string) error {
 //
 // Example:
 //
-// 	cmd.ParseFlags(os.Args[1:])
+//	cmd.ParseFlags(os.Args[1:])
 func (cmd *Command) ParseFlags(args []string) {
 	cmd.flags.fs.Parse(args)
 }
 
-// diagnosticDescriptor represents the uniquiely identifying information of diagnostics.
+// diagnosticDescriptor represents the uniquely identifying information of diagnostics.
 type diagnosticDescriptor struct {
 	Position token.Position
 	End      token.Position
@@ -235,7 +277,7 @@ type run struct {
 	diagnostics  map[diagnosticDescriptor]diagnostic
 }
 
-func runFromLintResult(res LintResult) run {
+func runFromLintResult(res lintResult) run {
 	out := run{
 		checkedFiles: map[string]struct{}{},
 		diagnostics:  map[diagnosticDescriptor]diagnostic{},
@@ -253,7 +295,7 @@ func runFromLintResult(res LintResult) run {
 func decodeGob(br io.ByteReader) ([]run, error) {
 	var runs []run
 	for {
-		var res LintResult
+		var res lintResult
 		if err := gob.NewDecoder(br.(io.Reader)).Decode(&res); err != nil {
 			if err == io.EOF {
 				break
@@ -266,9 +308,192 @@ func decodeGob(br io.ByteReader) ([]run, error) {
 	return runs, nil
 }
 
+// Execute runs all registered analyzers and reports their findings.
+// The status code returned can be used for os.Exit(cmd.Execute()).
+func (cmd *Command) Execute() int {
+	// Set up profiling and tracing
+	if path := cmd.flags.debugCpuprofile; path != "" {
+		f, err := os.Create(path)
+		if err != nil {
+			log.Fatal(err)
+		}
+		pprof.StartCPUProfile(f)
+	}
+	if path := cmd.flags.debugTrace; path != "" {
+		f, err := os.Create(path)
+		if err != nil {
+			log.Fatal(err)
+		}
+		trace.Start(f)
+	}
+
+	// Update the default config's list of enabled checks
+	defaultChecks := []string{"all"}
+	for _, a := range cmd.analyzers {
+		if a.Doc.NonDefault {
+			defaultChecks = append(defaultChecks, "-"+a.Analyzer.Name)
+		}
+	}
+	config.DefaultConfig.Checks = defaultChecks
+
+	// Run the appropriate mode
+	var exit int
+	switch {
+	case cmd.flags.debugVersion:
+		exit = cmd.printDebugVersion()
+	case cmd.flags.listChecks:
+		exit = cmd.listChecks()
+	case cmd.flags.printVersion:
+		exit = cmd.printVersion()
+	case cmd.flags.explain != "":
+		exit = cmd.explain()
+	case cmd.flags.merge:
+		exit = cmd.merge()
+	default:
+		exit = cmd.lint()
+	}
+
+	// Stop profiling
+	if cmd.flags.debugCpuprofile != "" {
+		pprof.StopCPUProfile()
+	}
+	if path := cmd.flags.debugMemprofile; path != "" {
+		f, err := os.Create(path)
+		if err != nil {
+			panic(err)
+		}
+		runtime.GC()
+		pprof.WriteHeapProfile(f)
+	}
+	if cmd.flags.debugTrace != "" {
+		trace.Stop()
+	}
+
+	return exit
+}
+
 // Run runs all registered analyzers and reports their findings.
 // It always calls os.Exit and does not return.
 func (cmd *Command) Run() {
+	os.Exit(cmd.Execute())
+}
+
+func (cmd *Command) printDebugVersion() int {
+	version.Verbose(cmd.version, cmd.machineVersion)
+	return 0
+}
+
+func (cmd *Command) listChecks() int {
+	cs := slices.Collect(maps.Values(cmd.analyzers))
+	sort.Slice(cs, func(i, j int) bool {
+		return cs[i].Analyzer.Name < cs[j].Analyzer.Name
+	})
+	for _, c := range cs {
+		var title string
+		if c.Doc != nil {
+			title = c.Doc.Compile().Title
+		}
+		fmt.Printf("%s %s\n", c.Analyzer.Name, title)
+	}
+	return 0
+}
+
+func (cmd *Command) printVersion() int {
+	version.Print(cmd.version, cmd.machineVersion)
+	return 0
+}
+
+func (cmd *Command) explain() int {
+	explain := cmd.flags.explain
+	check, ok := cmd.analyzers[makeCaseFoldedString(explain)]
+	if !ok {
+		fmt.Fprintln(os.Stderr, "Couldn't find check", explain)
+		return 1
+	}
+	if check.Analyzer.Doc == "" {
+		fmt.Fprintln(os.Stderr, check.Analyzer.Name, "has no documentation")
+		return 1
+	}
+	fmt.Println(check.Doc.Compile())
+	fmt.Println("Online documentation\n    https://staticcheck.dev/docs/checks#" + check.Analyzer.Name)
+	return 0
+}
+
+func (cmd *Command) merge() int {
+	var runs []run
+	if len(cmd.flags.fs.Args()) == 0 {
+		var err error
+		runs, err = decodeGob(bufio.NewReader(os.Stdin))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, fmt.Errorf("couldn't parse stdin: %s", err))
+			return 1
+		}
+	} else {
+		for _, path := range cmd.flags.fs.Args() {
+			someRuns, err := func(path string) ([]run, error) {
+				f, err := os.Open(path)
+				if err != nil {
+					return nil, err
+				}
+				defer f.Close()
+				br := bufio.NewReader(f)
+				return decodeGob(br)
+			}(path)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, fmt.Errorf("couldn't parse file %s: %s", path, err))
+				return 1
+			}
+			runs = append(runs, someRuns...)
+		}
+	}
+
+	relevantDiagnostics := mergeRuns(runs)
+	cs := slices.Collect(maps.Values(cmd.analyzers))
+	return cmd.printDiagnostics(cs, relevantDiagnostics)
+}
+
+func (cmd *Command) lint() int {
+	switch cmd.flags.formatter {
+	case "text", "stylish", "json", "sarif", "binary", "null":
+	default:
+		fmt.Fprintf(os.Stderr, "unsupported output format %q\n", cmd.flags.formatter)
+		return 2
+	}
+
+	var bconfs []buildConfig
+	if cmd.flags.matrix {
+		if cmd.flags.tags != "" {
+			fmt.Fprintln(os.Stderr, "cannot use -matrix and -tags together")
+			return 2
+		}
+
+		var err error
+		bconfs, err = parseBuildConfigs(os.Stdin)
+		if err != nil {
+			if perr, ok := err.(parseBuildConfigError); ok {
+				fmt.Fprintf(os.Stderr, "<stdin>:%d couldn't parse build matrix: %s\n", perr.line, perr.err)
+			} else {
+				fmt.Fprintln(os.Stderr, err)
+			}
+			return 2
+		}
+	} else {
+		bc := buildConfig{}
+		if cmd.flags.tags != "" {
+			// Validate that the tags argument is well-formed. go/packages
+			// doesn't detect malformed build flags and returns unhelpful
+			// errors.
+			tf := buildutil.TagsFlag{}
+			if err := tf.Set(cmd.flags.tags); err != nil {
+				fmt.Fprintln(os.Stderr, fmt.Errorf("invalid value %q for flag -tags: %s", cmd.flags.tags, err))
+				return 1
+			}
+
+			bc.Flags = []string{"-tags", cmd.flags.tags}
+		}
+		bconfs = append(bconfs, bc)
+	}
+
 	var measureAnalyzers func(analysis *analysis.Analyzer, pkg *loader.PackageSpec, d time.Duration)
 	if path := cmd.flags.debugMeasureAnalyzers; path != "" {
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
@@ -287,211 +512,91 @@ func (cmd *Command) Run() {
 		}
 	}
 
-	if path := cmd.flags.debugCpuprofile; path != "" {
-		f, err := os.Create(path)
+	var runs []run
+	cs := slices.Collect(maps.Values(cmd.analyzers))
+	opts := options{
+		analyzers: cs,
+		patterns:  cmd.flags.fs.Args(),
+		lintTests: cmd.flags.tests,
+		goVersion: string(cmd.flags.goVersion),
+		config: config.Config{
+			Checks: cmd.flags.checks,
+		},
+		printAnalyzerMeasurement: measureAnalyzers,
+	}
+	l, err := newLinter(opts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	for _, bconf := range bconfs {
+		res, err := l.run(bconf)
 		if err != nil {
-			log.Fatal(err)
+			fmt.Fprintln(os.Stderr, err)
+			return 1
 		}
-		pprof.StartCPUProfile(f)
-	}
-	if path := cmd.flags.debugTrace; path != "" {
-		f, err := os.Create(path)
+
+		for _, w := range res.Warnings {
+			fmt.Fprintln(os.Stderr, "warning:", w)
+		}
+
+		cwd, err := os.Getwd()
 		if err != nil {
-			log.Fatal(err)
+			cwd = ""
 		}
-		trace.Start(f)
-	}
-
-	defaultChecks := []string{"all"}
-	cs := make([]*lint.Analyzer, 0, len(cmd.analyzers))
-	for _, a := range cmd.analyzers {
-		cs = append(cs, a)
-		if a.Doc.NonDefault {
-			defaultChecks = append(defaultChecks, "-"+a.Analyzer.Name)
-		}
-	}
-	config.DefaultConfig.Checks = defaultChecks
-
-	switch {
-	case cmd.flags.debugVersion:
-		version.Verbose(cmd.version, cmd.machineVersion)
-		cmd.exit(0)
-	case cmd.flags.listChecks:
-		sort.Slice(cs, func(i, j int) bool {
-			return cs[i].Analyzer.Name < cs[j].Analyzer.Name
-		})
-		for _, c := range cs {
-			var title string
-			if c.Doc != nil {
-				title = c.Doc.Title
+		relPath := func(s string) string {
+			if cwd == "" {
+				return filepath.ToSlash(s)
 			}
-			fmt.Printf("%s %s\n", c.Analyzer.Name, title)
-		}
-		cmd.exit(0)
-	case cmd.flags.printVersion:
-		version.Print(cmd.version, cmd.machineVersion)
-		cmd.exit(0)
-	case cmd.flags.explain != "":
-		explain := cmd.flags.explain
-		check, ok := cmd.analyzers[explain]
-		if !ok {
-			fmt.Fprintln(os.Stderr, "Couldn't find check", explain)
-			cmd.exit(1)
-		}
-		if check.Analyzer.Doc == "" {
-			fmt.Fprintln(os.Stderr, explain, "has no documentation")
-			cmd.exit(1)
-		}
-		fmt.Println(check.Doc)
-		fmt.Println("Online documentation\n    https://staticcheck.io/docs/checks#" + check.Analyzer.Name)
-		cmd.exit(0)
-	case cmd.flags.merge:
-		var runs []run
-		if len(cmd.flags.fs.Args()) == 0 {
-			var err error
-			runs, err = decodeGob(bufio.NewReader(os.Stdin))
+			out, err := filepath.Rel(cwd, s)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, fmt.Errorf("couldn't parse stdin: %s", err))
-				cmd.exit(1)
+				return filepath.ToSlash(s)
+			}
+			return filepath.ToSlash(out)
+		}
+
+		if cmd.flags.formatter == "binary" {
+			for i, s := range res.CheckedFiles {
+				res.CheckedFiles[i] = relPath(s)
+			}
+			for i := range res.Diagnostics {
+				// We turn all paths into relative, /-separated paths. This is to make -merge work correctly when
+				// merging runs from different OSs, with different absolute paths.
+				//
+				// We zero out Offset, because checkouts of code on different OSs may have different kinds of
+				// newlines and thus different offsets. We don't ever make use of the Offset, anyway. Line and
+				// column numbers are precomputed.
+
+				d := &res.Diagnostics[i]
+				d.Position.Filename = relPath(d.Position.Filename)
+				d.Position.Offset = 0
+				d.End.Filename = relPath(d.End.Filename)
+				d.End.Offset = 0
+				for j := range d.Related {
+					r := &d.Related[j]
+					r.Position.Filename = relPath(r.Position.Filename)
+					r.Position.Offset = 0
+					r.End.Filename = relPath(r.End.Filename)
+					r.End.Offset = 0
+				}
+			}
+			err := gob.NewEncoder(os.Stdout).Encode(res)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed writing output: %s\n", err)
+				return 2
 			}
 		} else {
-			for _, path := range cmd.flags.fs.Args() {
-				someRuns, err := func(path string) ([]run, error) {
-					f, err := os.Open(path)
-					if err != nil {
-						return nil, err
-					}
-					defer f.Close()
-					br := bufio.NewReader(f)
-					return decodeGob(br)
-				}(path)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, fmt.Errorf("couldn't parse file %s: %s", path, err))
-					cmd.exit(1)
-				}
-				runs = append(runs, someRuns...)
-			}
-		}
-
-		relevantDiagnostics := mergeRuns(runs)
-		cmd.printDiagnostics(cs, relevantDiagnostics)
-	default:
-		switch cmd.flags.formatter {
-		case "text", "stylish", "json", "sarif", "binary", "null":
-		default:
-			fmt.Fprintf(os.Stderr, "unsupported output format %q\n", cmd.flags.formatter)
-			cmd.exit(2)
-		}
-
-		var bconfs []BuildConfig
-		if cmd.flags.matrix {
-			if cmd.flags.tags != "" {
-				fmt.Fprintln(os.Stderr, "cannot use -matrix and -tags together")
-				cmd.exit(2)
-			}
-
-			var err error
-			bconfs, err = parseBuildConfigs(os.Stdin)
-			if err != nil {
-				if perr, ok := err.(parseBuildConfigError); ok {
-					fmt.Fprintf(os.Stderr, "<stdin>:%d couldn't parse build matrix: %s\n", perr.line, perr.err)
-				} else {
-					fmt.Fprintln(os.Stderr, err)
-				}
-				os.Exit(2)
-			}
-		} else {
-			bc := BuildConfig{}
-			if cmd.flags.tags != "" {
-				// Validate that the tags argument is well-formed. go/packages
-				// doesn't detect malformed build flags and returns unhelpful
-				// errors.
-				tf := buildutil.TagsFlag{}
-				if err := tf.Set(cmd.flags.tags); err != nil {
-					fmt.Fprintln(os.Stderr, fmt.Errorf("invalid value %q for flag -tags: %s", cmd.flags.tags, err))
-					cmd.exit(1)
-				}
-
-				bc.Flags = []string{"-tags", cmd.flags.tags}
-			}
-			bconfs = append(bconfs, bc)
-		}
-
-		var runs []run
-		for _, bconf := range bconfs {
-			res, err := doLint(cs, cmd.flags.fs.Args(), &options{
-				BuildConfig: bconf,
-				LintTests:   cmd.flags.tests,
-				GoVersion:   string(cmd.flags.goVersion),
-				Config: config.Config{
-					Checks: cmd.flags.checks,
-				},
-				PrintAnalyzerMeasurement: measureAnalyzers,
-			})
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				cmd.exit(1)
-			}
-
-			for _, w := range res.Warnings {
-				fmt.Fprintln(os.Stderr, "warning:", w)
-			}
-
-			cwd, err := os.Getwd()
-			if err != nil {
-				cwd = ""
-			}
-			relPath := func(s string) string {
-				if cwd == "" {
-					return filepath.ToSlash(s)
-				}
-				out, err := filepath.Rel(cwd, s)
-				if err != nil {
-					return filepath.ToSlash(s)
-				}
-				return filepath.ToSlash(out)
-			}
-
-			if cmd.flags.formatter == "binary" {
-				for i, s := range res.CheckedFiles {
-					res.CheckedFiles[i] = relPath(s)
-				}
-				for i := range res.Diagnostics {
-					// We turn all paths into relative, /-separated paths. This is to make -merge work correctly when
-					// merging runs from different OSs, with different absolute paths.
-					//
-					// We zero out Offset, because checkouts of code on different OSs may have different kinds of
-					// newlines and thus different offsets. We don't ever make use of the Offset, anyway. Line and
-					// column numbers are precomputed.
-
-					d := &res.Diagnostics[i]
-					d.Position.Filename = relPath(d.Position.Filename)
-					d.Position.Offset = 0
-					d.End.Filename = relPath(d.End.Filename)
-					d.End.Offset = 0
-					for j := range d.Related {
-						r := &d.Related[j]
-						r.Position.Filename = relPath(r.Position.Filename)
-						r.Position.Offset = 0
-						r.End.Filename = relPath(r.End.Filename)
-						r.End.Offset = 0
-					}
-				}
-				err := gob.NewEncoder(os.Stdout).Encode(res)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "failed writing output: %s\n", err)
-					cmd.exit(2)
-				}
-			} else {
-				runs = append(runs, runFromLintResult(res))
-			}
-		}
-
-		if cmd.flags.formatter != "binary" {
-			diags := mergeRuns(runs)
-			cmd.printDiagnostics(cs, diags)
+			runs = append(runs, runFromLintResult(res))
 		}
 	}
+
+	l.cache.Close()
+
+	if cmd.flags.formatter != "binary" {
+		diags := mergeRuns(runs)
+		return cmd.printDiagnostics(cs, diags)
+	}
+	return 0
 }
 
 func mergeRuns(runs []run) []diagnostic {
@@ -519,25 +624,8 @@ func mergeRuns(runs []run) []diagnostic {
 	return relevantDiagnostics
 }
 
-func (cmd *Command) exit(code int) {
-	if cmd.flags.debugCpuprofile != "" {
-		pprof.StopCPUProfile()
-	}
-	if path := cmd.flags.debugMemprofile; path != "" {
-		f, err := os.Create(path)
-		if err != nil {
-			panic(err)
-		}
-		runtime.GC()
-		pprof.WriteHeapProfile(f)
-	}
-	if cmd.flags.debugTrace != "" {
-		trace.Stop()
-	}
-	os.Exit(code)
-}
-
-func (cmd *Command) printDiagnostics(cs []*lint.Analyzer, diagnostics []diagnostic) {
+// printDiagnostics prints the diagnostics and exits the process.
+func (cmd *Command) printDiagnostics(cs []*lint.Analyzer, diagnostics []diagnostic) int {
 	if len(diagnostics) > 1 {
 		sort.Slice(diagnostics, func(i, j int) bool {
 			di := diagnostics[i]
@@ -612,26 +700,27 @@ func (cmd *Command) printDiagnostics(cs []*lint.Analyzer, diagnostics []diagnost
 		}
 		if cmd.name == "staticcheck" {
 			f.(*sarifFormatter).driverName = "Staticcheck"
-			f.(*sarifFormatter).driverWebsite = "https://staticcheck.io"
+			f.(*sarifFormatter).driverWebsite = "https://staticcheck.dev"
 		}
 	case "binary":
 		fmt.Fprintln(os.Stderr, "'-f binary' not supported in this context")
-		cmd.exit(2)
+		return 2
 	case "null":
 		f = nullFormatter{}
 	default:
 		fmt.Fprintf(os.Stderr, "unsupported output format %q\n", cmd.flags.formatter)
-		cmd.exit(2)
+		return 2
 	}
 
-	fail := cmd.flags.fail
-	analyzerNames := make([]string, len(cs))
+	fail := makeCaseFoldedStrings(cmd.flags.fail)
+	analyzerNames := make([]caseFoldedString, len(cs))
 	for i, a := range cs {
-		analyzerNames[i] = a.Analyzer.Name
+		analyzerNames[i] = makeCaseFoldedString(a.Analyzer.Name)
 	}
 	shouldExit := filterAnalyzerNames(analyzerNames, fail)
-	shouldExit["staticcheck"] = true
-	shouldExit["compile"] = true
+	shouldExit[makeCaseFoldedString("staticcheck")] = true
+	shouldExit[makeCaseFoldedString("compile")] = true
+	shouldExit[makeCaseFoldedString("config")] = true
 
 	var (
 		numErrors   int
@@ -647,7 +736,7 @@ func (cmd *Command) printDiagnostics(cs []*lint.Analyzer, diagnostics []diagnost
 			numIgnored++
 			continue
 		}
-		if shouldExit[diag.Category] {
+		if shouldExit[makeCaseFoldedString(diag.Category)] {
 			numErrors++
 		} else {
 			diag.Severity = severityWarning
@@ -664,12 +753,12 @@ func (cmd *Command) printDiagnostics(cs []*lint.Analyzer, diagnostics []diagnost
 	if numErrors > 0 {
 		if _, ok := f.(*sarifFormatter); ok {
 			// When emitting SARIF, finding errors is considered success.
-			cmd.exit(0)
+			return 0
 		} else {
-			cmd.exit(1)
+			return 1
 		}
 	}
-	cmd.exit(0)
+	return 0
 }
 
 func usage(name string, fs *flag.FlagSet) func() {
@@ -695,7 +784,7 @@ func isZeroValue(f *flag.Flag, value string) bool {
 	// This works unless the Value type is itself an interface type.
 	typ := reflect.TypeOf(f.Value)
 	var z reflect.Value
-	if typ.Kind() == reflect.Ptr {
+	if typ.Kind() == reflect.Pointer {
 		z = reflect.New(typ.Elem())
 	} else {
 		z = reflect.Zero(typ)

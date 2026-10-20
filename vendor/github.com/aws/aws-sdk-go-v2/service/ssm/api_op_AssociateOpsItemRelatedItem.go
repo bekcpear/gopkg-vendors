@@ -4,16 +4,12 @@ package ssm
 
 import (
 	"context"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // Associates a related item to a Systems Manager OpsCenter OpsItem. For example,
 // you can associate an Incident Manager incident or analysis with an OpsItem.
-// Incident Manager and OpsCenter are capabilities of Amazon Web Services Systems
-// Manager.
+// Incident Manager and OpsCenter are tools in Amazon Web Services Systems Manager.
 func (c *Client) AssociateOpsItemRelatedItem(ctx context.Context, params *AssociateOpsItemRelatedItemInput, optFns ...func(*Options)) (*AssociateOpsItemRelatedItemOutput, error) {
 	if params == nil {
 		params = &AssociateOpsItemRelatedItemInput{}
@@ -44,14 +40,17 @@ type AssociateOpsItemRelatedItemInput struct {
 	OpsItemId *string
 
 	// The type of resource that you want to associate with an OpsItem. OpsCenter
-	// supports the following types: AWS::SSMIncidents::IncidentRecord: an Incident
-	// Manager incident. AWS::SSM::Document: a Systems Manager (SSM) document.
+	// supports the following types:
+	//
+	// AWS::SSMIncidents::IncidentRecord : an Incident Manager incident.
+	//
+	// AWS::SSM::Document : a Systems Manager (SSM) document.
 	//
 	// This member is required.
 	ResourceType *string
 
-	// The Amazon Resource Name (ARN) of the Amazon Web Services resource that you want
-	// to associate with the OpsItem.
+	// The Amazon Resource Name (ARN) of the Amazon Web Services resource that you
+	// want to associate with the OpsItem.
 	//
 	// This member is required.
 	ResourceUri *string
@@ -79,46 +78,20 @@ func (c *Client) addOperationAssociateOpsItemRelatedItemMiddlewares(stack *middl
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpAssociateOpsItemRelatedItemValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opAssociateOpsItemRelatedItem(options.Region), middleware.Before); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -130,14 +103,11 @@ func (c *Client) addOperationAssociateOpsItemRelatedItemMiddlewares(stack *middl
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
-	return nil
-}
-
-func newServiceMetadataMiddleware_opAssociateOpsItemRelatedItem(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "ssm",
-		OperationName: "AssociateOpsItemRelatedItem",
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
 	}
+	if err = addInterceptors(stack, options); err != nil {
+		return err
+	}
+	return nil
 }

@@ -24,16 +24,21 @@ type RuleDefinition struct {
 	Create      gosec.RuleBuilder
 }
 
-// RuleList is a mapping of rule ID's to rule definitions
-type RuleList map[string]RuleDefinition
+// RuleList contains a mapping of rule ID's to rule definitions and a mapping
+// of rule ID's to whether rules are suppressed.
+type RuleList struct {
+	Rules          map[string]RuleDefinition
+	RuleSuppressed map[string]bool
+}
 
-// Builders returns all the create methods for a given rule list
-func (rl RuleList) Builders() map[string]gosec.RuleBuilder {
+// RulesInfo returns all the create methods and the rule suppressed map for a
+// given list
+func (rl RuleList) RulesInfo() (map[string]gosec.RuleBuilder, map[string]bool) {
 	builders := make(map[string]gosec.RuleBuilder)
-	for _, def := range rl {
+	for _, def := range rl.Rules {
 		builders[def.ID] = def.Create
 	}
-	return builders
+	return builders, rl.RuleSuppressed
 }
 
 // RuleFilter can be used to include or exclude a rule depending on the return
@@ -56,7 +61,7 @@ func NewRuleFilter(action bool, ruleIDs ...string) RuleFilter {
 }
 
 // Generate the list of rules to use
-func Generate(filters ...RuleFilter) RuleList {
+func Generate(trackSuppressions bool, filters ...RuleFilter) RuleList {
 	rules := []RuleDefinition{
 		// misc
 		{"G101", "Look for hardcoded credentials", NewHardcodedCredentials},
@@ -68,6 +73,11 @@ func Generate(filters ...RuleFilter) RuleList {
 		{"G108", "Profiling endpoint is automatically exposed", NewPprofCheck},
 		{"G109", "Converting strconv.Atoi result to int32/int16", NewIntegerOverflowCheck},
 		{"G110", "Detect io.Copy instead of io.CopyN when decompression", NewDecompressionBombCheck},
+		{"G111", "Detect http.Dir('/') as a potential risk", NewDirectoryTraversal},
+		{"G112", "Detect ReadHeaderTimeout not configured as a potential risk", NewSlowloris},
+		{"G114", "Use of net/http serve function that has no support for setting timeouts", NewHTTPServeWithoutTimeouts},
+		{"G116", "Detect Trojan Source attacks using bidirectional Unicode characters", NewTrojanSource},
+		{"G117", "Potential exposure of secrets via JSON/YAML/XML/TOML marshaling", NewSecretSerialization},
 
 		// injection
 		{"G201", "SQL query construction using format string", NewSQLStrFormat},
@@ -82,13 +92,15 @@ func Generate(filters ...RuleFilter) RuleList {
 		{"G304", "File path provided as taint input", NewReadFile},
 		{"G305", "File path traversal when extracting zip archive", NewArchive},
 		{"G306", "Poor file permissions used when writing to a file", NewWritePerms},
-		{"G307", "Unsafe defer call of a method returning an error", NewDeferredClosing},
+		{"G307", "Poor file permissions used when creating a file with os.Create", NewOsCreatePerms},
 
 		// crypto
-		{"G401", "Detect the usage of DES, RC4, MD5 or SHA1", NewUsesWeakCryptography},
+		{"G401", "Detect the usage of MD5 or SHA1", NewUsesWeakCryptographyHash},
 		{"G402", "Look for bad TLS connection settings", NewIntermediateTLSCheck},
 		{"G403", "Ensure minimum RSA key length of 2048 bits", NewWeakKeyStrength},
 		{"G404", "Insecure random number source (rand)", NewWeakRandCheck},
+		{"G405", "Detect the usage of DES or RC4", NewUsesWeakCryptographyEncryption},
+		{"G406", "Detect the usage of deprecated MD4 or RIPEMD160", NewUsesWeakDeprecatedCryptographyHash},
 
 		// blocklist
 		{"G501", "Import blocklist: crypto/md5", NewBlocklistedImportMD5},
@@ -96,21 +108,28 @@ func Generate(filters ...RuleFilter) RuleList {
 		{"G503", "Import blocklist: crypto/rc4", NewBlocklistedImportRC4},
 		{"G504", "Import blocklist: net/http/cgi", NewBlocklistedImportCGI},
 		{"G505", "Import blocklist: crypto/sha1", NewBlocklistedImportSHA1},
+		{"G506", "Import blocklist: golang.org/x/crypto/md4", NewBlocklistedImportMD4},
+		{"G507", "Import blocklist: golang.org/x/crypto/ripemd160", NewBlocklistedImportRIPEMD160},
 
 		// memory safety
 		{"G601", "Implicit memory aliasing in RangeStmt", NewImplicitAliasing},
 	}
 
 	ruleMap := make(map[string]RuleDefinition)
+	ruleSuppressedMap := make(map[string]bool)
 
 RULES:
 	for _, rule := range rules {
+		ruleSuppressedMap[rule.ID] = false
 		for _, filter := range filters {
 			if filter(rule.ID) {
-				continue RULES
+				ruleSuppressedMap[rule.ID] = true
+				if !trackSuppressions {
+					continue RULES
+				}
 			}
 		}
 		ruleMap[rule.ID] = rule
 	}
-	return ruleMap
+	return RuleList{ruleMap, ruleSuppressedMap}
 }

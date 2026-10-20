@@ -13,9 +13,6 @@ import (
 var (
 	// errInvalidNeighMessage is returned when a LinkMessage is malformed.
 	errInvalidNeighMessage = errors.New("rtnetlink NeighMessage is invalid or too short")
-
-	// errInvalidNeighMessageAttr is returned when neigh attributes are malformed.
-	errInvalidNeighMessageAttr = errors.New("rtnetlink NeighMessage has a wrong attribute data length")
 )
 
 var _ Message = &NeighMessage{}
@@ -45,8 +42,8 @@ type NeighMessage struct {
 func (m *NeighMessage) MarshalBinary() ([]byte, error) {
 	b := make([]byte, unix.SizeofNdMsg)
 
-	nativeEndian.PutUint16(b[0:2], m.Family)
-	// bytes 3 and 4 are padding
+	b[0] = uint8(m.Family)
+	// bytes 2-4 are padding
 	nativeEndian.PutUint32(b[4:8], m.Index)
 	nativeEndian.PutUint16(b[8:10], m.State)
 	b[10] = m.Flags
@@ -77,7 +74,7 @@ func (m *NeighMessage) UnmarshalBinary(b []byte) error {
 		return errInvalidNeighMessage
 	}
 
-	m.Family = nativeEndian.Uint16(b[0:2])
+	m.Family = uint16(b[0])
 	m.Index = nativeEndian.Uint32(b[4:8])
 	m.State = nativeEndian.Uint16(b[8:10])
 	m.Flags = b[10]
@@ -185,14 +182,14 @@ func (a *NeighAttributes) decode(ad *netlink.AttributeDecoder) error {
 		case unix.NDA_UNSPEC:
 			// unused attribute
 		case unix.NDA_DST:
-			l := len(ad.Bytes())
-			if l != 4 && l != 16 {
-				return errInvalidNeighMessageAttr
-			}
 			a.Address = ad.Bytes()
 		case unix.NDA_LLADDR:
-			if len(ad.Bytes()) != 6 {
-				return errInvalidNeighMessageAttr
+			// Allow IEEE 802 MAC-48, EUI-48, EUI-64, or 20-octet
+			// IP over InfiniBand link-layer addresses
+			l := len(ad.Bytes())
+			if l == 0 {
+				// Ignore empty addresses.
+				continue
 			}
 			a.LLAddress = ad.Bytes()
 		case unix.NDA_CACHEINFO:

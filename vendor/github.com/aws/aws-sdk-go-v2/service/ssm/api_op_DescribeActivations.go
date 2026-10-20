@@ -5,17 +5,14 @@ package ssm
 import (
 	"context"
 	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Describes details about the activation, such as the date and time the activation
-// was created, its expiration date, the Identity and Access Management (IAM) role
-// assigned to the managed nodes in the activation, and the number of nodes
-// registered by using this activation.
+// Describes details about the activation, such as the date and time the
+// activation was created, its expiration date, the Identity and Access Management
+// (IAM) role assigned to the managed nodes in the activation, and the number of
+// nodes registered by using this activation.
 func (c *Client) DescribeActivations(ctx context.Context, params *DescribeActivationsInput, optFns ...func(*Options)) (*DescribeActivationsOutput, error) {
 	if params == nil {
 		params = &DescribeActivationsInput{}
@@ -38,7 +35,7 @@ type DescribeActivationsInput struct {
 
 	// The maximum number of items to return for this call. The call also returns a
 	// token that you can specify in a subsequent call to get the next set of results.
-	MaxResults int32
+	MaxResults *int32
 
 	// A token to start the list. Use this token to get the next set of results.
 	NextToken *string
@@ -70,43 +67,17 @@ func (c *Client) addOperationDescribeActivationsMiddlewares(stack *middleware.St
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeActivations(options.Region), middleware.Before); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -118,16 +89,14 @@ func (c *Client) addOperationDescribeActivationsMiddlewares(stack *middleware.St
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addInterceptors(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
-
-// DescribeActivationsAPIClient is a client that implements the DescribeActivations
-// operation.
-type DescribeActivationsAPIClient interface {
-	DescribeActivations(context.Context, *DescribeActivationsInput, ...func(*Options)) (*DescribeActivationsOutput, error)
-}
-
-var _ DescribeActivationsAPIClient = (*Client)(nil)
 
 // DescribeActivationsPaginatorOptions is the paginator options for
 // DescribeActivations
@@ -157,8 +126,8 @@ func NewDescribeActivationsPaginator(client DescribeActivationsAPIClient, params
 	}
 
 	options := DescribeActivationsPaginatorOptions{}
-	if params.MaxResults != 0 {
-		options.Limit = params.MaxResults
+	if params.MaxResults != nil {
+		options.Limit = *params.MaxResults
 	}
 
 	for _, fn := range optFns {
@@ -170,12 +139,13 @@ func NewDescribeActivationsPaginator(client DescribeActivationsAPIClient, params
 		client:    client,
 		params:    params,
 		firstPage: true,
+		nextToken: params.NextToken,
 	}
 }
 
 // HasMorePages returns a boolean indicating whether more pages are available
 func (p *DescribeActivationsPaginator) HasMorePages() bool {
-	return p.firstPage || p.nextToken != nil
+	return p.firstPage || (p.nextToken != nil && len(*p.nextToken) != 0)
 }
 
 // NextPage retrieves the next DescribeActivations page.
@@ -187,8 +157,15 @@ func (p *DescribeActivationsPaginator) NextPage(ctx context.Context, optFns ...f
 	params := *p.params
 	params.NextToken = p.nextToken
 
-	params.MaxResults = p.options.Limit
+	var limit *int32
+	if p.options.Limit > 0 {
+		limit = &p.options.Limit
+	}
+	params.MaxResults = limit
 
+	optFns = append([]func(*Options){
+		addIsPaginatorUserAgent,
+	}, optFns...)
 	result, err := p.client.DescribeActivations(ctx, &params, optFns...)
 	if err != nil {
 		return nil, err
@@ -198,18 +175,20 @@ func (p *DescribeActivationsPaginator) NextPage(ctx context.Context, optFns ...f
 	prevToken := p.nextToken
 	p.nextToken = result.NextToken
 
-	if p.options.StopOnDuplicateToken && prevToken != nil && p.nextToken != nil && *prevToken == *p.nextToken {
+	if p.options.StopOnDuplicateToken &&
+		prevToken != nil &&
+		p.nextToken != nil &&
+		*prevToken == *p.nextToken {
 		p.nextToken = nil
 	}
 
 	return result, nil
 }
 
-func newServiceMetadataMiddleware_opDescribeActivations(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "ssm",
-		OperationName: "DescribeActivations",
-	}
+// DescribeActivationsAPIClient is a client that implements the
+// DescribeActivations operation.
+type DescribeActivationsAPIClient interface {
+	DescribeActivations(context.Context, *DescribeActivationsInput, ...func(*Options)) (*DescribeActivationsOutput, error)
 }
+
+var _ DescribeActivationsAPIClient = (*Client)(nil)

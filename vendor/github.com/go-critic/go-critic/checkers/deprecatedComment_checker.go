@@ -2,17 +2,18 @@ package checkers
 
 import (
 	"go/ast"
-	"regexp"
 	"strings"
 
 	"github.com/go-critic/go-critic/checkers/internal/astwalk"
-	"github.com/go-critic/go-critic/framework/linter"
+	"github.com/go-critic/go-critic/linter"
 )
+
+const deprecatedPrefix = "Deprecated: "
 
 func init() {
 	var info linter.CheckerInfo
 	info.Name = "deprecatedComment"
-	info.Tags = []string{"diagnostic"}
+	info.Tags = []string{linter.DiagnosticTag}
 	info.Summary = "Detects malformed 'deprecated' doc-comments"
 	info.Before = `
 // deprecated, use FuncNew instead
@@ -24,12 +25,15 @@ func FuncOld() int`
 	collection.AddChecker(&info, func(ctx *linter.CheckerContext) (linter.FileWalker, error) {
 		c := &deprecatedCommentChecker{ctx: ctx}
 
-		c.commonPatterns = []*regexp.Regexp{
-			regexp.MustCompile(`(?i)this (?:function|type) is deprecated`),
-			regexp.MustCompile(`(?i)deprecated[.!]? use \S* instead`),
-			regexp.MustCompile(`(?i)\[\[deprecated\]\].*`),
-			regexp.MustCompile(`(?i)note: deprecated\b.*`),
-			regexp.MustCompile(`(?i)deprecated in.*`),
+		c.commonPatterns = []string{
+			"this type is deprecated",
+			"this function is deprecated",
+			"[[deprecated]]",
+			"note: deprecated",
+			"deprecated in",
+			"deprecated. use",
+			"deprecated! use",
+			"deprecated use",
 			// TODO(quasilyte): more of these?
 		}
 
@@ -41,6 +45,7 @@ func FuncOld() int`
 			"Dprecated: ",
 			"Derecated: ",
 			"Depecated: ",
+			"Depekated: ",
 			"Deprcated: ",
 			"Depreated: ",
 			"Deprected: ",
@@ -63,7 +68,7 @@ type deprecatedCommentChecker struct {
 	astwalk.WalkHandler
 	ctx *linter.CheckerContext
 
-	commonPatterns []*regexp.Regexp
+	commonPatterns []string
 	commonTypos    []string
 }
 
@@ -88,20 +93,25 @@ func (c *deprecatedCommentChecker) VisitDocComment(doc *ast.CommentGroup) {
 	//
 	// TODO(quasilyte): there are also multi-line deprecation comments.
 
+	// prev stores the previous line after it was trimmed.
+	// It's used to check whether the deprecation prefix is at the beginning of a new paragraph.
+	var prev string
+
 	for _, comment := range doc.List {
 		if strings.HasPrefix(comment.Text, "/*") {
 			// TODO(quasilyte): handle multi-line doc comments.
 			continue
 		}
-		l := comment.Text[len("//"):]
-		if len(l) < len("Deprecated: ") {
+		rawLine := strings.TrimPrefix(comment.Text, "//")
+		l := strings.TrimSpace(rawLine)
+		if len(rawLine) < len(deprecatedPrefix) {
+			prev = l
 			continue
 		}
-		l = strings.TrimSpace(l)
 
 		// Check whether someone messed up with a prefix casing.
 		upcase := strings.ToUpper(l)
-		if strings.HasPrefix(upcase, "DEPRECATED: ") && !strings.HasPrefix(l, "Deprecated: ") {
+		if strings.HasPrefix(upcase, "DEPRECATED: ") && !strings.HasPrefix(l, deprecatedPrefix) {
 			c.warnCasing(comment, l)
 			return
 		}
@@ -114,7 +124,11 @@ func (c *deprecatedCommentChecker) VisitDocComment(doc *ast.CommentGroup) {
 
 		// Check for other commonly used patterns.
 		for _, pat := range c.commonPatterns {
-			if pat.MatchString(l) {
+			if len(l) < len(pat) {
+				continue
+			}
+
+			if strings.EqualFold(l[:len(pat)], pat) {
 				c.warnPattern(comment)
 				return
 			}
@@ -127,6 +141,12 @@ func (c *deprecatedCommentChecker) VisitDocComment(doc *ast.CommentGroup) {
 				return
 			}
 		}
+
+		if strings.HasPrefix(l, deprecatedPrefix) && prev != "" {
+			c.warnParagraph(comment)
+			return
+		}
+		prev = l
 	}
 }
 
@@ -146,4 +166,8 @@ func (c *deprecatedCommentChecker) warnComma(cause ast.Node) {
 func (c *deprecatedCommentChecker) warnTypo(cause ast.Node, line string) {
 	word := strings.Split(line, ":")[0]
 	c.ctx.Warn(cause, "typo in `%s`; should be `Deprecated`", word)
+}
+
+func (c *deprecatedCommentChecker) warnParagraph(cause ast.Node) {
+	c.ctx.Warn(cause, "`Deprecated: ` notices should be in a dedicated paragraph, separated from the rest")
 }

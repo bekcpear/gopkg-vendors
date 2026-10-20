@@ -19,18 +19,30 @@ package rpmpack
 
 import (
 	"bytes"
-	"compress/gzip"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"path"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
-	cpio "github.com/cavaliercoder/go-cpio"
-	"github.com/pkg/errors"
+	"github.com/cavaliergopher/cpio"
+	"github.com/klauspost/compress/zstd"
+	gzip "github.com/klauspost/pgzip"
 	"github.com/ulikunitz/xz"
 	"github.com/ulikunitz/xz/lzma"
+)
+
+const (
+	// NoEpoch skips adding the epoch tag to the RPM.
+	//
+	// We decided to use this approach instead of making epoch a *uint32 to
+	// avoid a breaking change.
+	// For reference, this is the max uint32 value, which is 4294967295.
+	NoEpoch = ^uint32(0)
 )
 
 var (
@@ -58,6 +70,9 @@ type RPMMetaData struct {
 	Compressor string
 	Epoch     uint32
 	BuildTime time.Time
+	// Prefixes is used for relocatable packages, usually with a one item
+	// slice, e.g. `["/opt"]`.
+	Prefixes []string
 	Provides,
 	Obsoletes,
 	Suggests,
@@ -90,6 +105,9 @@ type RPM struct {
 	postin            string
 	preun             string
 	postun            string
+	pretrans          string
+	posttrans         string
+	verifyscript      string
 	customTags        map[int]IndexEntry
 	customSigs        map[int]IndexEntry
 	pgpSigner         func([]byte) ([]byte, error)
@@ -108,23 +126,14 @@ func NewRPM(m RPMMetaData) (*RPM, error) {
 	}
 
 	p := &bytes.Buffer{}
-	var z io.WriteCloser
-	switch m.Compressor {
-	case "":
-		m.Compressor = "gzip"
-		fallthrough
-	case "gzip":
-		z, err = gzip.NewWriterLevel(p, 9)
-	case "lzma":
-		z, err = lzma.NewWriter(p)
-	case "xz":
-		z, err = xz.NewWriter(p)
-	default:
-		err = fmt.Errorf("unknown compressor type %s", m.Compressor)
-	}
+
+	z, compressorName, err := setupCompressor(m.Compressor, p)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to create compression writer")
+		return nil, err
 	}
+
+	// only use compressor name for the rpm tag, not the level
+	m.Compressor = compressorName
 
 	rpm := &RPM{
 		RPMMetaData:       m,
@@ -147,6 +156,74 @@ func NewRPM(m RPMMetaData) (*RPM, error) {
 	return rpm, nil
 }
 
+func setupCompressor(
+	compressorSetting string,
+	w io.Writer,
+) (wc io.WriteCloser, compressorType string, err error) {
+	parts := strings.Split(compressorSetting, ":")
+	if len(parts) > 2 {
+		return nil, "", fmt.Errorf("malformed compressor setting: %s", compressorSetting)
+	}
+
+	compressorType = parts[0]
+	compressorLevel := ""
+	if len(parts) == 2 {
+		compressorLevel = parts[1]
+	}
+
+	switch compressorType {
+	case "":
+		compressorType = "gzip"
+		fallthrough
+	case "gzip":
+		level := 9
+
+		if compressorLevel != "" {
+			var err error
+
+			level, err = strconv.Atoi(compressorLevel)
+			if err != nil {
+				return nil, "", fmt.Errorf("parse gzip compressor level: %w", err)
+			}
+		}
+
+		wc, err = gzip.NewWriterLevel(w, level)
+	case "lzma":
+		if compressorLevel != "" {
+			return nil, "", fmt.Errorf("no compressor level supported for lzma: %s", compressorLevel)
+		}
+
+		wc, err = lzma.NewWriter(w)
+	case "xz":
+		if compressorLevel != "" {
+			return nil, "", fmt.Errorf("no compressor level supported for xz: %s", compressorLevel)
+		}
+
+		wc, err = xz.NewWriter(w)
+	case "zstd":
+		level := zstd.SpeedBetterCompression
+
+		if compressorLevel != "" {
+			var ok bool
+
+			if intLevel, err := strconv.Atoi(compressorLevel); err == nil {
+				level = zstd.EncoderLevelFromZstd(intLevel)
+			} else {
+				ok, level = zstd.EncoderLevelFromString(compressorLevel)
+				if !ok {
+					return nil, "", fmt.Errorf("invalid zstd compressor level: %s", compressorLevel)
+				}
+			}
+		}
+
+		wc, err = zstd.NewWriter(w, zstd.WithEncoderLevel(level))
+	default:
+		return nil, "", fmt.Errorf("unknown compressor type: %s", compressorType)
+	}
+
+	return wc, compressorType, err
+}
+
 // FullVersion properly combines version and release fields to a version string
 func (r *RPM) FullVersion() string {
 	if r.Release != "" {
@@ -154,6 +231,17 @@ func (r *RPM) FullVersion() string {
 	}
 
 	return r.Version
+}
+
+// AllowListDirs removes all directories which are not explicitly allowlisted.
+func (r *RPM) AllowListDirs(allowList map[string]bool) {
+	for fn, ff := range r.files {
+		if ff.Mode&040000 == 040000 {
+			if !allowList[fn] {
+				delete(r.files, fn)
+			}
+		}
+	}
 }
 
 // Write closes the rpm and writes the whole rpm to an io.Writer
@@ -169,18 +257,18 @@ func (r *RPM) Write(w io.Writer) error {
 	sort.Strings(fnames)
 	for _, fn := range fnames {
 		if err := r.writeFile(r.files[fn]); err != nil {
-			return errors.Wrapf(err, "failed to write file %q", fn)
+			return fmt.Errorf("failed to write file %q: %w", fn, err)
 		}
 	}
 	if err := r.cpio.Close(); err != nil {
-		return errors.Wrap(err, "failed to close cpio payload")
+		return fmt.Errorf("failed to close cpio payload: %w", err)
 	}
 	if err := r.compressedPayload.Close(); err != nil {
-		return errors.Wrap(err, "failed to close gzip payload")
+		return fmt.Errorf("failed to close %s payload: %w", r.RPMMetaData.Compressor, err)
 	}
 
 	if _, err := w.Write(lead(r.Name, r.FullVersion())); err != nil {
-		return errors.Wrap(err, "failed to write lead")
+		return fmt.Errorf("failed to write lead: %w", err)
 	}
 	// Write the regular header.
 	h := newIndex(immutable)
@@ -199,33 +287,34 @@ func (r *RPM) Write(w io.Writer) error {
 	h.AddEntries(r.customTags)
 	hb, err := h.Bytes()
 	if err != nil {
-		return errors.Wrap(err, "failed to retrieve header")
+		return fmt.Errorf("failed to retrieve header: %w", err)
 	}
 	// Write the signatures
 	s := newIndex(signatures)
 	if err := r.writeSignatures(s, hb); err != nil {
-		return errors.Wrap(err, "failed to create signatures")
+		return fmt.Errorf("failed to create signatures: %w", err)
 	}
 
 	s.AddEntries(r.customSigs)
 	sb, err := s.Bytes()
 	if err != nil {
-		return errors.Wrap(err, "failed to retrieve signatures header")
+		return fmt.Errorf("failed to retrieve signatures header: %w", err)
 	}
 
 	if _, err := w.Write(sb); err != nil {
-		return errors.Wrap(err, "failed to write signature bytes")
+		return fmt.Errorf("failed to write signature bytes: %w", err)
 	}
-	//Signatures are padded to 8-byte boundaries
+	// Signatures are padded to 8-byte boundaries
 	if _, err := w.Write(make([]byte, (8-len(sb)%8)%8)); err != nil {
-		return errors.Wrap(err, "failed to write signature padding")
+		return fmt.Errorf("failed to write signature padding: %w", err)
 	}
 	if _, err := w.Write(hb); err != nil {
-		return errors.Wrap(err, "failed to write header body")
+		return fmt.Errorf("failed to write header body: %w", err)
 	}
-	_, err = w.Write(r.payload.Bytes())
-	return errors.Wrap(err, "failed to write payload")
-
+	if _, err := w.Write(r.payload.Bytes()); err != nil {
+		return fmt.Errorf("failed to write payload: %w", err)
+	}
+	return nil
 }
 
 // SetPGPSigner registers a function that will accept the header and payload as bytes,
@@ -241,13 +330,20 @@ func (r *RPM) writeSignatures(sigHeader *index, regHeader []byte) error {
 	sigHeader.Add(sigSHA256, EntryString(fmt.Sprintf("%x", sha256.Sum256(regHeader))))
 	sigHeader.Add(sigPayloadSize, EntryInt32([]int32{int32(r.payloadSize)}))
 	if r.pgpSigner != nil {
-		body := append([]byte{}, regHeader...)
-		body = append(body, r.payload.Bytes()...)
-		s, err := r.pgpSigner(body)
+		// For sha 256 you need to sign the header and payload separately
+		header := append([]byte{}, regHeader...)
+		headerSig, err := r.pgpSigner(header)
 		if err != nil {
-			return errors.Wrap(err, "call to signer failed")
+			return fmt.Errorf("call to signer failed: %w", err)
 		}
-		sigHeader.Add(sigPGP, EntryBytes(s))
+		sigHeader.Add(sigRSA, EntryBytes(headerSig))
+
+		body := append(header, r.payload.Bytes()...)
+		bodySig, err := r.pgpSigner(body)
+		if err != nil {
+			return fmt.Errorf("call to signer failed: %w", err)
+		}
+		sigHeader.Add(sigPGP, EntryBytes(bodySig))
 	}
 	return nil
 }
@@ -255,22 +351,22 @@ func (r *RPM) writeSignatures(sigHeader *index, regHeader []byte) error {
 func (r *RPM) writeRelationIndexes(h *index) error {
 	// add all relation categories
 	if err := r.Provides.AddToIndex(h, tagProvides, tagProvideVersion, tagProvideFlags); err != nil {
-		return errors.Wrap(err, "failed to add provides")
+		return fmt.Errorf("failed to add provides: %w", err)
 	}
 	if err := r.Obsoletes.AddToIndex(h, tagObsoletes, tagObsoleteVersion, tagObsoleteFlags); err != nil {
-		return errors.Wrap(err, "failed to add obsoletes")
+		return fmt.Errorf("failed to add obsoletes: %w", err)
 	}
 	if err := r.Suggests.AddToIndex(h, tagSuggests, tagSuggestVersion, tagSuggestFlags); err != nil {
-		return errors.Wrap(err, "failed to add suggests")
+		return fmt.Errorf("failed to add suggests: %w", err)
 	}
 	if err := r.Recommends.AddToIndex(h, tagRecommends, tagRecommendVersion, tagRecommendFlags); err != nil {
-		return errors.Wrap(err, "failed to add recommends")
+		return fmt.Errorf("failed to add recommends: %w", err)
 	}
 	if err := r.Requires.AddToIndex(h, tagRequires, tagRequireVersion, tagRequireFlags); err != nil {
-		return errors.Wrap(err, "failed to add requires")
+		return fmt.Errorf("failed to add requires: %w", err)
 	}
 	if err := r.Conflicts.AddToIndex(h, tagConflicts, tagConflictVersion, tagConflictFlags); err != nil {
-		return errors.Wrap(err, "failed to add conflicts")
+		return fmt.Errorf("failed to add conflicts: %w", err)
 	}
 
 	return nil
@@ -291,7 +387,9 @@ func (r *RPM) writeGenIndexes(h *index) {
 	h.Add(tagSize, EntryInt32([]int32{int32(r.payloadSize)}))
 	h.Add(tagName, EntryString(r.Name))
 	h.Add(tagVersion, EntryString(r.Version))
-	h.Add(tagEpoch, EntryUint32([]uint32{r.Epoch}))
+	if r.Epoch != NoEpoch {
+		h.Add(tagEpoch, EntryUint32([]uint32{r.Epoch}))
+	}
 	h.Add(tagSummary, EntryString(r.Summary))
 	h.Add(tagDescription, EntryString(r.Description))
 	h.Add(tagBuildHost, EntryString(r.BuildHost))
@@ -300,23 +398,38 @@ func (r *RPM) writeGenIndexes(h *index) {
 		// see https://github.com/google/rpmpack/issues/43
 		h.Add(tagBuildTime, EntryInt32([]int32{int32(r.BuildTime.Unix())}))
 	}
+	if len(r.Prefixes) != 0 {
+		h.Add(tagPrefixes, EntryStringSlice(r.Prefixes))
+	}
 	h.Add(tagRelease, EntryString(r.Release))
 	h.Add(tagPayloadFormat, EntryString("cpio"))
 	h.Add(tagPayloadCompressor, EntryString(r.Compressor))
 	h.Add(tagPayloadFlags, EntryString("9"))
 	h.Add(tagArch, EntryString(r.Arch))
 	h.Add(tagOS, EntryString(r.OS))
-	h.Add(tagVendor, EntryString(r.Vendor))
+	if r.Vendor != "" {
+		h.Add(tagVendor, EntryString(r.Vendor))
+	}
 	h.Add(tagLicence, EntryString(r.Licence))
-	h.Add(tagPackager, EntryString(r.Packager))
-	h.Add(tagGroup, EntryString(r.Group))
-	h.Add(tagURL, EntryString(r.URL))
+	if r.Packager != "" {
+		h.Add(tagPackager, EntryString(r.Packager))
+	}
+	if r.Group != "" {
+		h.Add(tagGroup, EntryString(r.Group))
+	}
+	if r.URL != "" {
+		h.Add(tagURL, EntryString(r.URL))
+	}
 	h.Add(tagPayloadDigest, EntryStringSlice([]string{fmt.Sprintf("%x", sha256.Sum256(r.payload.Bytes()))}))
 	h.Add(tagPayloadDigestAlgo, EntryInt32([]int32{hashAlgoSHA256}))
 
 	// rpm utilities look for the sourcerpm tag to deduce if this is not a source rpm (if it has a sourcerpm,
 	// it is NOT a source rpm).
 	h.Add(tagSourceRPM, EntryString(fmt.Sprintf("%s-%s.src.rpm", r.Name, r.FullVersion())))
+	if r.pretrans != "" {
+		h.Add(tagPretrans, EntryString(r.pretrans))
+		h.Add(tagPretransProg, EntryString("/bin/sh"))
+	}
 	if r.prein != "" {
 		h.Add(tagPrein, EntryString(r.prein))
 		h.Add(tagPreinProg, EntryString("/bin/sh"))
@@ -332,6 +445,14 @@ func (r *RPM) writeGenIndexes(h *index) {
 	if r.postun != "" {
 		h.Add(tagPostun, EntryString(r.postun))
 		h.Add(tagPostunProg, EntryString("/bin/sh"))
+	}
+	if r.posttrans != "" {
+		h.Add(tagPosttrans, EntryString(r.posttrans))
+		h.Add(tagPosttransProg, EntryString("/bin/sh"))
+	}
+	if r.verifyscript != "" {
+		h.Add(tagVerifyScript, EntryString(r.verifyscript))
+		h.Add(tagVerifyScriptProg, EntryString("/bin/sh"))
 	}
 }
 
@@ -350,6 +471,7 @@ func (r *RPM) writeFileIndexes(h *index) {
 	h.Add(tagFileFlags, EntryUint32(r.fileflags))
 
 	inodes := make([]int32, len(r.dirindexes))
+	devices := make([]int32, len(r.dirindexes))
 	digestAlgo := make([]int32, len(r.dirindexes))
 	verifyFlags := make([]int32, len(r.dirindexes))
 	fileRDevs := make([]int16, len(r.dirindexes))
@@ -358,36 +480,55 @@ func (r *RPM) writeFileIndexes(h *index) {
 	for ii := range inodes {
 		// is inodes just a range from 1..len(dirindexes)? maybe different with hard links
 		inodes[ii] = int32(ii + 1)
+		// is devices number from which the file was copied
+		// from rpm original tools https://github.com/rpm-software-management/rpm/blob/c167ef8bdaecdd2e306ec896c919607ba9cceb6f/build/files.c#L1226
+		devices[ii] = int32(1)
 		digestAlgo[ii] = hashAlgoSHA256
 		// With regular files, it seems like we can always enable all of the verify flags
 		verifyFlags[ii] = int32(-1)
 		fileRDevs[ii] = int16(1)
 	}
 	h.Add(tagFileINodes, EntryInt32(inodes))
+	h.Add(tagFileDevices, EntryInt32(devices))
 	h.Add(tagFileDigestAlgo, EntryInt32(digestAlgo))
 	h.Add(tagFileVerifyFlags, EntryInt32(verifyFlags))
 	h.Add(tagFileRDevs, EntryInt16(fileRDevs))
 	h.Add(tagFileLangs, EntryStringSlice(fileLangs))
 }
 
-// AddPrein adds a prein sciptlet
+// AddPretrans adds a pretrans scriptlet
+func (r *RPM) AddPretrans(s string) {
+	r.pretrans = s
+}
+
+// AddPrein adds a prein scriptlet
 func (r *RPM) AddPrein(s string) {
 	r.prein = s
 }
 
-// AddPostin adds a postin sciptlet
+// AddPostin adds a postin scriptlet
 func (r *RPM) AddPostin(s string) {
 	r.postin = s
 }
 
-// AddPreun adds a preun sciptlet
+// AddPreun adds a preun scriptlet
 func (r *RPM) AddPreun(s string) {
 	r.preun = s
 }
 
-// AddPostun adds a postun sciptlet
+// AddPostun adds a postun scriptlet
 func (r *RPM) AddPostun(s string) {
 	r.postun = s
+}
+
+// AddPosttrans adds a posttrans scriptlet
+func (r *RPM) AddPosttrans(s string) {
+	r.posttrans = s
+}
+
+// AddVerifyScript adds a verifyscript scriptlet
+func (r *RPM) AddVerifyScript(s string) {
+	r.verifyscript = s
 }
 
 // AddFile adds an RPMFile to an existing rpm.
@@ -442,10 +583,10 @@ func (r *RPM) writePayload(f RPMFile, links int) error {
 		Links: links,
 	}
 	if err := r.cpio.WriteHeader(hdr); err != nil {
-		return errors.Wrap(err, "failed to write payload file header")
+		return fmt.Errorf("failed to write payload file header: %w", err)
 	}
 	if _, err := r.cpio.Write(f.Body); err != nil {
-		return errors.Wrap(err, "failed to write payload file content")
+		return fmt.Errorf("failed to write payload file content: %w", err)
 	}
 	r.payloadSize += uint(len(f.Body))
 	return nil

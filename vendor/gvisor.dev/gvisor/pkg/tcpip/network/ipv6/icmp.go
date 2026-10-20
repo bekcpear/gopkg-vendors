@@ -17,7 +17,7 @@ package ipv6
 import (
 	"fmt"
 
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -153,8 +153,7 @@ func (e *endpoint) checkLocalAddress(addr tcpip.Address) bool {
 		return true
 	}
 
-	if addressEndpoint := e.AcquireAssignedAddress(addr, false, stack.NeverPrimaryEndpoint); addressEndpoint != nil {
-		addressEndpoint.DecRef()
+	if addressEndpoint := e.AcquireAssignedAddress(addr, false, stack.NeverPrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
 		return true
 	}
 	return false
@@ -300,7 +299,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool, r
 	dstAddr := iph.DestinationAddress()
 
 	// Validate ICMPv6 checksum before processing the packet.
-	payload := pkt.Data().AsRange()
+	payload := pkt.Data()
 	if got, want := h.Checksum(), header.ICMPv6Checksum(header.ICMPv6ChecksumParams{
 		Header:      h,
 		Src:         srcAddr,
@@ -540,6 +539,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool, r
 		//
 		na.SetSolicitedFlag(!unspecifiedSource)
 		na.SetOverrideFlag(true)
+		na.SetRouterFlag(e.Forwarding())
 		na.SetTargetAddress(targetAddr)
 		na.Options().Serialize(optsSerializer)
 		packet.SetChecksum(header.ICMPv6Checksum(header.ICMPv6ChecksumParams{
@@ -595,7 +595,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool, r
 
 			// We just got an NA from a node that owns an address we are performing
 			// DAD on, implying the address is not unique. In this case we let the
-			// stack know so it can handle such a scenario and do nothing furthur with
+			// stack know so it can handle such a scenario and do nothing further with
 			// the NDP NA.
 			//
 			// We would get an error if the address no longer exists or the address
@@ -654,55 +654,28 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool, r
 
 	case header.ICMPv6EchoRequest:
 		received.echoRequest.Increment()
-		// As per RFC 4291 section 2.7, multicast addresses must not be used as
-		// source addresses in IPv6 packets.
-		localAddr := dstAddr
-		if header.IsV6MulticastAddress(dstAddr) {
-			localAddr = ""
-		}
+		replyPayload := pkt.Data().ToBuffer()
+		replyHeader := make([]byte, header.ICMPv6EchoMinimumSize)
+		copy(replyHeader, h[:header.ICMPv6EchoMinimumSize])
 
-		r, err := e.protocol.stack.FindRoute(e.nic.ID(), localAddr, srcAddr, ProtocolNumber, false /* multicastLoop */)
-		if err != nil {
-			// If we cannot find a route to the destination, silently drop the packet.
+		// It's possible that a raw socket or per-stack default handler expects
+		// to receive this packet.
+		defaultHandlerHandled := false
+		if dispatcher, ok := e.dispatcher.(stack.TransportDispatcherWithDefaultHandlerResult); ok {
+			_, defaultHandlerHandled = dispatcher.DeliverTransportPacketWithDefaultHandlerResult(header.ICMPv6ProtocolNumber, pkt)
+		} else {
+			e.dispatcher.DeliverTransportPacket(header.ICMPv6ProtocolNumber, pkt)
+		}
+		pkt = nil
+
+		// Skip the built-in ICMP echo reply if the request was consumed by a
+		// per-stack default handler.
+		if defaultHandlerHandled {
+			replyPayload.Release()
 			return
 		}
-		defer r.Release()
 
-		if !e.protocol.allowICMPReply(header.ICMPv6EchoReply) {
-			sent.rateLimited.Increment()
-			return
-		}
-
-		replyPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-			ReserveHeaderBytes: int(r.MaxHeaderLength()) + header.ICMPv6EchoMinimumSize,
-			Payload:            pkt.Data().ToBuffer(),
-		})
-		defer replyPkt.DecRef()
-		icmp := header.ICMPv6(replyPkt.TransportHeader().Push(header.ICMPv6EchoMinimumSize))
-		replyPkt.TransportProtocolNumber = header.ICMPv6ProtocolNumber
-		copy(icmp, h)
-		icmp.SetType(header.ICMPv6EchoReply)
-		dataRange := replyPkt.Data().AsRange()
-		icmp.SetChecksum(header.ICMPv6Checksum(header.ICMPv6ChecksumParams{
-			Header:      icmp,
-			Src:         r.LocalAddress(),
-			Dst:         r.RemoteAddress(),
-			PayloadCsum: dataRange.Checksum(),
-			PayloadLen:  dataRange.Size(),
-		}))
-		replyTClass, _ := iph.TOS()
-		if err := r.WritePacket(stack.NetworkHeaderParams{
-			Protocol: header.ICMPv6ProtocolNumber,
-			TTL:      r.DefaultTTL(),
-			// Even though RFC 4443 does not mention anything about it, Linux uses the
-			// TrafficClass of the received echo request when replying.
-			// https://github.com/torvalds/linux/blob/0280e3c58f9/net/ipv6/icmp.c#L797
-			TOS: replyTClass,
-		}, replyPkt); err != nil {
-			sent.dropped.Increment()
-			return
-		}
-		sent.echoReply.Increment()
+		e.sendICMPEchoReply(replyPayload, replyHeader, srcAddr, dstAddr, iph)
 
 	case header.ICMPv6EchoReply:
 		received.echoReply.Increment()
@@ -852,12 +825,18 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool, r
 			return
 		}
 
-	case header.ICMPv6MulticastListenerQuery, header.ICMPv6MulticastListenerReport, header.ICMPv6MulticastListenerDone:
+	case header.ICMPv6MulticastListenerQuery,
+		header.ICMPv6MulticastListenerReport,
+		header.ICMPv6MulticastListenerV2Report,
+		header.ICMPv6MulticastListenerDone:
+		icmpBody := h.MessageBody()
 		switch icmpType {
 		case header.ICMPv6MulticastListenerQuery:
 			received.multicastListenerQuery.Increment()
 		case header.ICMPv6MulticastListenerReport:
 			received.multicastListenerReport.Increment()
+		case header.ICMPv6MulticastListenerV2Report:
+			received.multicastListenerReportV2.Increment()
 		case header.ICMPv6MulticastListenerDone:
 			received.multicastListenerDone.Increment()
 		default:
@@ -872,13 +851,17 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool, r
 		switch icmpType {
 		case header.ICMPv6MulticastListenerQuery:
 			e.mu.Lock()
-			e.mu.mld.handleMulticastListenerQuery(header.MLD(h.MessageBody()))
+			if len(icmpBody) >= header.MLDv2QueryMinimumSize {
+				e.mu.mld.handleMulticastListenerQueryV2(header.MLDv2Query(icmpBody))
+			} else {
+				e.mu.mld.handleMulticastListenerQuery(header.MLD(icmpBody))
+			}
 			e.mu.Unlock()
 		case header.ICMPv6MulticastListenerReport:
 			e.mu.Lock()
-			e.mu.mld.handleMulticastListenerReport(header.MLD(h.MessageBody()))
+			e.mu.mld.handleMulticastListenerReport(header.MLD(icmpBody))
 			e.mu.Unlock()
-		case header.ICMPv6MulticastListenerDone:
+		case header.ICMPv6MulticastListenerDone, header.ICMPv6MulticastListenerV2Report:
 		default:
 			panic(fmt.Sprintf("unrecognized MLD message = %d", icmpType))
 		}
@@ -886,6 +869,62 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool, r
 	default:
 		received.unrecognized.Increment()
 	}
+}
+
+func (e *endpoint) sendICMPEchoReply(replyPayload buffer.Buffer, replyHeader []byte, srcAddr, dstAddr tcpip.Address, ipHdr header.IPv6) {
+	sent := e.stats.icmp.packetsSent
+
+	// As per RFC 4291 section 2.7, multicast addresses must not be used as
+	// source addresses in IPv6 packets.
+	localAddr := dstAddr
+	if header.IsV6MulticastAddress(dstAddr) {
+		localAddr = tcpip.Address{}
+	}
+
+	r, err := e.protocol.stack.FindRoute(e.nic.ID(), localAddr, srcAddr, ProtocolNumber, false /* multicastLoop */)
+	if err != nil {
+		// If we cannot find a route to the destination, silently drop the packet.
+		replyPayload.Release()
+		return
+	}
+	defer r.Release()
+
+	if !e.protocol.allowICMPReply(header.ICMPv6EchoReply) {
+		sent.rateLimited.Increment()
+		replyPayload.Release()
+		return
+	}
+
+	replyPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		ReserveHeaderBytes: int(r.MaxHeaderLength()) + header.ICMPv6EchoMinimumSize,
+		Payload:            replyPayload,
+	})
+	defer replyPkt.DecRef()
+	icmp := header.ICMPv6(replyPkt.TransportHeader().Push(header.ICMPv6EchoMinimumSize))
+	replyPkt.TransportProtocolNumber = header.ICMPv6ProtocolNumber
+	copy(icmp, replyHeader)
+	icmp.SetType(header.ICMPv6EchoReply)
+	replyData := replyPkt.Data()
+	icmp.SetChecksum(header.ICMPv6Checksum(header.ICMPv6ChecksumParams{
+		Header:      icmp,
+		Src:         r.LocalAddress(),
+		Dst:         r.RemoteAddress(),
+		PayloadCsum: replyData.Checksum(),
+		PayloadLen:  replyData.Size(),
+	}))
+	replyTClass, _ := ipHdr.TOS()
+	if err := r.WritePacket(stack.NetworkHeaderParams{
+		Protocol: header.ICMPv6ProtocolNumber,
+		TTL:      r.DefaultTTL(),
+		// Even though RFC 4443 does not mention anything about it, Linux uses the
+		// TrafficClass of the received echo request when replying.
+		// https://github.com/torvalds/linux/blob/0280e3c58f9/net/ipv6/icmp.c#L797
+		TOS: replyTClass,
+	}, replyPkt); err != nil {
+		sent.dropped.Increment()
+		return
+	}
+	sent.echoReply.Increment()
 }
 
 // LinkAddressProtocol implements stack.LinkAddressResolver.
@@ -901,9 +940,9 @@ func (e *endpoint) LinkAddressRequest(targetAddr, localAddr tcpip.Address, remot
 		remoteLinkAddr = header.EthernetAddressFromMulticastIPv6Address(remoteAddr)
 	}
 
-	if len(localAddr) == 0 {
+	if localAddr.BitLen() == 0 {
 		// Find an address that we can use as our source address.
-		addressEndpoint := e.AcquireOutgoingPrimaryAddress(remoteAddr, false /* allowExpired */)
+		addressEndpoint := e.AcquireOutgoingPrimaryAddress(remoteAddr, tcpip.Address{} /* srcHint */, false /* allowExpired */)
 		if addressEndpoint == nil {
 			return &tcpip.ErrNetworkUnreachable{}
 		}
@@ -950,7 +989,7 @@ type icmpReason interface {
 type icmpReasonParameterProblem struct {
 	code header.ICMPv6Code
 
-	// pointer is defined in the RFC 4443 setion 3.4 which reads:
+	// pointer is defined in the RFC 4443 section 3.4 which reads:
 	//
 	//  Pointer         Identifies the octet offset within the invoking packet
 	//                  where the error was detected.
@@ -1084,7 +1123,7 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer, deliv
 	// packets", as per RFC 4291 section 2.7.
 	localAddr := origIPHdrDst
 	if !deliveredLocally || isOrigDstMulticast {
-		localAddr = ""
+		localAddr = tcpip.Address{}
 	}
 	// Even if we were able to receive a packet from some remote, we may not have
 	// a route to it - the remote may be blocked via routing rules. We must always
@@ -1165,7 +1204,7 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer, deliv
 	if payloadLen > available {
 		payloadLen = available
 	}
-	payload := bufferv2.MakeWithView(network)
+	payload := buffer.MakeWithView(network)
 	payload.Append(transport)
 	dataBuf := pkt.Data().ToBuffer()
 	payload.Merge(&dataBuf)
@@ -1183,13 +1222,13 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer, deliv
 	icmpHdr.SetCode(icmpCode)
 	icmpHdr.SetTypeSpecific(typeSpecific)
 
-	dataRange := newPkt.Data().AsRange()
+	pktData := newPkt.Data()
 	icmpHdr.SetChecksum(header.ICMPv6Checksum(header.ICMPv6ChecksumParams{
 		Header:      icmpHdr,
 		Src:         route.LocalAddress(),
 		Dst:         route.RemoteAddress(),
-		PayloadCsum: dataRange.Checksum(),
-		PayloadLen:  dataRange.Size(),
+		PayloadCsum: pktData.Checksum(),
+		PayloadLen:  pktData.Size(),
 	}))
 	if err := route.WritePacket(
 		stack.NetworkHeaderParams{

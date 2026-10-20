@@ -1,9 +1,9 @@
 //go:build linux
-// +build linux
 
 package socket
 
 import (
+	"context"
 	"os"
 	"unsafe"
 
@@ -14,22 +14,9 @@ import (
 // IoctlKCMClone wraps ioctl(2) for unix.KCMClone values, but returns a Conn
 // rather than a raw file descriptor.
 func (c *Conn) IoctlKCMClone() (*Conn, error) {
-	const op = "ioctl"
-
-	var (
-		info *unix.KCMClone
-		err  error
-	)
-
-	doErr := c.control(op, func(fd int) error {
-		info, err = unix.IoctlKCMClone(fd)
-		return err
-	})
-	if doErr != nil {
-		return nil, doErr
-	}
+	info, err := controlT(c, "ioctl", unix.IoctlKCMClone)
 	if err != nil {
-		return nil, os.NewSyscallError(op, err)
+		return nil, err
 	}
 
 	// Successful clone, wrap in a Conn for use by the caller.
@@ -38,14 +25,14 @@ func (c *Conn) IoctlKCMClone() (*Conn, error) {
 
 // IoctlKCMAttach wraps ioctl(2) for unix.KCMAttach values.
 func (c *Conn) IoctlKCMAttach(info unix.KCMAttach) error {
-	return c.controlErr("ioctl", func(fd int) error {
+	return c.control("ioctl", func(fd int) error {
 		return unix.IoctlKCMAttach(fd, info)
 	})
 }
 
 // IoctlKCMUnattach wraps ioctl(2) for unix.KCMUnattach values.
 func (c *Conn) IoctlKCMUnattach(info unix.KCMUnattach) error {
-	return c.controlErr("ioctl", func(fd int) error {
+	return c.control("ioctl", func(fd int) error {
 		return unix.IoctlKCMUnattach(fd, info)
 	})
 }
@@ -53,22 +40,11 @@ func (c *Conn) IoctlKCMUnattach(info unix.KCMUnattach) error {
 // PidfdGetfd wraps pidfd_getfd(2) for a Conn which wraps a pidfd, but returns a
 // Conn rather than a raw file descriptor.
 func (c *Conn) PidfdGetfd(targetFD, flags int) (*Conn, error) {
-	const op = "pidfd_getfd"
-
-	var (
-		outFD int
-		err   error
-	)
-
-	doErr := c.control(op, func(fd int) error {
-		outFD, err = unix.PidfdGetfd(fd, targetFD, flags)
-		return err
+	outFD, err := controlT(c, "pidfd_getfd", func(fd int) (int, error) {
+		return unix.PidfdGetfd(fd, targetFD, flags)
 	})
-	if doErr != nil {
-		return nil, doErr
-	}
 	if err != nil {
-		return nil, os.NewSyscallError(op, err)
+		return nil, err
 	}
 
 	// Successful getfd, wrap in a Conn for use by the caller.
@@ -78,7 +54,7 @@ func (c *Conn) PidfdGetfd(targetFD, flags int) (*Conn, error) {
 // PidfdSendSignal wraps pidfd_send_signal(2) for a Conn which wraps a Linux
 // pidfd.
 func (c *Conn) PidfdSendSignal(sig unix.Signal, info *unix.Siginfo, flags int) error {
-	return c.controlErr("pidfd_send_signal", func(fd int) error {
+	return c.control("pidfd_send_signal", func(fd int) error {
 		return unix.PidfdSendSignal(fd, sig, info, flags)
 	})
 }
@@ -107,54 +83,97 @@ func (c *Conn) RemoveBPF() error {
 
 // SetsockoptPacketMreq wraps setsockopt(2) for unix.PacketMreq values.
 func (c *Conn) SetsockoptPacketMreq(level, opt int, mreq *unix.PacketMreq) error {
-	return c.controlErr("setsockopt", func(fd int) error {
+	return c.control("setsockopt", func(fd int) error {
 		return unix.SetsockoptPacketMreq(fd, level, opt, mreq)
 	})
 }
 
 // SetsockoptSockFprog wraps setsockopt(2) for unix.SockFprog values.
 func (c *Conn) SetsockoptSockFprog(level, opt int, fprog *unix.SockFprog) error {
-	return c.controlErr("setsockopt", func(fd int) error {
+	return c.control("setsockopt", func(fd int) error {
 		return unix.SetsockoptSockFprog(fd, level, opt, fprog)
 	})
 }
 
-// GetSockoptTpacketStats wraps getsockopt(2) for getting TpacketStats
-func (c *Conn) GetSockoptTpacketStats(level, name int) (*unix.TpacketStats, error) {
-	const op = "getsockopt"
+// GetsockoptBytes wraps getsockopt(2) for raw byte slice values on Linux. The
+// existing contents of b are passed to the kernel as the input buffer with
+// optlen set to len(b), and the kernel overwrites b in place. The returned int
+// is the optlen value reported by the kernel on return, which may be smaller
+// than len(b). These in/out semantics are required for socket options which
+// both read from and write to the same buffer.
+//
+// No allocation or copying is performed and b is passed to the kernel
+// verbatim. If len(b) is zero, a nil buffer with optlen 0 is passed.
+func (c *Conn) GetsockoptBytes(level, opt int, b []byte) (int, error) {
+	return controlT(c, "getsockopt", func(fd int) (int, error) {
+		var p unsafe.Pointer
+		if len(b) > 0 {
+			p = unsafe.Pointer(&b[0])
+		}
 
-	var (
-		stats *unix.TpacketStats
-		err   error
-	)
+		optlen := uint32(len(b))
+		_, _, errno := unix.Syscall6(
+			unix.SYS_GETSOCKOPT,
+			uintptr(fd),
+			uintptr(level),
+			uintptr(opt),
+			uintptr(p),
+			uintptr(unsafe.Pointer(&optlen)),
+			0,
+		)
+		if errno != 0 {
+			return 0, errno
+		}
 
-	doErr := c.control(op, func(fd int) error {
-		stats, err = unix.GetsockoptTpacketStats(fd, level, name)
-		return err
+		return int(optlen), nil
 	})
-	if doErr != nil {
-		return nil, doErr
-	}
-
-	return stats, os.NewSyscallError(op, err)
 }
 
-// GetSockoptTpacketStatsV3 wraps getsockopt(2) for getting TpacketStatsV3
-func (c *Conn) GetSockoptTpacketStatsV3(level, name int) (*unix.TpacketStatsV3, error) {
-	const op = "getsockopt"
+// SetsockoptBytes wraps setsockopt(2) for raw byte slice values on Linux. The
+// bytes of b are passed to the kernel verbatim with optlen set to len(b) and no
+// NUL handling of any kind is performed. If len(b) is zero, a nil buffer with
+// optlen 0 is passed.
+func (c *Conn) SetsockoptBytes(level, opt int, b []byte) error {
+	return c.control("setsockopt", func(fd int) error {
+		var p unsafe.Pointer
+		if len(b) > 0 {
+			p = unsafe.Pointer(&b[0])
+		}
 
-	var (
-		stats *unix.TpacketStatsV3
-		err   error
-	)
+		_, _, errno := unix.Syscall6(
+			unix.SYS_SETSOCKOPT,
+			uintptr(fd),
+			uintptr(level),
+			uintptr(opt),
+			uintptr(p),
+			uintptr(len(b)),
+			0,
+		)
+		if errno != 0 {
+			return errno
+		}
 
-	doErr := c.control(op, func(fd int) error {
-		stats, err = unix.GetsockoptTpacketStatsV3(fd, level, name)
-		return err
+		return nil
 	})
-	if doErr != nil {
-		return nil, doErr
-	}
+}
 
-	return stats, os.NewSyscallError(op, err)
+// GetsockoptTpacketStats wraps getsockopt(2) for unix.TpacketStats values.
+func (c *Conn) GetsockoptTpacketStats(level, name int) (*unix.TpacketStats, error) {
+	return controlT(c, "getsockopt", func(fd int) (*unix.TpacketStats, error) {
+		return unix.GetsockoptTpacketStats(fd, level, name)
+	})
+}
+
+// GetsockoptTpacketStatsV3 wraps getsockopt(2) for unix.TpacketStatsV3 values.
+func (c *Conn) GetsockoptTpacketStatsV3(level, name int) (*unix.TpacketStatsV3, error) {
+	return controlT(c, "getsockopt", func(fd int) (*unix.TpacketStatsV3, error) {
+		return unix.GetsockoptTpacketStatsV3(fd, level, name)
+	})
+}
+
+// Waitid wraps waitid(2).
+func (c *Conn) Waitid(idType int, info *unix.Siginfo, options int, rusage *unix.Rusage) error {
+	return c.read(context.Background(), "waitid", func(fd int) error {
+		return unix.Waitid(idType, fd, info, options, rusage)
+	})
 }

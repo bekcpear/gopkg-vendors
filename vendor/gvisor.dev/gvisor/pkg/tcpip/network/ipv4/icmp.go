@@ -16,9 +16,11 @@ package ipv4
 
 import (
 	"fmt"
+	"math"
 
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/header/parse"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -67,6 +69,28 @@ func (*icmpv4DestinationHostUnreachableSockError) Kind() stack.TransportErrorKin
 	return stack.DestinationHostUnreachableTransportError
 }
 
+var _ stack.TransportError = (*icmpv4DestinationNetUnreachableSockError)(nil)
+
+// icmpv4DestinationNetUnreachableSockError is an ICMPv4 Destination Net
+// Unreachable error.
+//
+// It indicates that a packet was not able to reach the destination network.
+//
+// +stateify savable
+type icmpv4DestinationNetUnreachableSockError struct {
+	icmpv4DestinationUnreachableSockError
+}
+
+// Code implements tcpip.SockErrorCause.
+func (*icmpv4DestinationNetUnreachableSockError) Code() uint8 {
+	return uint8(header.ICMPv4NetUnreachable)
+}
+
+// Kind implements stack.TransportError.
+func (*icmpv4DestinationNetUnreachableSockError) Kind() stack.TransportErrorKind {
+	return stack.DestinationNetworkUnreachableTransportError
+}
+
 var _ stack.TransportError = (*icmpv4DestinationPortUnreachableSockError)(nil)
 
 // icmpv4DestinationPortUnreachableSockError is an ICMPv4 Destination Port
@@ -88,6 +112,89 @@ func (*icmpv4DestinationPortUnreachableSockError) Code() uint8 {
 // Kind implements stack.TransportError.
 func (*icmpv4DestinationPortUnreachableSockError) Kind() stack.TransportErrorKind {
 	return stack.DestinationPortUnreachableTransportError
+}
+
+var _ stack.TransportError = (*icmpv4DestinationProtoUnreachableSockError)(nil)
+
+// icmpv4DestinationProtoUnreachableSockError is an ICMPv4 Destination Protocol
+// Unreachable error.
+//
+// It indicates that a packet reached the destination host, but the transport
+// protocol was not reachable
+//
+// +stateify savable
+type icmpv4DestinationProtoUnreachableSockError struct {
+	icmpv4DestinationUnreachableSockError
+}
+
+// Code implements tcpip.SockErrorCause.
+func (*icmpv4DestinationProtoUnreachableSockError) Code() uint8 {
+	return uint8(header.ICMPv4ProtoUnreachable)
+}
+
+// Kind implements stack.TransportError.
+func (*icmpv4DestinationProtoUnreachableSockError) Kind() stack.TransportErrorKind {
+	return stack.DestinationProtoUnreachableTransportError
+}
+
+var _ stack.TransportError = (*icmpv4SourceRouteFailedSockError)(nil)
+
+// icmpv4SourceRouteFailedSockError is an ICMPv4 Destination Unreachable error
+// due to source route failed.
+//
+// +stateify savable
+type icmpv4SourceRouteFailedSockError struct {
+	icmpv4DestinationUnreachableSockError
+}
+
+// Code implements tcpip.SockErrorCause.
+func (*icmpv4SourceRouteFailedSockError) Code() uint8 {
+	return uint8(header.ICMPv4SourceRouteFailed)
+}
+
+// Kind implements stack.TransportError.
+func (*icmpv4SourceRouteFailedSockError) Kind() stack.TransportErrorKind {
+	return stack.SourceRouteFailedTransportError
+}
+
+var _ stack.TransportError = (*icmpv4SourceHostIsolatedSockError)(nil)
+
+// icmpv4SourceHostIsolatedSockError is an ICMPv4 Destination Unreachable error
+// due to source host isolated (not on the network).
+//
+// +stateify savable
+type icmpv4SourceHostIsolatedSockError struct {
+	icmpv4DestinationUnreachableSockError
+}
+
+// Code implements tcpip.SockErrorCause.
+func (*icmpv4SourceHostIsolatedSockError) Code() uint8 {
+	return uint8(header.ICMPv4SourceHostIsolated)
+}
+
+// Kind implements stack.TransportError.
+func (*icmpv4SourceHostIsolatedSockError) Kind() stack.TransportErrorKind {
+	return stack.SourceHostIsolatedTransportError
+}
+
+var _ stack.TransportError = (*icmpv4DestinationHostUnknownSockError)(nil)
+
+// icmpv4DestinationHostUnknownSockError is an ICMPv4 Destination Unreachable
+// error due to destination host unknown/down.
+//
+// +stateify savable
+type icmpv4DestinationHostUnknownSockError struct {
+	icmpv4DestinationUnreachableSockError
+}
+
+// Code implements tcpip.SockErrorCause.
+func (*icmpv4DestinationHostUnknownSockError) Code() uint8 {
+	return uint8(header.ICMPv4DestinationHostUnknown)
+}
+
+// Kind implements stack.TransportError.
+func (*icmpv4DestinationHostUnknownSockError) Kind() stack.TransportErrorKind {
+	return stack.DestinationHostDownTransportError
 }
 
 var _ stack.TransportError = (*icmpv4FragmentationNeededSockError)(nil)
@@ -126,8 +233,7 @@ func (e *endpoint) checkLocalAddress(addr tcpip.Address) bool {
 		return true
 	}
 
-	if addressEndpoint := e.AcquireAssignedAddress(addr, false, stack.NeverPrimaryEndpoint); addressEndpoint != nil {
-		addressEndpoint.DecRef()
+	if addressEndpoint := e.AcquireAssignedAddress(addr, false, stack.NeverPrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
 		return true
 	}
 	return false
@@ -183,7 +289,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 	}
 
 	// Only do in-stack processing if the checksum is correct.
-	if header.Checksum(h, pkt.Data().AsRange().Checksum()) != 0xffff {
+	if checksum.Checksum(h, pkt.Data().Checksum()) != 0xffff {
 		received.invalid.Increment()
 		// It's possible that a raw socket expects to receive this regardless
 		// of checksum errors. If it's an echo request we know it's safe because
@@ -250,102 +356,28 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 		// DeliverTransportPacket so that is is only done when needed.
 		replyData := stack.PayloadSince(pkt.TransportHeader())
 		defer replyData.Release()
-		ipHdr := header.IPv4(pkt.NetworkHeader().Slice())
+		localAddressTemporary := pkt.NetworkPacketInfo.LocalAddressTemporary
 		localAddressBroadcast := pkt.NetworkPacketInfo.LocalAddressBroadcast
 
-		// It's possible that a raw socket expects to receive this.
-		e.dispatcher.DeliverTransportPacket(header.ICMPv4ProtocolNumber, pkt)
+		// It's possible that a raw socket or per-stack default handler expects
+		// to receive this packet.
+		defaultHandlerHandled := false
+		if dispatcher, ok := e.dispatcher.(stack.TransportDispatcherWithDefaultHandlerResult); ok {
+			_, defaultHandlerHandled = dispatcher.DeliverTransportPacketWithDefaultHandlerResult(header.ICMPv4ProtocolNumber, pkt)
+		} else {
+			e.dispatcher.DeliverTransportPacket(header.ICMPv4ProtocolNumber, pkt)
+		}
 		pkt = nil
 
-		sent := e.stats.icmp.packetsSent
-		if !e.protocol.allowICMPReply(header.ICMPv4EchoReply, header.ICMPv4UnusedCode) {
-			sent.rateLimited.Increment()
+		// Skip the built-in ICMP echo reply if the request was consumed by a
+		// per-stack default handler. Also preserve the IPv4 behavior for
+		// temporary local addresses: the packet is delivered above, but the
+		// stack does not synthesize an echo reply for it.
+		if defaultHandlerHandled || localAddressTemporary {
 			return
 		}
 
-		// As per RFC 1122 section 3.2.1.3, when a host sends any datagram, the IP
-		// source address MUST be one of its own IP addresses (but not a broadcast
-		// or multicast address).
-		localAddr := ipHdr.DestinationAddress()
-		if localAddressBroadcast || header.IsV4MulticastAddress(localAddr) {
-			localAddr = ""
-		}
-
-		r, err := e.protocol.stack.FindRoute(e.nic.ID(), localAddr, ipHdr.SourceAddress(), ProtocolNumber, false /* multicastLoop */)
-		if err != nil {
-			// If we cannot find a route to the destination, silently drop the packet.
-			return
-		}
-		defer r.Release()
-
-		outgoingEP, ok := e.protocol.getEndpointForNIC(r.NICID())
-		if !ok {
-			// The outgoing NIC went away.
-			sent.dropped.Increment()
-			return
-		}
-
-		// Because IP and ICMP are so closely intertwined, we need to handcraft our
-		// IP header to be able to follow RFC 792. The wording on page 13 is as
-		// follows:
-		//   IP Fields:
-		//   Addresses
-		//     The address of the source in an echo message will be the
-		//     destination of the echo reply message.  To form an echo reply
-		//     message, the source and destination addresses are simply reversed,
-		//     the type code changed to 0, and the checksum recomputed.
-		//
-		// This was interpreted by early implementors to mean that all options must
-		// be copied from the echo request IP header to the echo reply IP header
-		// and this behaviour is still relied upon by some applications.
-		//
-		// Create a copy of the IP header we received, options and all, and change
-		// The fields we need to alter.
-		//
-		// We need to produce the entire packet in the data segment in order to
-		// use WriteHeaderIncludedPacket(). WriteHeaderIncludedPacket sets the
-		// total length and the header checksum so we don't need to set those here.
-		//
-		// Take the base of the incoming request IP header but replace the options.
-		replyHeaderLength := uint8(header.IPv4MinimumSize + len(newOptions))
-		replyIPHdrView := bufferv2.NewView(int(replyHeaderLength))
-		replyIPHdrView.Write(iph[:header.IPv4MinimumSize])
-		replyIPHdrView.Write(newOptions)
-		replyIPHdr := header.IPv4(replyIPHdrView.AsSlice())
-		replyIPHdr.SetHeaderLength(replyHeaderLength)
-		replyIPHdr.SetSourceAddress(r.LocalAddress())
-		replyIPHdr.SetDestinationAddress(r.RemoteAddress())
-		replyIPHdr.SetTTL(r.DefaultTTL())
-		replyIPHdr.SetTotalLength(uint16(len(replyIPHdr) + len(replyData.AsSlice())))
-		replyIPHdr.SetChecksum(0)
-		replyIPHdr.SetChecksum(^replyIPHdr.CalculateChecksum())
-
-		replyICMPHdr := header.ICMPv4(replyData.AsSlice())
-		replyICMPHdr.SetType(header.ICMPv4EchoReply)
-		replyICMPHdr.SetChecksum(0)
-		replyICMPHdr.SetChecksum(^header.Checksum(replyData.AsSlice(), 0))
-
-		replyBuf := bufferv2.MakeWithView(replyIPHdrView)
-		replyBuf.Append(replyData.Clone())
-		replyPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-			ReserveHeaderBytes: int(r.MaxHeaderLength()),
-			Payload:            replyBuf,
-		})
-		defer replyPkt.DecRef()
-		// Populate the network/transport headers in the packet buffer so the
-		// ICMP packet goes through IPTables.
-		if ok := parse.IPv4(replyPkt); !ok {
-			panic("expected to parse IPv4 header we just created")
-		}
-		if ok := parse.ICMPv4(replyPkt); !ok {
-			panic("expected to parse ICMPv4 header we just created")
-		}
-
-		if err := outgoingEP.writePacket(r, replyPkt); err != nil {
-			sent.dropped.Increment()
-			return
-		}
-		sent.echoReply.Increment()
+		e.sendICMPEchoReply(replyData, iph, newOptions, localAddressBroadcast)
 
 	case header.ICMPv4EchoReply:
 		received.echoReply.Increment()
@@ -360,7 +392,17 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 		mtu := h.MTU()
 		code := h.Code()
 		switch code {
-		case header.ICMPv4HostUnreachable:
+		case header.ICMPv4NetUnreachable,
+			header.ICMPv4DestinationNetworkUnknown,
+			header.ICMPv4NetUnreachableForTos,
+			header.ICMPv4NetProhibited:
+			e.handleControl(&icmpv4DestinationNetUnreachableSockError{}, pkt)
+		case header.ICMPv4HostUnreachable,
+			header.ICMPv4HostProhibited,
+			header.ICMPv4AdminProhibited,
+			header.ICMPv4HostUnreachableForTos,
+			header.ICMPv4HostPrecedenceViolation,
+			header.ICMPv4PrecedenceCutInEffect:
 			e.handleControl(&icmpv4DestinationHostUnreachableSockError{}, pkt)
 		case header.ICMPv4PortUnreachable:
 			e.handleControl(&icmpv4DestinationPortUnreachableSockError{}, pkt)
@@ -370,6 +412,14 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 				networkMTU = 0
 			}
 			e.handleControl(&icmpv4FragmentationNeededSockError{mtu: networkMTU}, pkt)
+		case header.ICMPv4ProtoUnreachable:
+			e.handleControl(&icmpv4DestinationProtoUnreachableSockError{}, pkt)
+		case header.ICMPv4SourceRouteFailed:
+			e.handleControl(&icmpv4SourceRouteFailedSockError{}, pkt)
+		case header.ICMPv4SourceHostIsolated:
+			e.handleControl(&icmpv4SourceHostIsolatedSockError{}, pkt)
+		case header.ICMPv4DestinationHostUnknown:
+			e.handleControl(&icmpv4DestinationHostUnknownSockError{}, pkt)
 		}
 	case header.ICMPv4SrcQuench:
 		received.srcQuench.Increment()
@@ -398,6 +448,98 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 	default:
 		received.invalid.Increment()
 	}
+}
+
+func (e *endpoint) sendICMPEchoReply(replyData *buffer.View, ipHdr header.IPv4, newOptions header.IPv4Options, localAddressBroadcast bool) {
+	sent := e.stats.icmp.packetsSent
+	if !e.protocol.allowICMPReply(header.ICMPv4EchoReply, header.ICMPv4UnusedCode) {
+		sent.rateLimited.Increment()
+		return
+	}
+
+	// As per RFC 1122 section 3.2.1.3, when a host sends any datagram, the IP
+	// source address MUST be one of its own IP addresses (but not a broadcast
+	// or multicast address).
+	localAddr := ipHdr.DestinationAddress()
+	if localAddressBroadcast || header.IsV4MulticastAddress(localAddr) {
+		localAddr = tcpip.Address{}
+	}
+
+	r, err := e.protocol.stack.FindRoute(e.nic.ID(), localAddr, ipHdr.SourceAddress(), ProtocolNumber, false /* multicastLoop */)
+	if err != nil {
+		// If we cannot find a route to the destination, silently drop the packet.
+		return
+	}
+	defer r.Release()
+
+	outgoingEP, ok := e.protocol.getEndpointForNIC(r.NICID())
+	if !ok {
+		// The outgoing NIC went away.
+		sent.dropped.Increment()
+		return
+	}
+
+	// Because IP and ICMP are so closely intertwined, we need to handcraft our
+	// IP header to be able to follow RFC 792. The wording on page 13 is as
+	// follows:
+	//   IP Fields:
+	//   Addresses
+	//     The address of the source in an echo message will be the
+	//     destination of the echo reply message.  To form an echo reply
+	//     message, the source and destination addresses are simply reversed,
+	//     the type code changed to 0, and the checksum recomputed.
+	//
+	// This was interpreted by early implementers to mean that all options must
+	// be copied from the echo request IP header to the echo reply IP header
+	// and this behaviour is still relied upon by some applications.
+	//
+	// Create a copy of the IP header we received, options and all, and change
+	// The fields we need to alter.
+	//
+	// We need to produce the entire packet in the data segment in order to
+	// use WriteHeaderIncludedPacket(). WriteHeaderIncludedPacket sets the
+	// total length and the header checksum so we don't need to set those here.
+	//
+	// Take the base of the incoming request IP header but replace the options.
+	replyHeaderLength := uint8(header.IPv4MinimumSize + len(newOptions))
+	replyIPHdrView := buffer.NewView(int(replyHeaderLength))
+	replyIPHdrView.Write(ipHdr[:header.IPv4MinimumSize])
+	replyIPHdrView.Write(newOptions)
+	replyIPHdr := header.IPv4(replyIPHdrView.AsSlice())
+	replyIPHdr.SetHeaderLength(replyHeaderLength)
+	replyIPHdr.SetSourceAddress(r.LocalAddress())
+	replyIPHdr.SetDestinationAddress(r.RemoteAddress())
+	replyIPHdr.SetTTL(r.DefaultTTL())
+	replyIPHdr.SetTotalLength(uint16(len(replyIPHdr) + len(replyData.AsSlice())))
+	replyIPHdr.SetChecksum(0)
+	replyIPHdr.SetChecksum(^replyIPHdr.CalculateChecksum())
+
+	replyICMPHdr := header.ICMPv4(replyData.AsSlice())
+	replyICMPHdr.SetType(header.ICMPv4EchoReply)
+	replyICMPHdr.SetChecksum(0)
+	replyICMPHdr.SetChecksum(^checksum.Checksum(replyData.AsSlice(), 0))
+
+	replyBuf := buffer.MakeWithView(replyIPHdrView)
+	replyBuf.Append(replyData.Clone())
+	replyPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		ReserveHeaderBytes: int(r.MaxHeaderLength()),
+		Payload:            replyBuf,
+	})
+	defer replyPkt.DecRef()
+	// Populate the network/transport headers in the packet buffer so the
+	// ICMP packet goes through IPTables.
+	if ok := parse.IPv4(replyPkt); !ok {
+		panic("expected to parse IPv4 header we just created")
+	}
+	if ok := parse.ICMPv4(replyPkt); !ok {
+		panic("expected to parse ICMPv4 header we just created")
+	}
+
+	if err := outgoingEP.writePacket(r, replyPkt); err != nil {
+		sent.dropped.Increment()
+		return
+	}
+	sent.echoReply.Increment()
 }
 
 // ======= ICMP Error packet generation =========
@@ -468,7 +610,12 @@ func (*icmpReasonNetworkUnreachable) isICMPReason() {}
 // icmpReasonFragmentationNeeded is an error where a packet requires
 // fragmentation while also having the Don't Fragment flag set, as per RFC 792
 // page 3, Destination Unreachable Message.
-type icmpReasonFragmentationNeeded struct{}
+type icmpReasonFragmentationNeeded struct {
+	// mtu is the MTU of the next-hop link. Per RFC 1191 §4, this value
+	// must be included in the ICMP Fragmentation Needed message so the
+	// sender can update its path MTU cache.
+	mtu uint32
+}
 
 func (*icmpReasonFragmentationNeeded) isICMPReason() {}
 
@@ -520,7 +667,7 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer, deliv
 	// destination address of a packet we are forwarding.
 	localAddr := origIPHdrDst
 	if !deliveredLocally {
-		localAddr = ""
+		localAddr = tcpip.Address{}
 	}
 
 	// Even if we were able to receive a packet from some remote, we may not have
@@ -573,30 +720,36 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer, deliv
 	}
 
 	sent := netEP.stats.icmp.packetsSent
-	icmpType, icmpCode, counter, pointer := func() (header.ICMPv4Type, header.ICMPv4Code, tcpip.MultiCounterStat, byte) {
+	icmpType, icmpCode, counter, pointer, nextHopMTU := func() (header.ICMPv4Type, header.ICMPv4Code, tcpip.MultiCounterStat, byte, uint16) {
 		switch reason := reason.(type) {
 		case *icmpReasonNetworkProhibited:
-			return header.ICMPv4DstUnreachable, header.ICMPv4NetProhibited, sent.dstUnreachable, 0
+			return header.ICMPv4DstUnreachable, header.ICMPv4NetProhibited, sent.dstUnreachable, 0, 0
 		case *icmpReasonHostProhibited:
-			return header.ICMPv4DstUnreachable, header.ICMPv4HostProhibited, sent.dstUnreachable, 0
+			return header.ICMPv4DstUnreachable, header.ICMPv4HostProhibited, sent.dstUnreachable, 0, 0
 		case *icmpReasonAdministrativelyProhibited:
-			return header.ICMPv4DstUnreachable, header.ICMPv4AdminProhibited, sent.dstUnreachable, 0
+			return header.ICMPv4DstUnreachable, header.ICMPv4AdminProhibited, sent.dstUnreachable, 0, 0
 		case *icmpReasonPortUnreachable:
-			return header.ICMPv4DstUnreachable, header.ICMPv4PortUnreachable, sent.dstUnreachable, 0
+			return header.ICMPv4DstUnreachable, header.ICMPv4PortUnreachable, sent.dstUnreachable, 0, 0
 		case *icmpReasonProtoUnreachable:
-			return header.ICMPv4DstUnreachable, header.ICMPv4ProtoUnreachable, sent.dstUnreachable, 0
+			return header.ICMPv4DstUnreachable, header.ICMPv4ProtoUnreachable, sent.dstUnreachable, 0, 0
 		case *icmpReasonNetworkUnreachable:
-			return header.ICMPv4DstUnreachable, header.ICMPv4NetUnreachable, sent.dstUnreachable, 0
+			return header.ICMPv4DstUnreachable, header.ICMPv4NetUnreachable, sent.dstUnreachable, 0, 0
 		case *icmpReasonHostUnreachable:
-			return header.ICMPv4DstUnreachable, header.ICMPv4HostUnreachable, sent.dstUnreachable, 0
+			return header.ICMPv4DstUnreachable, header.ICMPv4HostUnreachable, sent.dstUnreachable, 0, 0
 		case *icmpReasonFragmentationNeeded:
-			return header.ICMPv4DstUnreachable, header.ICMPv4FragmentationNeeded, sent.dstUnreachable, 0
+			// Per RFC 1191 §4, include the next-hop MTU in the ICMP message.
+			// Cap at MaxUint16 since the field is 16 bits wide.
+			mtu := reason.mtu
+			if mtu > math.MaxUint16 {
+				mtu = math.MaxUint16
+			}
+			return header.ICMPv4DstUnreachable, header.ICMPv4FragmentationNeeded, sent.dstUnreachable, 0, uint16(mtu)
 		case *icmpReasonTTLExceeded:
-			return header.ICMPv4TimeExceeded, header.ICMPv4TTLExceeded, sent.timeExceeded, 0
+			return header.ICMPv4TimeExceeded, header.ICMPv4TTLExceeded, sent.timeExceeded, 0, 0
 		case *icmpReasonReassemblyTimeout:
-			return header.ICMPv4TimeExceeded, header.ICMPv4ReassemblyTimeout, sent.timeExceeded, 0
+			return header.ICMPv4TimeExceeded, header.ICMPv4ReassemblyTimeout, sent.timeExceeded, 0, 0
 		case *icmpReasonParamProblem:
-			return header.ICMPv4ParamProblem, header.ICMPv4UnusedCode, sent.paramProblem, reason.pointer
+			return header.ICMPv4ParamProblem, header.ICMPv4UnusedCode, sent.paramProblem, reason.pointer, 0
 		default:
 			panic(fmt.Sprintf("unsupported ICMP type %T", reason))
 		}
@@ -643,7 +796,7 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer, deliv
 	// required. This is now the payload of the new ICMP packet and no longer
 	// considered a packet in its own right.
 
-	payload := bufferv2.MakeWithView(pkt.NetworkHeader().View())
+	payload := buffer.MakeWithView(pkt.NetworkHeader().View())
 	payload.Append(pkt.TransportHeader().View())
 	if dataCap := payloadLen - int(payload.Size()); dataCap > 0 {
 		buf := pkt.Data().ToBuffer()
@@ -665,7 +818,8 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer, deliv
 	icmpHdr.SetCode(icmpCode)
 	icmpHdr.SetType(icmpType)
 	icmpHdr.SetPointer(pointer)
-	icmpHdr.SetChecksum(header.ICMPv4Checksum(icmpHdr, icmpPkt.Data().AsRange().Checksum()))
+	icmpHdr.SetMTU(nextHopMTU)
+	icmpHdr.SetChecksum(header.ICMPv4Checksum(icmpHdr, icmpPkt.Data().Checksum()))
 
 	if err := route.WritePacket(
 		stack.NetworkHeaderParams{

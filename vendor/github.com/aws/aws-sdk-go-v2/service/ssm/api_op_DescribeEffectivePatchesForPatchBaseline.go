@@ -5,11 +5,8 @@ package ssm
 import (
 	"context"
 	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // Retrieves the current effective patches (the patch and the approval state) for
@@ -37,7 +34,7 @@ type DescribeEffectivePatchesForPatchBaselineInput struct {
 	BaselineId *string
 
 	// The maximum number of patches to return (per page).
-	MaxResults int32
+	MaxResults *int32
 
 	// The token for the next set of items to return. (You received this token from a
 	// previous call.)
@@ -70,46 +67,20 @@ func (c *Client) addOperationDescribeEffectivePatchesForPatchBaselineMiddlewares
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpDescribeEffectivePatchesForPatchBaselineValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeEffectivePatchesForPatchBaseline(options.Region), middleware.Before); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -121,16 +92,14 @@ func (c *Client) addOperationDescribeEffectivePatchesForPatchBaselineMiddlewares
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addInterceptors(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
-
-// DescribeEffectivePatchesForPatchBaselineAPIClient is a client that implements
-// the DescribeEffectivePatchesForPatchBaseline operation.
-type DescribeEffectivePatchesForPatchBaselineAPIClient interface {
-	DescribeEffectivePatchesForPatchBaseline(context.Context, *DescribeEffectivePatchesForPatchBaselineInput, ...func(*Options)) (*DescribeEffectivePatchesForPatchBaselineOutput, error)
-}
-
-var _ DescribeEffectivePatchesForPatchBaselineAPIClient = (*Client)(nil)
 
 // DescribeEffectivePatchesForPatchBaselinePaginatorOptions is the paginator
 // options for DescribeEffectivePatchesForPatchBaseline
@@ -161,8 +130,8 @@ func NewDescribeEffectivePatchesForPatchBaselinePaginator(client DescribeEffecti
 	}
 
 	options := DescribeEffectivePatchesForPatchBaselinePaginatorOptions{}
-	if params.MaxResults != 0 {
-		options.Limit = params.MaxResults
+	if params.MaxResults != nil {
+		options.Limit = *params.MaxResults
 	}
 
 	for _, fn := range optFns {
@@ -174,12 +143,13 @@ func NewDescribeEffectivePatchesForPatchBaselinePaginator(client DescribeEffecti
 		client:    client,
 		params:    params,
 		firstPage: true,
+		nextToken: params.NextToken,
 	}
 }
 
 // HasMorePages returns a boolean indicating whether more pages are available
 func (p *DescribeEffectivePatchesForPatchBaselinePaginator) HasMorePages() bool {
-	return p.firstPage || p.nextToken != nil
+	return p.firstPage || (p.nextToken != nil && len(*p.nextToken) != 0)
 }
 
 // NextPage retrieves the next DescribeEffectivePatchesForPatchBaseline page.
@@ -191,8 +161,15 @@ func (p *DescribeEffectivePatchesForPatchBaselinePaginator) NextPage(ctx context
 	params := *p.params
 	params.NextToken = p.nextToken
 
-	params.MaxResults = p.options.Limit
+	var limit *int32
+	if p.options.Limit > 0 {
+		limit = &p.options.Limit
+	}
+	params.MaxResults = limit
 
+	optFns = append([]func(*Options){
+		addIsPaginatorUserAgent,
+	}, optFns...)
 	result, err := p.client.DescribeEffectivePatchesForPatchBaseline(ctx, &params, optFns...)
 	if err != nil {
 		return nil, err
@@ -202,18 +179,20 @@ func (p *DescribeEffectivePatchesForPatchBaselinePaginator) NextPage(ctx context
 	prevToken := p.nextToken
 	p.nextToken = result.NextToken
 
-	if p.options.StopOnDuplicateToken && prevToken != nil && p.nextToken != nil && *prevToken == *p.nextToken {
+	if p.options.StopOnDuplicateToken &&
+		prevToken != nil &&
+		p.nextToken != nil &&
+		*prevToken == *p.nextToken {
 		p.nextToken = nil
 	}
 
 	return result, nil
 }
 
-func newServiceMetadataMiddleware_opDescribeEffectivePatchesForPatchBaseline(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "ssm",
-		OperationName: "DescribeEffectivePatchesForPatchBaseline",
-	}
+// DescribeEffectivePatchesForPatchBaselineAPIClient is a client that implements
+// the DescribeEffectivePatchesForPatchBaseline operation.
+type DescribeEffectivePatchesForPatchBaselineAPIClient interface {
+	DescribeEffectivePatchesForPatchBaseline(context.Context, *DescribeEffectivePatchesForPatchBaselineInput, ...func(*Options)) (*DescribeEffectivePatchesForPatchBaselineOutput, error)
 }
+
+var _ DescribeEffectivePatchesForPatchBaselineAPIClient = (*Client)(nil)

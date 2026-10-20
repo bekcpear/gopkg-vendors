@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 )
 
 // RFC 971 defines the fields of the IPv4 header on page 11 using the following
@@ -50,7 +51,7 @@ const (
 	flagsFO            = 6
 	ttl                = 8
 	protocol           = 9
-	checksum           = 10
+	xsum               = 10
 	srcAddr            = 12
 	dstAddr            = 16
 	options            = 20
@@ -141,25 +142,14 @@ const (
 	// IPv4AddressSize is the size, in bytes, of an IPv4 address.
 	IPv4AddressSize = 4
 
+	// IPv4AddressSizeBits is the size, in bits, of an IPv4 address.
+	IPv4AddressSizeBits = 32
+
 	// IPv4ProtocolNumber is IPv4's network protocol number.
 	IPv4ProtocolNumber tcpip.NetworkProtocolNumber = 0x0800
 
 	// IPv4Version is the version of the IPv4 protocol.
 	IPv4Version = 4
-
-	// IPv4AllSystems is the all systems IPv4 multicast address as per
-	// IANA's IPv4 Multicast Address Space Registry. See
-	// https://www.iana.org/assignments/multicast-addresses/multicast-addresses.xhtml.
-	IPv4AllSystems tcpip.Address = "\xe0\x00\x00\x01"
-
-	// IPv4Broadcast is the broadcast address of the IPv4 procotol.
-	IPv4Broadcast tcpip.Address = "\xff\xff\xff\xff"
-
-	// IPv4Any is the non-routable IPv4 "any" meta address.
-	IPv4Any tcpip.Address = "\x00\x00\x00\x00"
-
-	// IPv4AllRoutersGroup is a multicast address for all routers.
-	IPv4AllRoutersGroup tcpip.Address = "\xe0\x00\x00\x02"
 
 	// IPv4MinimumProcessableDatagramSize is the minimum size of an IP
 	// packet that every IPv4 capable host must be able to
@@ -174,6 +164,25 @@ const (
 	IPv4MinimumMTU = 68
 )
 
+var (
+	// IPv4AllSystems is the all systems IPv4 multicast address as per
+	// IANA's IPv4 Multicast Address Space Registry. See
+	// https://www.iana.org/assignments/multicast-addresses/multicast-addresses.xhtml.
+	IPv4AllSystems = tcpip.AddrFrom4([4]byte{0xe0, 0x00, 0x00, 0x01})
+
+	// IPv4Broadcast is the broadcast address of the IPv4 protocol.
+	IPv4Broadcast = tcpip.AddrFrom4([4]byte{0xff, 0xff, 0xff, 0xff})
+
+	// IPv4Any is the non-routable IPv4 "any" meta address.
+	IPv4Any = tcpip.AddrFrom4([4]byte{0x00, 0x00, 0x00, 0x00})
+
+	// IPv4AllRoutersGroup is a multicast address for all routers.
+	IPv4AllRoutersGroup = tcpip.AddrFrom4([4]byte{0xe0, 0x00, 0x00, 0x02})
+
+	// IPv4Loopback is the loopback IPv4 address.
+	IPv4Loopback = tcpip.AddrFrom4([4]byte{0x7f, 0x00, 0x00, 0x01})
+)
+
 // Flags that may be set in an IPv4 packet.
 const (
 	IPv4FlagMoreFragments = 1 << iota
@@ -183,7 +192,7 @@ const (
 // ipv4LinkLocalUnicastSubnet is the IPv4 link local unicast subnet as defined
 // by RFC 3927 section 1.
 var ipv4LinkLocalUnicastSubnet = func() tcpip.Subnet {
-	subnet, err := tcpip.NewSubnet("\xa9\xfe\x00\x00", "\xff\xff\x00\x00")
+	subnet, err := tcpip.NewSubnet(tcpip.AddrFrom4([4]byte{0xa9, 0xfe, 0x00, 0x00}), tcpip.MaskFrom("\xff\xff\x00\x00"))
 	if err != nil {
 		panic(err)
 	}
@@ -193,7 +202,7 @@ var ipv4LinkLocalUnicastSubnet = func() tcpip.Subnet {
 // ipv4LinkLocalMulticastSubnet is the IPv4 link local multicast subnet as
 // defined by RFC 5771 section 4.
 var ipv4LinkLocalMulticastSubnet = func() tcpip.Subnet {
-	subnet, err := tcpip.NewSubnet("\xe0\x00\x00\x00", "\xff\xff\xff\x00")
+	subnet, err := tcpip.NewSubnet(tcpip.AddrFrom4([4]byte{0xe0, 0x00, 0x00, 0x00}), tcpip.MaskFrom("\xff\xff\xff\x00"))
 	if err != nil {
 		panic(err)
 	}
@@ -202,7 +211,32 @@ var ipv4LinkLocalMulticastSubnet = func() tcpip.Subnet {
 
 // IPv4EmptySubnet is the empty IPv4 subnet.
 var IPv4EmptySubnet = func() tcpip.Subnet {
-	subnet, err := tcpip.NewSubnet(IPv4Any, tcpip.AddressMask(IPv4Any))
+	subnet, err := tcpip.NewSubnet(IPv4Any, tcpip.MaskFrom("\x00\x00\x00\x00"))
+	if err != nil {
+		panic(err)
+	}
+	return subnet
+}()
+
+// IPv4CurrentNetworkSubnet is the subnet of addresses for the current network,
+// per RFC 6890 section 2.2.2,
+//
+//	+----------------------+----------------------------+
+//	| Attribute            | Value                      |
+//	+----------------------+----------------------------+
+//	| Address Block        | 0.0.0.0/8                  |
+//	| Name                 | "This host on this network"|
+//	| RFC                  | [RFC1122], Section 3.2.1.3 |
+//	| Allocation Date      | September 1981             |
+//	| Termination Date     | N/A                        |
+//	| Source               | True                       |
+//	| Destination          | False                      |
+//	| Forwardable          | False                      |
+//	| Global               | False                      |
+//	| Reserved-by-Protocol | True                       |
+//	+----------------------+----------------------------+
+var IPv4CurrentNetworkSubnet = func() tcpip.Subnet {
+	subnet, err := tcpip.NewSubnet(IPv4Any, tcpip.MaskFrom("\xff\x00\x00\x00"))
 	if err != nil {
 		panic(err)
 	}
@@ -211,7 +245,7 @@ var IPv4EmptySubnet = func() tcpip.Subnet {
 
 // IPv4LoopbackSubnet is the loopback subnet for IPv4.
 var IPv4LoopbackSubnet = func() tcpip.Subnet {
-	subnet, err := tcpip.NewSubnet(tcpip.Address("\x7f\x00\x00\x00"), tcpip.AddressMask("\xff\x00\x00\x00"))
+	subnet, err := tcpip.NewSubnet(tcpip.AddrFrom4([4]byte{0x7f, 0x00, 0x00, 0x00}), tcpip.MaskFrom("\xff\x00\x00\x00"))
 	if err != nil {
 		panic(err)
 	}
@@ -301,18 +335,30 @@ func (b IPv4) TotalLength() uint16 {
 
 // Checksum returns the checksum field of the IPv4 header.
 func (b IPv4) Checksum() uint16 {
-	return binary.BigEndian.Uint16(b[checksum:])
+	return binary.BigEndian.Uint16(b[xsum:])
 }
 
 // SourceAddress returns the "source address" field of the IPv4 header.
 func (b IPv4) SourceAddress() tcpip.Address {
-	return tcpip.Address(b[srcAddr : srcAddr+IPv4AddressSize])
+	return tcpip.AddrFrom4([4]byte(b[srcAddr : srcAddr+IPv4AddressSize]))
 }
 
 // DestinationAddress returns the "destination address" field of the IPv4
 // header.
 func (b IPv4) DestinationAddress() tcpip.Address {
-	return tcpip.Address(b[dstAddr : dstAddr+IPv4AddressSize])
+	return tcpip.AddrFrom4([4]byte(b[dstAddr : dstAddr+IPv4AddressSize]))
+}
+
+// SourceAddressSlice returns the "source address" field of the IPv4 header as a
+// byte slice.
+func (b IPv4) SourceAddressSlice() []byte {
+	return []byte(b[srcAddr : srcAddr+IPv4AddressSize])
+}
+
+// DestinationAddressSlice returns the "destination address" field of the IPv4
+// header as a byte slice.
+func (b IPv4) DestinationAddressSlice() []byte {
+	return []byte(b[dstAddr : dstAddr+IPv4AddressSize])
 }
 
 // SetSourceAddressWithChecksumUpdate implements ChecksummableNetwork.
@@ -382,7 +428,7 @@ func (b IPv4) SetTotalLength(totalLength uint16) {
 
 // SetChecksum sets the checksum field of the IPv4 header.
 func (b IPv4) SetChecksum(v uint16) {
-	PutChecksum(b[checksum:], v)
+	checksum.Put(b[xsum:], v)
 }
 
 // SetFlagsFragmentOffset sets the "flags" and "fragment offset" fields of the
@@ -399,18 +445,18 @@ func (b IPv4) SetID(v uint16) {
 
 // SetSourceAddress sets the "source address" field of the IPv4 header.
 func (b IPv4) SetSourceAddress(addr tcpip.Address) {
-	copy(b[srcAddr:srcAddr+IPv4AddressSize], addr)
+	copy(b[srcAddr:srcAddr+IPv4AddressSize], addr.AsSlice())
 }
 
 // SetDestinationAddress sets the "destination address" field of the IPv4
 // header.
 func (b IPv4) SetDestinationAddress(addr tcpip.Address) {
-	copy(b[dstAddr:dstAddr+IPv4AddressSize], addr)
+	copy(b[dstAddr:dstAddr+IPv4AddressSize], addr.AsSlice())
 }
 
 // CalculateChecksum calculates the checksum of the IPv4 header.
 func (b IPv4) CalculateChecksum() uint16 {
-	return Checksum(b[:b.HeaderLength()], 0)
+	return checksum.Checksum(b[:b.HeaderLength()], 0)
 }
 
 // Encode encodes all the fields of the IPv4 header.
@@ -434,8 +480,8 @@ func (b IPv4) Encode(i *IPv4Fields) {
 	b[ttl] = i.TTL
 	b[protocol] = i.Protocol
 	b.SetChecksum(i.Checksum)
-	copy(b[srcAddr:srcAddr+IPv4AddressSize], i.SrcAddr)
-	copy(b[dstAddr:dstAddr+IPv4AddressSize], i.DstAddr)
+	copy(b[srcAddr:srcAddr+IPv4AddressSize], i.SrcAddr.AsSlice())
+	copy(b[dstAddr:dstAddr+IPv4AddressSize], i.DstAddr.AsSlice())
 }
 
 // EncodePartial updates the total length and checksum fields of IPv4 header,
@@ -444,8 +490,8 @@ func (b IPv4) Encode(i *IPv4Fields) {
 // packets are produced.
 func (b IPv4) EncodePartial(partialChecksum, totalLength uint16) {
 	b.SetTotalLength(totalLength)
-	checksum := Checksum(b[IPv4TotalLenOffset:IPv4TotalLenOffset+2], partialChecksum)
-	b.SetChecksum(^checksum)
+	xsum := checksum.Checksum(b[IPv4TotalLenOffset:IPv4TotalLenOffset+2], partialChecksum)
+	b.SetChecksum(^xsum)
 }
 
 // IsValid performs basic validation on the packet.
@@ -509,24 +555,26 @@ func (b IPv4) IsChecksumValid() bool {
 // address (range 224.0.0.0 to 239.255.255.255). The four most significant bits
 // will be 1110 = 0xe0.
 func IsV4MulticastAddress(addr tcpip.Address) bool {
-	if len(addr) != IPv4AddressSize {
+	if addr.BitLen() != IPv4AddressSizeBits {
 		return false
 	}
-	return (addr[0] & 0xf0) == 0xe0
+	addrBytes := addr.As4()
+	return (addrBytes[0] & 0xf0) == 0xe0
 }
 
 // IsV4LoopbackAddress determines if the provided address is an IPv4 loopback
 // address (belongs to 127.0.0.0/8 subnet). See RFC 1122 section 3.2.1.3.
 func IsV4LoopbackAddress(addr tcpip.Address) bool {
-	if len(addr) != IPv4AddressSize {
+	if addr.BitLen() != IPv4AddressSizeBits {
 		return false
 	}
-	return addr[0] == 0x7f
+	addrBytes := addr.As4()
+	return addrBytes[0] == 0x7f
 }
 
 // ========================= Options ==========================
 
-// An IPv4OptionType can hold the valuse for the Type in an IPv4 option.
+// An IPv4OptionType can hold the value for the Type in an IPv4 option.
 type IPv4OptionType byte
 
 // These constants are needed to identify individual options in the option list.
@@ -554,6 +602,9 @@ const (
 
 	// IPv4OptionTimestampType is the option type for the Timestamp option.
 	IPv4OptionTimestampType IPv4OptionType = 68
+
+	// IPv4OptionExperimentType is the option type for the Experiment option.
+	IPv4OptionExperimentType IPv4OptionType = 30
 
 	// ipv4OptionTypeOffset is the offset in an option of its type field.
 	ipv4OptionTypeOffset = 0
@@ -752,6 +803,17 @@ func (i *IPv4OptionIterator) Next() (IPv4Option, bool, *IPv4OptParameterProblem)
 		}
 		retval := IPv4OptionRouterAlert(optionBody)
 		return &retval, false, nil
+
+	case IPv4OptionExperimentType:
+		if optLen != IPv4OptionExperimentLength {
+			i.ErrCursor++
+			return nil, false, &IPv4OptParameterProblem{
+				Pointer:  i.ErrCursor,
+				NeedICMP: true,
+			}
+		}
+		retval := IPv4OptionExperiment(optionBody)
+		return &retval, false, nil
 	}
 	retval := IPv4OptionGeneric(optionBody)
 	return &retval, false, nil
@@ -903,13 +965,13 @@ func (ts *IPv4OptionTimestamp) UpdateTimestamp(addr tcpip.Address, clock tcpip.C
 		binary.BigEndian.PutUint32(slot, ipv4TimestampTime(clock))
 		(*ts)[IPv4OptTSPointerOffset] += IPv4OptionTimestampSize
 	case IPv4OptionTimestampWithIPFlag:
-		if n := copy(slot, addr); n != IPv4AddressSize {
+		if n := copy(slot, addr.AsSlice()); n != IPv4AddressSize {
 			panic(fmt.Sprintf("copied %d bytes, expected %d bytes", n, IPv4AddressSize))
 		}
 		binary.BigEndian.PutUint32(slot[IPv4AddressSize:], ipv4TimestampTime(clock))
 		(*ts)[IPv4OptTSPointerOffset] += IPv4OptionTimestampWithAddrSize
 	case IPv4OptionTimestampWithPredefinedIPFlag:
-		if tcpip.Address(slot[:IPv4AddressSize]) == addr {
+		if tcpip.AddrFrom4([4]byte(slot[:IPv4AddressSize])) == addr {
 			binary.BigEndian.PutUint32(slot[IPv4AddressSize:], ipv4TimestampTime(clock))
 			(*ts)[IPv4OptTSPointerOffset] += IPv4OptionTimestampWithAddrSize
 		}
@@ -961,7 +1023,7 @@ func (rr *IPv4OptionRecordRoute) Pointer() uint8 {
 func (rr *IPv4OptionRecordRoute) StoreAddress(addr tcpip.Address) {
 	start := rr.Pointer() - 1 // A one based number.
 	// start and room checked by caller.
-	if n := copy((*rr)[start:], addr); n != IPv4AddressSize {
+	if n := copy((*rr)[start:], addr.AsSlice()); n != IPv4AddressSize {
 		panic(fmt.Sprintf("copied %d bytes, expected %d bytes", n, IPv4AddressSize))
 	}
 	(*rr)[IPv4OptRRPointerOffset] += IPv4AddressSize
@@ -1024,6 +1086,35 @@ func (ra *IPv4OptionRouterAlert) Contents() []byte { return *ra }
 // Value returns the value of the IPv4OptionRouterAlert.
 func (ra *IPv4OptionRouterAlert) Value() uint16 {
 	return binary.BigEndian.Uint16(ra.Contents()[IPv4OptionRouterAlertValueOffset:])
+}
+
+// Experiment option specific related constants.
+const (
+	// IPv4OptionExperimentLength  is the length of an Experiment option.
+	IPv4OptionExperimentLength = 4
+
+	// IPv4OptionExperimentValueOffset is the offset for the value of an
+	// Experiment option.
+	IPv4OptionExperimentValueOffset = 2
+)
+
+var _ IPv4Option = (*IPv4OptionExperiment)(nil)
+
+// IPv4OptionExperiment is an IPv4 option defined by RFC 4727.
+type IPv4OptionExperiment []byte
+
+// Type implements IPv4Option.
+func (*IPv4OptionExperiment) Type() IPv4OptionType { return IPv4OptionExperimentType }
+
+// Size implements IPv4Option.
+func (*IPv4OptionExperiment) Size() uint8 { return uint8(IPv4OptionExperimentLength) }
+
+// Contents implements IPv4Option.
+func (ex *IPv4OptionExperiment) Contents() []byte { return *ex }
+
+// Value returns the value of the IPv4OptionRouterAlert.
+func (ex *IPv4OptionExperiment) Value() uint16 {
+	return binary.BigEndian.Uint16(ex.Contents()[IPv4OptionExperimentValueOffset:])
 }
 
 // IPv4SerializableOption is an interface to represent serializable IPv4 option
@@ -1104,9 +1195,7 @@ func (s IPv4OptionsSerializer) Serialize(b []byte) uint8 {
 	//  header ends on a 32 bit boundary. The padding is zero.
 	padded := padIPv4OptionsLength(total)
 	b = b[:padded-total]
-	for i := range b {
-		b[i] = 0
-	}
+	clear(b)
 	return padded
 }
 
@@ -1130,6 +1219,28 @@ func (*IPv4SerializableRouterAlertOption) length() uint8 {
 // SerializeInto implements IPv4SerializableOption.
 func (o *IPv4SerializableRouterAlertOption) serializeInto(buffer []byte) uint8 {
 	binary.BigEndian.PutUint16(buffer, IPv4OptionRouterAlertValue)
+	return o.length()
+}
+
+var _ IPv4SerializableOptionPayload = (*IPv4SerializableExperimentOption)(nil)
+var _ IPv4SerializableOption = (*IPv4SerializableExperimentOption)(nil)
+
+// IPv4SerializableExperimentOption provides serialization for the IPv4
+// Experiment option.
+type IPv4SerializableExperimentOption struct {
+	Tag uint16
+}
+
+func (*IPv4SerializableExperimentOption) optionType() IPv4OptionType {
+	return IPv4OptionExperimentType
+}
+
+func (*IPv4SerializableExperimentOption) length() uint8 {
+	return IPv4OptionExperimentLength - IPv4OptionExperimentValueOffset
+}
+
+func (o *IPv4SerializableExperimentOption) serializeInto(buffer []byte) uint8 {
+	binary.BigEndian.PutUint16(buffer, o.Tag)
 	return o.length()
 }
 

@@ -37,20 +37,12 @@ const (
 	defaultTCPInvalidRateLimit = 500 * time.Millisecond
 )
 
-// ReceiveBufferSizeOption is used by stack.(Stack*).Option/SetOption to
-// get/set the default, min and max receive buffer sizes.
-type ReceiveBufferSizeOption struct {
-	Min     int
-	Default int
-	Max     int
-}
-
 // TCPInvalidRateLimitOption is used by stack.(Stack*).Option/SetOption to get/set
 // stack.tcpInvalidRateLimit.
 type TCPInvalidRateLimitOption time.Duration
 
 // SetOption allows setting stack wide options.
-func (s *Stack) SetOption(option interface{}) tcpip.Error {
+func (s *Stack) SetOption(option any) tcpip.Error {
 	switch v := option.(type) {
 	case tcpip.SendBufferSizeOption:
 		// Make sure we don't allow lowering the buffer below minimum
@@ -99,7 +91,7 @@ func (s *Stack) SetOption(option interface{}) tcpip.Error {
 }
 
 // Option allows retrieving stack wide options.
-func (s *Stack) Option(option interface{}) tcpip.Error {
+func (s *Stack) Option(option any) tcpip.Error {
 	switch v := option.(type) {
 	case *tcpip.SendBufferSizeOption:
 		s.mu.RLock()

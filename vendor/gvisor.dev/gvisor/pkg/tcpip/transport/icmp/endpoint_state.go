@@ -15,12 +15,12 @@
 package icmp
 
 import (
-	"fmt"
+	"context"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
-	"gvisor.dev/gvisor/pkg/tcpip/transport"
 )
 
 // saveReceivedAt is invoked by stateify.
@@ -29,41 +29,34 @@ func (p *icmpPacket) saveReceivedAt() int64 {
 }
 
 // loadReceivedAt is invoked by stateify.
-func (p *icmpPacket) loadReceivedAt(nsec int64) {
+func (p *icmpPacket) loadReceivedAt(_ context.Context, nsec int64) {
 	p.receivedAt = time.Unix(0, nsec)
 }
 
 // afterLoad is invoked by stateify.
-func (e *endpoint) afterLoad() {
-	stack.StackFromEnv.RegisterRestoredEndpoint(e)
+func (e *endpoint) afterLoad(ctx context.Context) {
+	e.stack.RegisterRestoredEndpoint(e)
 }
 
 // beforeSave is invoked by stateify.
 func (e *endpoint) beforeSave() {
 	e.freeze()
+	e.stack.RegisterResumableEndpoint(e)
+}
+
+// Restore implements tcpip.RestoredEndpoint.Restore.
+func (e *endpoint) Restore(s *stack.Stack) {
+	if err := e.net.Resume(s); err != nil {
+		log.Warningf("Closing the ICMP endpoint as it cannot be restored, err: %v", err)
+		e.Close()
+		return
+	}
+
+	e.thaw()
+	e.ops.InitHandler(e, e.stack, tcpip.GetStackSendBufferLimits, tcpip.GetStackReceiveBufferLimits)
 }
 
 // Resume implements tcpip.ResumableEndpoint.Resume.
-func (e *endpoint) Resume(s *stack.Stack) {
+func (e *endpoint) Resume() {
 	e.thaw()
-
-	e.net.Resume(s)
-
-	e.stack = s
-	e.ops.InitHandler(e, e.stack, tcpip.GetStackSendBufferLimits, tcpip.GetStackReceiveBufferLimits)
-
-	switch state := e.net.State(); state {
-	case transport.DatagramEndpointStateInitial, transport.DatagramEndpointStateClosed:
-	case transport.DatagramEndpointStateBound, transport.DatagramEndpointStateConnected:
-		var err tcpip.Error
-		info := e.net.Info()
-		info.ID.LocalPort = e.ident
-		info.ID, err = e.registerWithStack(info.NetProto, info.ID)
-		if err != nil {
-			panic(fmt.Sprintf("e.registerWithStack(%d, %#v): %s", info.NetProto, info.ID, err))
-		}
-		e.ident = info.ID.LocalPort
-	default:
-		panic(fmt.Sprintf("unhandled state = %s", state))
-	}
 }

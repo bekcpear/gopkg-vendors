@@ -18,17 +18,19 @@ package ports
 
 import (
 	"math"
-	"math/rand"
 
-	"gvisor.dev/gvisor/pkg/atomicbitops"
+	"gvisor.dev/gvisor/pkg/rand"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
 const (
-	firstEphemeral               = 16000
-	anyIPAddress   tcpip.Address = ""
+	firstEphemeral = 16000
+)
+
+var (
+	anyIPAddress = tcpip.Address{}
 )
 
 // Reservation describes a port reservation.
@@ -63,12 +65,14 @@ func (rs Reservation) dst() destination {
 	}
 }
 
+// +stateify savable
 type portDescriptor struct {
 	network   tcpip.NetworkProtocolNumber
 	transport tcpip.TransportProtocolNumber
 	port      uint16
 }
 
+// +stateify savable
 type destination struct {
 	addr tcpip.Address
 	port uint16
@@ -212,26 +216,30 @@ func (ad addrToDevice) isAvailable(res Reservation, portSpecified bool) bool {
 }
 
 // PortManager manages allocating, reserving and releasing ports.
+//
+// +stateify savable
 type PortManager struct {
-	// mu protects allocatedPorts.
 	// LOCK ORDERING: mu > ephemeralMu.
-	mu sync.RWMutex
+	mu sync.RWMutex `state:"nosave"`
+
 	// allocatedPorts is a nesting of maps that ultimately map Reservations
 	// to FlagCounters describing whether the Reservation is valid and can
 	// be reused.
+	//
+	// mu also protects nested maps reached through allocatedPorts. Their
+	// helper receivers have no reference to this PortManager, so checklocks
+	// cannot express those helpers' owner-lock precondition.
+	//
+	// +checklocks:mu
 	allocatedPorts map[portDescriptor]addrToDevice
 
-	// ephemeralMu protects firstEphemeral and numEphemeral.
-	ephemeralMu    sync.RWMutex
-	firstEphemeral uint16
-	numEphemeral   uint16
+	ephemeralMu sync.RWMutex `state:"nosave"`
 
-	// hint is used to pick ports ephemeral ports in a stable order for
-	// a given port offset.
-	//
-	// hint must be accessed using the portHint/incPortHint helpers.
-	// TODO(gvisor.dev/issue/940): S/R this field.
-	hint atomicbitops.Uint32
+	// +checklocks:ephemeralMu
+	firstEphemeral uint16
+
+	// +checklocks:ephemeralMu
+	numEphemeral uint16
 }
 
 // NewPortManager creates new PortManager.
@@ -252,41 +260,18 @@ type PortTester func(port uint16) (good bool, err tcpip.Error)
 // possible ephemeral ports, allowing the caller to decide whether a given port
 // is suitable for its needs, and stopping when a port is found or an error
 // occurs.
-func (pm *PortManager) PickEphemeralPort(rng *rand.Rand, testPort PortTester) (port uint16, err tcpip.Error) {
+//
+// testPort is called synchronously without ephemeralMu held. Locks held by
+// the caller remain held during the callback.
+//
+// +checklocksexclude:pm.ephemeralMu
+func (pm *PortManager) PickEphemeralPort(rng rand.RNG, testPort PortTester) (port uint16, err tcpip.Error) {
 	pm.ephemeralMu.RLock()
 	firstEphemeral := pm.firstEphemeral
 	numEphemeral := pm.numEphemeral
 	pm.ephemeralMu.RUnlock()
 
-	offset := uint32(rng.Int31n(int32(numEphemeral)))
-	return pickEphemeralPort(offset, firstEphemeral, numEphemeral, testPort)
-}
-
-// portHint atomically reads and returns the pm.hint value.
-func (pm *PortManager) portHint() uint32 {
-	return pm.hint.Load()
-}
-
-// incPortHint atomically increments pm.hint by 1.
-func (pm *PortManager) incPortHint() {
-	pm.hint.Add(1)
-}
-
-// PickEphemeralPortStable starts at the specified offset + pm.portHint and
-// iterates over all ephemeral ports, allowing the caller to decide whether a
-// given port is suitable for its needs and stopping when a port is found or an
-// error occurs.
-func (pm *PortManager) PickEphemeralPortStable(offset uint32, testPort PortTester) (port uint16, err tcpip.Error) {
-	pm.ephemeralMu.RLock()
-	firstEphemeral := pm.firstEphemeral
-	numEphemeral := pm.numEphemeral
-	pm.ephemeralMu.RUnlock()
-
-	p, err := pickEphemeralPort(pm.portHint()+offset, firstEphemeral, numEphemeral, testPort)
-	if err == nil {
-		pm.incPortHint()
-	}
-	return p, err
+	return pickEphemeralPort(rng.Uint32(), firstEphemeral, numEphemeral, testPort)
 }
 
 // pickEphemeralPort starts at the offset specified from the FirstEphemeral port
@@ -294,6 +279,7 @@ func (pm *PortManager) PickEphemeralPortStable(offset uint32, testPort PortTeste
 // caller to decide whether a given port is suitable for its needs, and stopping
 // when a port is found or an error occurs.
 func pickEphemeralPort(offset uint32, first, count uint16, testPort PortTester) (port uint16, err tcpip.Error) {
+	// This implements Algorithm 1 as per RFC 6056 Section 3.3.1.
 	for i := uint32(0); i < uint32(count); i++ {
 		port := uint16(uint32(first) + (offset+i)%uint32(count))
 		ok, err := testPort(port)
@@ -317,7 +303,13 @@ func pickEphemeralPort(offset uint32, first, count uint16, testPort PortTester) 
 // An optional PortTester can be passed in which if provided will be used to
 // test if the picked port can be used. The function should return true if the
 // port is safe to use, false otherwise.
-func (pm *PortManager) ReservePort(rng *rand.Rand, res Reservation, testPort PortTester) (reservedPort uint16, err tcpip.Error) {
+//
+// testPort is called synchronously with pm.mu held and must not call methods
+// that acquire the same pm.mu.
+//
+// +checklocksexclude:pm.mu
+// +checklocksexclude:pm.ephemeralMu
+func (pm *PortManager) ReservePort(rng rand.RNG, res Reservation, testPort PortTester) (reservedPort uint16, err tcpip.Error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -341,20 +333,22 @@ func (pm *PortManager) ReservePort(rng *rand.Rand, res Reservation, testPort Por
 		return res.Port, nil
 	}
 
-	// A port wasn't specified, so try to find one.
+	// A port wasn't specified, so try to find one. PickEphemeralPort calls
+	// this callback synchronously with pm.mu still held, but checklocks
+	// analyzes passed callbacks without the caller's lock state.
 	return pm.PickEphemeralPort(rng, func(p uint16) (bool, tcpip.Error) {
 		res.Port = p
-		if !pm.reserveSpecificPortLocked(res, false /* portSpecified */) {
+		if !pm.reserveSpecificPortLocked(res, false /* portSpecified */) { // +checklocksignore
 			return false, nil
 		}
 		if testPort != nil {
 			ok, err := testPort(p)
 			if err != nil {
-				pm.releasePortLocked(res)
+				pm.releasePortLocked(res) // +checklocksignore
 				return false, err
 			}
 			if !ok {
-				pm.releasePortLocked(res)
+				pm.releasePortLocked(res) // +checklocksignore
 				return false, nil
 			}
 		}
@@ -364,6 +358,8 @@ func (pm *PortManager) ReservePort(rng *rand.Rand, res Reservation, testPort Por
 
 // reserveSpecificPortLocked tries to reserve the given port on all given
 // protocols.
+//
+// +checklocks:pm.mu
 func (pm *PortManager) reserveSpecificPortLocked(res Reservation, portSpecified bool) bool {
 	// Make sure the port is available.
 	for _, network := range res.Networks {
@@ -404,6 +400,8 @@ func (pm *PortManager) reserveSpecificPortLocked(res Reservation, portSpecified 
 }
 
 // ReserveTuple adds a port reservation for the tuple on all given protocol.
+//
+// +checklocksexclude:pm.mu
 func (pm *PortManager) ReserveTuple(res Reservation) bool {
 	flagBits := res.Flags.Bits()
 	dst := res.dst()
@@ -456,6 +454,8 @@ func (pm *PortManager) ReserveTuple(res Reservation) bool {
 
 // ReleasePort releases the reservation on a port/IP combination so that it can
 // be reserved by other endpoints.
+//
+// +checklocksexclude:pm.mu
 func (pm *PortManager) ReleasePort(res Reservation) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -463,6 +463,9 @@ func (pm *PortManager) ReleasePort(res Reservation) {
 	pm.releasePortLocked(res)
 }
 
+// releasePortLocked releases a reservation without dropping the caller's lock.
+//
+// +checklocks:pm.mu
 func (pm *PortManager) releasePortLocked(res Reservation) {
 	dst := res.dst()
 	for _, network := range res.Networks {
@@ -506,6 +509,8 @@ func (pm *PortManager) releasePortLocked(res Reservation) {
 
 // PortRange returns the UDP and TCP inclusive range of ephemeral ports used in
 // both IPv4 and IPv6.
+//
+// +checklocksexclude:pm.ephemeralMu
 func (pm *PortManager) PortRange() (uint16, uint16) {
 	pm.ephemeralMu.RLock()
 	defer pm.ephemeralMu.RUnlock()
@@ -514,6 +519,8 @@ func (pm *PortManager) PortRange() (uint16, uint16) {
 
 // SetPortRange sets the UDP and TCP IPv4 and IPv6 ephemeral port range
 // (inclusive).
+//
+// +checklocksexclude:pm.ephemeralMu
 func (pm *PortManager) SetPortRange(start uint16, end uint16) tcpip.Error {
 	if start > end {
 		return &tcpip.ErrInvalidPortRange{}

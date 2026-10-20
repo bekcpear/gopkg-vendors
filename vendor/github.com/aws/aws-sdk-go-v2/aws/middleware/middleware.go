@@ -43,7 +43,12 @@ func (r ClientRequestID) HandleBuild(ctx context.Context, in middleware.BuildInp
 }
 
 // RecordResponseTiming records the response timing for the SDK client requests.
-type RecordResponseTiming struct{}
+type RecordResponseTiming struct {
+	// DisableClockSkewCorrection suppresses recording of clock skew observed
+	// from the response, per the Clock Skew Correction SEP. Response timing is
+	// still recorded.
+	DisableClockSkewCorrection bool
+}
 
 // ID is the middleware identifier
 func (a *RecordResponseTiming) ID() string {
@@ -54,14 +59,17 @@ func (a *RecordResponseTiming) ID() string {
 func (a RecordResponseTiming) HandleDeserialize(ctx context.Context, in middleware.DeserializeInput, next middleware.DeserializeHandler) (
 	out middleware.DeserializeOutput, metadata middleware.Metadata, err error,
 ) {
+	requestAt := sdk.NowTime()
 	out, metadata, err = next.HandleDeserialize(ctx, in)
 	responseAt := sdk.NowTime()
 	setResponseAt(&metadata, responseAt)
 
 	var serverTime time.Time
+	var hasAgeHeader bool
 
 	switch resp := out.RawResponse.(type) {
 	case *smithyhttp.Response:
+		hasAgeHeader = len(resp.Header.Get("Age")) > 0
 		respDateHeader := resp.Header.Get("Date")
 		if len(respDateHeader) == 0 {
 			break
@@ -77,12 +85,43 @@ func (a RecordResponseTiming) HandleDeserialize(ctx context.Context, in middlewa
 		setServerTime(&metadata, serverTime)
 	}
 
-	if !serverTime.IsZero() {
-		attemptSkew := serverTime.Sub(responseAt)
-		setAttemptSkew(&metadata, attemptSkew)
+	if !a.DisableClockSkewCorrection {
+		if skew, ok := computeClockSkew(serverTime, requestAt, responseAt, hasAgeHeader); ok {
+			setAttemptSkew(&metadata, skew)
+		}
 	}
 
 	return out, metadata, err
+}
+
+// maxTrustedRequestDuration bounds how long a request may take before the SDK
+// discards the skew measurement derived from its response. A slower round trip
+// could only produce a signing failure if it pushed the timestamp outside the
+// SigV4 validity window. See the Clock Skew Correction SEP.
+const maxTrustedRequestDuration = 15 * time.Minute
+
+// computeClockSkew derives a clock skew candidate from a response per the Clock
+// Skew Correction SEP. It returns ok=false (no candidate) when the Date header
+// was absent/unparseable (serverTime zero), the round trip exceeded the maximum
+// trusted request duration, or the response was served from a cache (Age
+// header present). Otherwise the skew is the difference between the server's
+// Date and the midpoint of the request round trip.
+func computeClockSkew(serverTime, requestAt, responseAt time.Time, hasAgeHeader bool) (time.Duration, bool) {
+	if serverTime.IsZero() {
+		return 0, false
+	}
+
+	if hasAgeHeader {
+		return 0, false
+	}
+
+	elapsed := responseAt.Sub(requestAt)
+	if elapsed > maxTrustedRequestDuration {
+		return 0, false
+	}
+
+	midpoint := requestAt.Add(elapsed / 2)
+	return serverTime.Sub(midpoint), true
 }
 
 type responseAtKey struct{}
@@ -139,16 +178,16 @@ func AddRecordResponseTiming(stack *middleware.Stack) error {
 // raw response within the response metadata.
 type rawResponseKey struct{}
 
-// addRawResponse middleware adds raw response on to the metadata
-type addRawResponse struct{}
+// AddRawResponse middleware adds raw response on to the metadata
+type AddRawResponse struct{}
 
 // ID the identifier for the ClientRequestID
-func (m *addRawResponse) ID() string {
+func (m *AddRawResponse) ID() string {
 	return "AddRawResponseToMetadata"
 }
 
 // HandleDeserialize adds raw response on the middleware metadata
-func (m addRawResponse) HandleDeserialize(ctx context.Context, in middleware.DeserializeInput, next middleware.DeserializeHandler) (
+func (m AddRawResponse) HandleDeserialize(ctx context.Context, in middleware.DeserializeInput, next middleware.DeserializeHandler) (
 	out middleware.DeserializeOutput, metadata middleware.Metadata, err error,
 ) {
 	out, metadata, err = next.HandleDeserialize(ctx, in)
@@ -159,7 +198,7 @@ func (m addRawResponse) HandleDeserialize(ctx context.Context, in middleware.Des
 // AddRawResponseToMetadata adds middleware to the middleware stack that
 // store raw response on to the metadata.
 func AddRawResponseToMetadata(stack *middleware.Stack) error {
-	return stack.Deserialize.Add(&addRawResponse{}, middleware.Before)
+	return stack.Deserialize.Add(&AddRawResponse{}, middleware.Before)
 }
 
 // GetRawResponse returns raw response set on metadata

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/evanw/esbuild/internal/ast"
 	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/helpers"
 	"github.com/evanw/esbuild/internal/js_ast"
@@ -30,6 +31,11 @@ func (p *parser) skipTypeScriptBinding() {
 
 		// "[a, b]"
 		for p.lexer.Token != js_lexer.TCloseBracket {
+			// "[...a]"
+			if p.lexer.Token == js_lexer.TDotDotDot {
+				p.lexer.Next()
+			}
+
 			p.skipTypeScriptBinding()
 			if p.lexer.Token != js_lexer.TComma {
 				break
@@ -152,17 +158,24 @@ func (p *parser) skipTypeScriptParenOrFnType() {
 }
 
 func (p *parser) skipTypeScriptReturnType() {
-	p.skipTypeScriptTypeWithOpts(js_ast.LLowest, skipTypeOpts{isReturnType: true})
+	p.skipTypeScriptTypeWithFlags(js_ast.LLowest, isReturnTypeFlag)
 }
 
 func (p *parser) skipTypeScriptType(level js_ast.L) {
-	p.skipTypeScriptTypeWithOpts(level, skipTypeOpts{})
+	p.skipTypeScriptTypeWithFlags(level, 0)
 }
 
-type skipTypeOpts struct {
-	isReturnType     bool
-	isIndexSignature bool
-	allowTupleLabels bool
+type skipTypeFlags uint8
+
+const (
+	isReturnTypeFlag skipTypeFlags = 1 << iota
+	isIndexSignatureFlag
+	allowTupleLabelsFlag
+	disallowConditionalTypesFlag
+)
+
+func (flags skipTypeFlags) has(flag skipTypeFlags) bool {
+	return (flags & flag) != 0
 }
 
 type tsTypeIdentifierKind uint8
@@ -200,7 +213,7 @@ var tsTypeIdentifierMap = map[string]tsTypeIdentifierKind{
 	"infer": tsTypeIdentifierInfer,
 }
 
-func (p *parser) skipTypeScriptTypeWithOpts(level js_ast.L, opts skipTypeOpts) {
+func (p *parser) skipTypeScriptTypeWithFlags(level js_ast.L, flags skipTypeFlags) {
 loop:
 	for {
 		switch p.lexer.Token {
@@ -214,7 +227,7 @@ loop:
 			p.lexer.Next()
 
 			// "[const: number]"
-			if opts.allowTupleLabels && p.lexer.Token == js_lexer.TColon {
+			if flags.has(allowTupleLabelsFlag) && p.lexer.Token == js_lexer.TColon {
 				p.log.AddError(&p.tracker, r, "Unexpected \"const\"")
 			}
 
@@ -249,7 +262,8 @@ loop:
 			p.lexer.Next()
 
 			// "[import: number]"
-			if opts.allowTupleLabels && p.lexer.Token == js_lexer.TColon {
+			// "[import?: number]"
+			if flags.has(allowTupleLabelsFlag) && (p.lexer.Token == js_lexer.TColon || p.lexer.Token == js_lexer.TQuestion) {
 				return
 			}
 
@@ -275,16 +289,17 @@ loop:
 			p.lexer.Next()
 
 			// "[new: number]"
-			if opts.allowTupleLabels && p.lexer.Token == js_lexer.TColon {
+			// "[new?: number]"
+			if flags.has(allowTupleLabelsFlag) && (p.lexer.Token == js_lexer.TColon || p.lexer.Token == js_lexer.TQuestion) {
 				return
 			}
 
-			p.skipTypeScriptTypeParameters(typeParametersNormal)
+			p.skipTypeScriptTypeParameters(allowConstModifier)
 			p.skipTypeScriptParenOrFnType()
 
 		case js_lexer.TLessThan:
 			// "<T>() => Foo<T>"
-			p.skipTypeScriptTypeParameters(typeParametersNormal)
+			p.skipTypeScriptTypeParameters(allowConstModifier)
 			p.skipTypeScriptParenOrFnType()
 
 		case js_lexer.TOpenParen:
@@ -301,12 +316,15 @@ loop:
 
 				// Valid:
 				//   "[keyof: string]"
+				//   "[keyof?: string]"
 				//   "{[keyof: string]: number}"
+				//   "{[keyof in string]: number}"
 				//
 				// Invalid:
 				//   "A extends B ? keyof : string"
 				//
-				if p.lexer.Token != js_lexer.TColon || (!opts.isIndexSignature && !opts.allowTupleLabels) {
+				if (p.lexer.Token != js_lexer.TColon && p.lexer.Token != js_lexer.TQuestion && p.lexer.Token != js_lexer.TIn) ||
+					(!flags.has(isIndexSignatureFlag) && !flags.has(allowTupleLabelsFlag)) {
 					p.skipTypeScriptType(js_ast.LPrefix)
 				}
 				break loop
@@ -316,11 +334,15 @@ loop:
 
 				// "type Foo = Bar extends [infer T] ? T : null"
 				// "type Foo = Bar extends [infer T extends string] ? T : null"
-				if p.lexer.Token != js_lexer.TColon || (!opts.isIndexSignature && !opts.allowTupleLabels) {
+				// "type Foo = Bar extends [infer T extends string ? infer T : never] ? T : null"
+				// "type Foo = { [infer in Bar]: number }"
+				// "type Foo = [infer: number]"
+				// "type Foo = [infer?: number]"
+				if (p.lexer.Token != js_lexer.TColon && p.lexer.Token != js_lexer.TQuestion && p.lexer.Token != js_lexer.TIn) ||
+					(!flags.has(isIndexSignatureFlag) && !flags.has(allowTupleLabelsFlag)) {
 					p.lexer.Expect(js_lexer.TIdentifier)
 					if p.lexer.Token == js_lexer.TExtends {
-						p.lexer.Next()
-						p.skipTypeScriptType(js_ast.LPrefix)
+						p.trySkipTypeScriptConstraintOfInferTypeWithBacktracking(flags)
 					}
 				}
 				break loop
@@ -347,7 +369,7 @@ loop:
 
 				// "function assert(x: boolean): asserts x"
 				// "function assert(x: boolean): asserts x is boolean"
-				if opts.isReturnType && !p.lexer.HasNewlineBefore && (p.lexer.Token == js_lexer.TIdentifier || p.lexer.Token == js_lexer.TThis) {
+				if flags.has(isReturnTypeFlag) && !p.lexer.HasNewlineBefore && (p.lexer.Token == js_lexer.TIdentifier || p.lexer.Token == js_lexer.TThis) {
 					p.lexer.Next()
 				}
 
@@ -368,14 +390,15 @@ loop:
 
 			// "let foo: any \n <number>foo" must not become a single type
 			if checkTypeParameters && !p.lexer.HasNewlineBefore {
-				p.skipTypeScriptTypeArguments(false /* isInsideJSXElement */)
+				p.skipTypeScriptTypeArguments(skipTypeScriptTypeArgumentsOpts{})
 			}
 
 		case js_lexer.TTypeof:
 			p.lexer.Next()
 
 			// "[typeof: number]"
-			if opts.allowTupleLabels && p.lexer.Token == js_lexer.TColon {
+			// "[typeof?: number]"
+			if flags.has(allowTupleLabelsFlag) && (p.lexer.Token == js_lexer.TColon || p.lexer.Token == js_lexer.TQuestion) {
 				return
 			}
 
@@ -400,7 +423,7 @@ loop:
 				}
 
 				if !p.lexer.HasNewlineBefore {
-					p.skipTypeScriptTypeArguments(false /* isInsideJSXElement */)
+					p.skipTypeScriptTypeArguments(skipTypeScriptTypeArgumentsOpts{})
 				}
 			}
 
@@ -412,7 +435,7 @@ loop:
 				if p.lexer.Token == js_lexer.TDotDotDot {
 					p.lexer.Next()
 				}
-				p.skipTypeScriptTypeWithOpts(js_ast.LLowest, skipTypeOpts{allowTupleLabels: true})
+				p.skipTypeScriptTypeWithFlags(js_ast.LLowest, allowTupleLabelsFlag)
 				if p.lexer.Token == js_lexer.TQuestion {
 					p.lexer.Next()
 				}
@@ -444,12 +467,13 @@ loop:
 
 		default:
 			// "[function: number]"
-			if opts.allowTupleLabels && p.lexer.IsIdentifierOrKeyword() {
+			// "[function?: number]"
+			if flags.has(allowTupleLabelsFlag) && p.lexer.IsIdentifierOrKeyword() {
 				if p.lexer.Token != js_lexer.TFunction {
 					p.log.AddError(&p.tracker, p.lexer.Range(), fmt.Sprintf("Unexpected %q", p.lexer.Raw()))
 				}
 				p.lexer.Next()
-				if p.lexer.Token != js_lexer.TColon {
+				if p.lexer.Token != js_lexer.TColon && p.lexer.Token != js_lexer.TQuestion {
 					p.lexer.Expect(js_lexer.TColon)
 				}
 				return
@@ -467,14 +491,14 @@ loop:
 				return
 			}
 			p.lexer.Next()
-			p.skipTypeScriptType(js_ast.LBitwiseOr)
+			p.skipTypeScriptTypeWithFlags(js_ast.LBitwiseOr, flags)
 
 		case js_lexer.TAmpersand:
 			if level >= js_ast.LBitwiseAnd {
 				return
 			}
 			p.lexer.Next()
-			p.skipTypeScriptType(js_ast.LBitwiseAnd)
+			p.skipTypeScriptTypeWithFlags(js_ast.LBitwiseAnd, flags)
 
 		case js_lexer.TExclamation:
 			// A postfix "!" is allowed in JSDoc types in TypeScript, which are only
@@ -496,7 +520,7 @@ loop:
 
 			// "{ <A extends B>(): c.d \n <E extends F>(): g.h }" must not become a single type
 			if !p.lexer.HasNewlineBefore {
-				p.skipTypeScriptTypeArguments(false /* isInsideJSXElement */)
+				p.skipTypeScriptTypeArguments(skipTypeScriptTypeArgumentsOpts{})
 			}
 
 		case js_lexer.TOpenBracket:
@@ -512,13 +536,13 @@ loop:
 
 		case js_lexer.TExtends:
 			// "{ x: number \n extends: boolean }" must not become a single type
-			if p.lexer.HasNewlineBefore || level >= js_ast.LConditional {
+			if p.lexer.HasNewlineBefore || flags.has(disallowConditionalTypesFlag) {
 				return
 			}
 			p.lexer.Next()
 
 			// The type following "extends" is not permitted to be another conditional type
-			p.skipTypeScriptType(js_ast.LConditional)
+			p.skipTypeScriptTypeWithFlags(js_ast.LLowest, disallowConditionalTypesFlag)
 			p.lexer.Expect(js_lexer.TQuestion)
 			p.skipTypeScriptType(js_ast.LLowest)
 			p.lexer.Expect(js_lexer.TColon)
@@ -552,7 +576,7 @@ func (p *parser) skipTypeScriptObjectType() {
 		if p.lexer.Token == js_lexer.TOpenBracket {
 			// Index signature or computed property
 			p.lexer.Next()
-			p.skipTypeScriptTypeWithOpts(js_ast.LLowest, skipTypeOpts{isIndexSignature: true})
+			p.skipTypeScriptTypeWithFlags(js_ast.LLowest, isIndexSignatureFlag)
 
 			// "{ [key: string]: number }"
 			// "{ readonly [K in keyof T]: T[K] }"
@@ -587,7 +611,7 @@ func (p *parser) skipTypeScriptObjectType() {
 		}
 
 		// Type parameters come right after the optional mark
-		p.skipTypeScriptTypeParameters(typeParametersNormal)
+		p.skipTypeScriptTypeParameters(allowConstModifier)
 
 		switch p.lexer.Token {
 		case js_lexer.TColon:
@@ -628,106 +652,152 @@ func (p *parser) skipTypeScriptObjectType() {
 	p.lexer.Expect(js_lexer.TCloseBrace)
 }
 
-type typeParameters uint8
+type typeParameterFlags uint8
 
 const (
-	typeParametersNormal typeParameters = iota
-	typeParametersWithInOutVarianceAnnotations
+	// TypeScript 4.7
+	allowInOutVarianceAnnotations typeParameterFlags = 1 << iota
+
+	// TypeScript 5.0
+	allowConstModifier
+
+	// Allow "<>" without any type parameters
+	allowEmptyTypeParameters
+)
+
+type skipTypeScriptTypeParametersResult uint8
+
+const (
+	didNotSkipAnything skipTypeScriptTypeParametersResult = iota
+	couldBeTypeCast
+	definitelyTypeParameters
 )
 
 // This is the type parameter declarations that go with other symbol
 // declarations (class, function, type, etc.)
-func (p *parser) skipTypeScriptTypeParameters(mode typeParameters) {
-	if p.lexer.Token == js_lexer.TLessThan {
+func (p *parser) skipTypeScriptTypeParameters(flags typeParameterFlags) skipTypeScriptTypeParametersResult {
+	if p.lexer.Token != js_lexer.TLessThan {
+		return didNotSkipAnything
+	}
+
+	p.lexer.Next()
+	result := couldBeTypeCast
+
+	if (flags&allowEmptyTypeParameters) != 0 && p.lexer.Token == js_lexer.TGreaterThan {
 		p.lexer.Next()
+		return definitelyTypeParameters
+	}
 
+	for {
+		hasIn := false
+		hasOut := false
+		expectIdentifier := true
+		invalidModifierRange := logger.Range{}
+
+		// Scan over a sequence of "in" and "out" modifiers (a.k.a. optional
+		// variance annotations) as well as "const" modifiers
 		for {
-			hasIn := false
-			hasOut := false
-			expectIdentifier := true
-			invalidModifierRange := logger.Range{}
-
-			// Scan over a sequence of "in" and "out" modifiers (a.k.a. optional variance annotations)
-			for {
-				if p.lexer.Token == js_lexer.TIn {
-					if invalidModifierRange.Len == 0 && (mode != typeParametersWithInOutVarianceAnnotations || hasIn || hasOut) {
-						// Valid:
-						//   "type Foo<in T> = T"
-						// Invalid:
-						//   "type Foo<in in T> = T"
-						//   "type Foo<out in T> = T"
-						invalidModifierRange = p.lexer.Range()
-					}
-					p.lexer.Next()
-					hasIn = true
-					expectIdentifier = true
-					continue
+			if p.lexer.Token == js_lexer.TConst {
+				if invalidModifierRange.Len == 0 && (flags&allowConstModifier) == 0 {
+					// Valid:
+					//   "class Foo<const T> {}"
+					// Invalid:
+					//   "interface Foo<const T> {}"
+					invalidModifierRange = p.lexer.Range()
 				}
+				result = definitelyTypeParameters
+				p.lexer.Next()
+				expectIdentifier = true
+				continue
+			}
 
-				if p.lexer.IsContextualKeyword("out") {
-					r := p.lexer.Range()
-					if invalidModifierRange.Len == 0 && mode != typeParametersWithInOutVarianceAnnotations {
-						invalidModifierRange = r
-					}
-					p.lexer.Next()
-					if invalidModifierRange.Len == 0 && hasOut && (p.lexer.Token == js_lexer.TIn || p.lexer.Token == js_lexer.TIdentifier) {
-						// Valid:
-						//   "type Foo<out T> = T"
-						//   "type Foo<out out> = T"
-						//   "type Foo<out out, T> = T"
-						//   "type Foo<out out = T> = T"
-						//   "type Foo<out out extends T> = T"
-						// Invalid:
-						//   "type Foo<out out in T> = T"
-						//   "type Foo<out out T> = T"
-						invalidModifierRange = r
-					}
-					hasOut = true
-					expectIdentifier = false
-					continue
+			if p.lexer.Token == js_lexer.TIn {
+				if invalidModifierRange.Len == 0 && ((flags&allowInOutVarianceAnnotations) == 0 || hasIn || hasOut) {
+					// Valid:
+					//   "type Foo<in T> = T"
+					// Invalid:
+					//   "type Foo<in in T> = T"
+					//   "type Foo<out in T> = T"
+					invalidModifierRange = p.lexer.Range()
 				}
-
-				break
-			}
-
-			// Only report an error for the first invalid modifier
-			if invalidModifierRange.Len > 0 {
-				p.log.AddError(&p.tracker, invalidModifierRange, fmt.Sprintf(
-					"The modifier %q is not valid here:", p.source.TextForRange(invalidModifierRange)))
-			}
-
-			// expectIdentifier => Mandatory identifier (e.g. after "type Foo <in ___")
-			// !expectIdentifier => Optional identifier (e.g. after "type Foo <out ___" since "out" may be the identifier)
-			if expectIdentifier || p.lexer.Token == js_lexer.TIdentifier {
-				p.lexer.Expect(js_lexer.TIdentifier)
-			}
-
-			// "class Foo<T extends number> {}"
-			if p.lexer.Token == js_lexer.TExtends {
 				p.lexer.Next()
-				p.skipTypeScriptType(js_ast.LLowest)
+				hasIn = true
+				expectIdentifier = true
+				continue
 			}
 
-			// "class Foo<T = void> {}"
-			if p.lexer.Token == js_lexer.TEquals {
+			if p.lexer.IsContextualKeyword("out") {
+				r := p.lexer.Range()
+				if invalidModifierRange.Len == 0 && (flags&allowInOutVarianceAnnotations) == 0 {
+					invalidModifierRange = r
+				}
 				p.lexer.Next()
-				p.skipTypeScriptType(js_ast.LLowest)
+				if invalidModifierRange.Len == 0 && hasOut && (p.lexer.Token == js_lexer.TIn || p.lexer.Token == js_lexer.TIdentifier) {
+					// Valid:
+					//   "type Foo<out T> = T"
+					//   "type Foo<out out> = T"
+					//   "type Foo<out out, T> = T"
+					//   "type Foo<out out = T> = T"
+					//   "type Foo<out out extends T> = T"
+					// Invalid:
+					//   "type Foo<out out in T> = T"
+					//   "type Foo<out out T> = T"
+					invalidModifierRange = r
+				}
+				hasOut = true
+				expectIdentifier = false
+				continue
 			}
 
-			if p.lexer.Token != js_lexer.TComma {
-				break
-			}
-			p.lexer.Next()
-			if p.lexer.Token == js_lexer.TGreaterThan {
-				break
-			}
+			break
 		}
 
-		p.lexer.ExpectGreaterThan(false /* isInsideJSXElement */)
+		// Only report an error for the first invalid modifier
+		if invalidModifierRange.Len > 0 {
+			p.log.AddError(&p.tracker, invalidModifierRange, fmt.Sprintf(
+				"The modifier %q is not valid here:", p.source.TextForRange(invalidModifierRange)))
+		}
+
+		// expectIdentifier => Mandatory identifier (e.g. after "type Foo <in ___")
+		// !expectIdentifier => Optional identifier (e.g. after "type Foo <out ___" since "out" may be the identifier)
+		if expectIdentifier || p.lexer.Token == js_lexer.TIdentifier {
+			p.lexer.Expect(js_lexer.TIdentifier)
+		}
+
+		// "class Foo<T extends number> {}"
+		if p.lexer.Token == js_lexer.TExtends {
+			result = definitelyTypeParameters
+			p.lexer.Next()
+			p.skipTypeScriptType(js_ast.LLowest)
+		}
+
+		// "class Foo<T = void> {}"
+		if p.lexer.Token == js_lexer.TEquals {
+			result = definitelyTypeParameters
+			p.lexer.Next()
+			p.skipTypeScriptType(js_ast.LLowest)
+		}
+
+		if p.lexer.Token != js_lexer.TComma {
+			break
+		}
+		p.lexer.Next()
+		if p.lexer.Token == js_lexer.TGreaterThan {
+			result = definitelyTypeParameters
+			break
+		}
 	}
+
+	p.lexer.ExpectGreaterThan(false /* isInsideJSXElement */)
+	return result
 }
 
-func (p *parser) skipTypeScriptTypeArguments(isInsideJSXElement bool) bool {
+type skipTypeScriptTypeArgumentsOpts struct {
+	isInsideJSXElement               bool
+	isParseTypeArgumentsInExpression bool
+}
+
+func (p *parser) skipTypeScriptTypeArguments(opts skipTypeScriptTypeArgumentsOpts) bool {
 	switch p.lexer.Token {
 	case js_lexer.TLessThan, js_lexer.TLessThanEquals,
 		js_lexer.TLessThanLessThan, js_lexer.TLessThanLessThanEquals:
@@ -746,11 +816,31 @@ func (p *parser) skipTypeScriptTypeArguments(isInsideJSXElement bool) bool {
 	}
 
 	// This type argument list must end with a ">"
-	p.lexer.ExpectGreaterThan(isInsideJSXElement)
+	if !opts.isParseTypeArgumentsInExpression {
+		// Normally TypeScript allows any token starting with ">". For example,
+		// "Array<Array<number>>()" is a type argument list even though there's a
+		// ">>" token, because ">>" starts with ">".
+		p.lexer.ExpectGreaterThan(opts.isInsideJSXElement)
+	} else {
+		// However, if we're emulating the TypeScript compiler's function called
+		// "parseTypeArgumentsInExpression" function, then we must only allow the
+		// ">" token itself. For example, "x < y >= z" is not a type argument list.
+		//
+		// This doesn't detect ">>" in "Array<Array<number>>()" because the inner
+		// type argument list isn't a call to "parseTypeArgumentsInExpression"
+		// because it's within a type context, not an expression context. So the
+		// token that we see here is ">" in that case because the first ">" has
+		// already been stripped off of the ">>" by the inner call.
+		if opts.isInsideJSXElement {
+			p.lexer.ExpectInsideJSXElement(js_lexer.TGreaterThan)
+		} else {
+			p.lexer.Expect(js_lexer.TGreaterThan)
+		}
+	}
 	return true
 }
 
-func (p *parser) trySkipTypeScriptTypeArgumentsWithBacktracking() bool {
+func (p *parser) trySkipTypeArgumentsInExpressionWithBacktracking() bool {
 	oldLexer := p.lexer
 	p.lexer.IsLogDisabled = true
 
@@ -764,9 +854,9 @@ func (p *parser) trySkipTypeScriptTypeArgumentsWithBacktracking() bool {
 		}
 	}()
 
-	if p.skipTypeScriptTypeArguments(false /* isInsideJSXElement */) {
+	if p.skipTypeScriptTypeArguments(skipTypeScriptTypeArgumentsOpts{isParseTypeArgumentsInExpression: true}) {
 		// Check the token after the type argument list and backtrack if it's invalid
-		if !p.canFollowTypeArgumentsInExpression() {
+		if !p.tsCanFollowTypeArgumentsInExpression() {
 			p.lexer.Unexpected()
 		}
 	}
@@ -777,7 +867,7 @@ func (p *parser) trySkipTypeScriptTypeArgumentsWithBacktracking() bool {
 	return true
 }
 
-func (p *parser) trySkipTypeScriptTypeParametersThenOpenParenWithBacktracking() bool {
+func (p *parser) trySkipTypeScriptTypeParametersThenOpenParenWithBacktracking() skipTypeScriptTypeParametersResult {
 	oldLexer := p.lexer
 	p.lexer.IsLogDisabled = true
 
@@ -791,7 +881,7 @@ func (p *parser) trySkipTypeScriptTypeParametersThenOpenParenWithBacktracking() 
 		}
 	}()
 
-	p.skipTypeScriptTypeParameters(typeParametersNormal)
+	result := p.skipTypeScriptTypeParameters(allowConstModifier)
 	if p.lexer.Token != js_lexer.TOpenParen {
 		p.lexer.Unexpected()
 	}
@@ -799,7 +889,7 @@ func (p *parser) trySkipTypeScriptTypeParametersThenOpenParenWithBacktracking() 
 	// Restore the log disabled flag. Note that we can't just set it back to false
 	// because it may have been true to start with.
 	p.lexer.IsLogDisabled = oldLexer.IsLogDisabled
-	return true
+	return result
 }
 
 func (p *parser) trySkipTypeScriptArrowReturnTypeWithBacktracking() bool {
@@ -830,6 +920,84 @@ func (p *parser) trySkipTypeScriptArrowReturnTypeWithBacktracking() bool {
 	return true
 }
 
+// This is a very specific function that determines whether a colon token is a
+// TypeScript arrow function return type in the case where the arrow function
+// is the middle expression of a JavaScript ternary operator (i.e. is between
+// the "?" and ":" tokens). It's separate from the other function above called
+// "trySkipTypeScriptArrowReturnTypeWithBacktracking" because it's much more
+// expensive, and likely not as robust.
+func (originalParser *parser) isTypeScriptArrowReturnTypeAfterQuestionAndBeforeColon(await awaitOrYield) bool {
+	// Implement "backtracking" by swallowing lexer errors on a temporary parser
+	defer func() {
+		r := recover()
+		if _, isLexerPanic := r.(js_lexer.LexerPanic); isLexerPanic {
+			return // Swallow this error
+		} else if r != nil {
+			panic(r)
+		}
+	}()
+
+	// THIS IS A GROSS HACK. Some context:
+	//
+	// JavaScript is designed to not require a backtracking parser. Generally a
+	// backtracking parser is not regarded as a good thing and you try to avoid
+	// having one if it's not necessary.
+	//
+	// However, TypeScript's parser does do backtracking in an (admittedly noble)
+	// effort to retrofit nice type syntax onto JavaScript. Up until this edge
+	// case was discovered, this backtracking was limited to type syntax so
+	// esbuild could deal with it by using a backtracking lexer without needing a
+	// backtracking parser.
+	//
+	// This edge case requires a backtracking parser. The TypeScript compiler's
+	// algorithm for parsing this is to try to parse the entire arrow function
+	// body and then reset all the way back to the colon for the arrow function
+	// return type if the token following the arrow function body is not another
+	// colon. For example:
+	//
+	//   x = a ? (b) : c => d;
+	//   y = a ? (b) : c => d : e;
+	//
+	// The first colon of "x" pairs with the "?" because the arrow function
+	// "(b) : c => d" is not followed by a colon. However, the first colon of "y"
+	// starts a return type because the arrow function "(b) : c => d" is followed
+	// by a colon. In other words, the first ":" before the arrow function body
+	// must pair with the "?" unless there is another ":" to pair with it after
+	// the function body.
+	//
+	// I'm not going to rewrite esbuild's parser to support backtracking for this
+	// one edge case. So instead, esbuild tries to parse the arrow function body
+	// using a rough copy of the parser and then always throws the result away.
+	// So arrow function bodies will always be parsed twice for this edge case.
+	//
+	// This is a hack instead of a good solution because the parser isn't designed
+	// for this, and doing this is not going to have good test coverage given that
+	// it's an edge case. We can't prevent parser code (either currently or in the
+	// future) from accidentally depending on some parser state that isn't cloned
+	// here. That could result in a parser panic when parsing a more complex
+	// version of this edge case.
+	p := newParser(logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug, nil), originalParser.source, originalParser.lexer, &originalParser.options)
+
+	// Clone all state that the parser needs to parse this arrow function body
+	p.allowIn = originalParser.allowIn
+	p.lexer.IsLogDisabled = true
+	p.pushScopeForParsePass(js_ast.ScopeEntry, logger.Loc{Start: 0})
+	p.pushScopeForParsePass(js_ast.ScopeFunctionArgs, logger.Loc{Start: 1})
+
+	// Parse the return type
+	p.lexer.Expect(js_lexer.TColon)
+	p.skipTypeScriptReturnType()
+
+	// Parse the body and throw it out (with the side effect of maybe throwing an error)
+	_ = p.parseArrowBody([]js_ast.Arg{}, fnOrArrowDataParse{await: await})
+
+	// There must be a colon following the arrow function body to pair with the leading "?"
+	p.lexer.Expect(js_lexer.TColon)
+
+	// Parsing was successful if we get here
+	return true
+}
+
 func (p *parser) trySkipTypeScriptArrowArgsWithBacktracking() bool {
 	oldLexer := p.lexer
 	p.lexer.IsLogDisabled = true
@@ -853,6 +1021,32 @@ func (p *parser) trySkipTypeScriptArrowArgsWithBacktracking() bool {
 	return true
 }
 
+func (p *parser) trySkipTypeScriptConstraintOfInferTypeWithBacktracking(flags skipTypeFlags) bool {
+	oldLexer := p.lexer
+	p.lexer.IsLogDisabled = true
+
+	// Implement backtracking by restoring the lexer's memory to its original state
+	defer func() {
+		r := recover()
+		if _, isLexerPanic := r.(js_lexer.LexerPanic); isLexerPanic {
+			p.lexer = oldLexer
+		} else if r != nil {
+			panic(r)
+		}
+	}()
+
+	p.lexer.Expect(js_lexer.TExtends)
+	p.skipTypeScriptTypeWithFlags(js_ast.LPrefix, disallowConditionalTypesFlag)
+	if !flags.has(disallowConditionalTypesFlag) && p.lexer.Token == js_lexer.TQuestion {
+		p.lexer.Unexpected()
+	}
+
+	// Restore the log disabled flag. Note that we can't just set it back to false
+	// because it may have been true to start with.
+	p.lexer.IsLogDisabled = oldLexer.IsLogDisabled
+	return true
+}
+
 // Returns true if the current less-than token is considered to be an arrow
 // function under TypeScript's rules for files containing JSX syntax
 func (p *parser) isTSArrowFnJSX() (isTSArrowFn bool) {
@@ -860,13 +1054,16 @@ func (p *parser) isTSArrowFnJSX() (isTSArrowFn bool) {
 	p.lexer.Next()
 
 	// Look ahead to see if this should be an arrow function instead
+	if p.lexer.Token == js_lexer.TConst {
+		p.lexer.Next()
+	}
 	if p.lexer.Token == js_lexer.TIdentifier {
 		p.lexer.Next()
 		if p.lexer.Token == js_lexer.TComma || p.lexer.Token == js_lexer.TEquals {
 			isTSArrowFn = true
 		} else if p.lexer.Token == js_lexer.TExtends {
 			p.lexer.Next()
-			isTSArrowFn = p.lexer.Token != js_lexer.TEquals && p.lexer.Token != js_lexer.TGreaterThan
+			isTSArrowFn = p.lexer.Token != js_lexer.TEquals && p.lexer.Token != js_lexer.TGreaterThan && p.lexer.Token != js_lexer.TSlash
 		}
 	}
 
@@ -875,7 +1072,168 @@ func (p *parser) isTSArrowFnJSX() (isTSArrowFn bool) {
 	return
 }
 
-func (p *parser) nextTokenIsOpenParenOrLessThanOrDot() (result bool) {
+// This function is taken from the official TypeScript compiler source code:
+// https://github.com/microsoft/TypeScript/blob/master/src/compiler/parser.ts
+//
+// This function is pretty inefficient as written, and could be collapsed into
+// a single switch statement. But that would make it harder to keep this in
+// sync with the TypeScript compiler's source code, so we keep doing it the
+// slow way.
+func (p *parser) tsCanFollowTypeArgumentsInExpression() bool {
+	switch p.lexer.Token {
+	case
+		// These tokens can follow a type argument list in a call expression.
+		js_lexer.TOpenParen,                     // foo<x>(
+		js_lexer.TNoSubstitutionTemplateLiteral, // foo<T> `...`
+		js_lexer.TTemplateHead:                  // foo<T> `...${100}...`
+		return true
+
+	// A type argument list followed by `<` never makes sense, and a type argument list followed
+	// by `>` is ambiguous with a (re-scanned) `>>` operator, so we disqualify both. Also, in
+	// this context, `+` and `-` are unary operators, not binary operators.
+	case js_lexer.TLessThan,
+		js_lexer.TGreaterThan,
+		js_lexer.TPlus,
+		js_lexer.TMinus,
+		// TypeScript always sees "TGreaterThan" instead of these tokens since
+		// their scanner works a little differently than our lexer. So since
+		// "TGreaterThan" is forbidden above, we also forbid these too.
+		js_lexer.TGreaterThanEquals,
+		js_lexer.TGreaterThanGreaterThan,
+		js_lexer.TGreaterThanGreaterThanEquals,
+		js_lexer.TGreaterThanGreaterThanGreaterThan,
+		js_lexer.TGreaterThanGreaterThanGreaterThanEquals:
+		return false
+	}
+
+	// We favor the type argument list interpretation when it is immediately followed by
+	// a line break, a binary operator, or something that can't start an expression.
+	return p.lexer.HasNewlineBefore || p.tsIsBinaryOperator() || !p.tsIsStartOfExpression()
+}
+
+// This function is taken from the official TypeScript compiler source code:
+// https://github.com/microsoft/TypeScript/blob/master/src/compiler/parser.ts
+func (p *parser) tsIsBinaryOperator() bool {
+	switch p.lexer.Token {
+	case js_lexer.TIn:
+		return p.allowIn
+
+	case
+		js_lexer.TQuestionQuestion,
+		js_lexer.TBarBar,
+		js_lexer.TAmpersandAmpersand,
+		js_lexer.TBar,
+		js_lexer.TCaret,
+		js_lexer.TAmpersand,
+		js_lexer.TEqualsEquals,
+		js_lexer.TExclamationEquals,
+		js_lexer.TEqualsEqualsEquals,
+		js_lexer.TExclamationEqualsEquals,
+		js_lexer.TLessThan,
+		js_lexer.TGreaterThan,
+		js_lexer.TLessThanEquals,
+		js_lexer.TGreaterThanEquals,
+		js_lexer.TInstanceof,
+		js_lexer.TLessThanLessThan,
+		js_lexer.TGreaterThanGreaterThan,
+		js_lexer.TGreaterThanGreaterThanGreaterThan,
+		js_lexer.TPlus,
+		js_lexer.TMinus,
+		js_lexer.TAsterisk,
+		js_lexer.TSlash,
+		js_lexer.TPercent,
+		js_lexer.TAsteriskAsterisk:
+		return true
+
+	case js_lexer.TIdentifier:
+		if p.lexer.IsContextualKeyword("as") || p.lexer.IsContextualKeyword("satisfies") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// This function is taken from the official TypeScript compiler source code:
+// https://github.com/microsoft/TypeScript/blob/master/src/compiler/parser.ts
+func (p *parser) tsIsStartOfExpression() bool {
+	if p.tsIsStartOfLeftHandSideExpression() {
+		return true
+	}
+
+	switch p.lexer.Token {
+	case
+		js_lexer.TPlus,
+		js_lexer.TMinus,
+		js_lexer.TTilde,
+		js_lexer.TExclamation,
+		js_lexer.TDelete,
+		js_lexer.TTypeof,
+		js_lexer.TVoid,
+		js_lexer.TPlusPlus,
+		js_lexer.TMinusMinus,
+		js_lexer.TLessThan,
+		js_lexer.TPrivateIdentifier,
+		js_lexer.TAt:
+		return true
+
+	default:
+		if p.lexer.Token == js_lexer.TIdentifier && (p.lexer.Identifier.String == "await" || p.lexer.Identifier.String == "yield") {
+			// Yield/await always starts an expression.  Either it is an identifier (in which case
+			// it is definitely an expression).  Or it's a keyword (either because we're in
+			// a generator or async function, or in strict mode (or both)) and it started a yield or await expression.
+			return true
+		}
+
+		// Error tolerance.  If we see the start of some binary operator, we consider
+		// that the start of an expression.  That way we'll parse out a missing identifier,
+		// give a good message about an identifier being missing, and then consume the
+		// rest of the binary expression.
+		if p.tsIsBinaryOperator() {
+			return true
+		}
+
+		return p.tsIsIdentifier()
+	}
+}
+
+// This function is taken from the official TypeScript compiler source code:
+// https://github.com/microsoft/TypeScript/blob/master/src/compiler/parser.ts
+func (p *parser) tsIsStartOfLeftHandSideExpression() bool {
+	switch p.lexer.Token {
+	case
+		js_lexer.TThis,
+		js_lexer.TSuper,
+		js_lexer.TNull,
+		js_lexer.TTrue,
+		js_lexer.TFalse,
+		js_lexer.TNumericLiteral,
+		js_lexer.TBigIntegerLiteral,
+		js_lexer.TStringLiteral,
+		js_lexer.TNoSubstitutionTemplateLiteral,
+		js_lexer.TTemplateHead,
+		js_lexer.TOpenParen,
+		js_lexer.TOpenBracket,
+		js_lexer.TOpenBrace,
+		js_lexer.TFunction,
+		js_lexer.TClass,
+		js_lexer.TNew,
+		js_lexer.TSlash,
+		js_lexer.TSlashEquals,
+		js_lexer.TIdentifier:
+		return true
+
+	case js_lexer.TImport:
+		return p.tsLookAheadNextTokenIsOpenParenOrLessThanOrDot()
+
+	default:
+		return p.tsIsIdentifier()
+	}
+}
+
+// This function is taken from the official TypeScript compiler source code:
+// https://github.com/microsoft/TypeScript/blob/master/src/compiler/parser.ts
+func (p *parser) tsLookAheadNextTokenIsOpenParenOrLessThanOrDot() (result bool) {
 	oldLexer := p.lexer
 	p.lexer.Next()
 
@@ -890,85 +1248,24 @@ func (p *parser) nextTokenIsOpenParenOrLessThanOrDot() (result bool) {
 
 // This function is taken from the official TypeScript compiler source code:
 // https://github.com/microsoft/TypeScript/blob/master/src/compiler/parser.ts
-func (p *parser) canFollowTypeArgumentsInExpression() bool {
-	switch p.lexer.Token {
-	case
-		// These tokens can follow a type argument list in a call expression.
-		js_lexer.TOpenParen,                     // foo<x>(
-		js_lexer.TNoSubstitutionTemplateLiteral, // foo<T> `...`
-		js_lexer.TTemplateHead:                  // foo<T> `...${100}...`
-		return true
+func (p *parser) tsIsIdentifier() bool {
+	if p.lexer.Token == js_lexer.TIdentifier {
+		// If we have a 'yield' keyword, and we're in the [yield] context, then 'yield' is
+		// considered a keyword and is not an identifier.
+		if p.fnOrArrowDataParse.yield != allowIdent && p.lexer.Identifier.String == "yield" {
+			return false
+		}
 
-	// Consider something a type argument list only if the following token can't start an expression.
-	case
-		// From "isStartOfExpression()"
-		js_lexer.TPlus,
-		js_lexer.TMinus,
-		js_lexer.TTilde,
-		js_lexer.TExclamation,
-		js_lexer.TDelete,
-		js_lexer.TTypeof,
-		js_lexer.TVoid,
-		js_lexer.TPlusPlus,
-		js_lexer.TMinusMinus,
-		js_lexer.TLessThan,
+		// If we have a 'await' keyword, and we're in the [Await] context, then 'await' is
+		// considered a keyword and is not an identifier.
+		if p.fnOrArrowDataParse.await != allowIdent && p.lexer.Identifier.String == "await" {
+			return false
+		}
 
-		// From "isStartOfLeftHandSideExpression()"
-		js_lexer.TThis,
-		js_lexer.TSuper,
-		js_lexer.TNull,
-		js_lexer.TTrue,
-		js_lexer.TFalse,
-		js_lexer.TNumericLiteral,
-		js_lexer.TBigIntegerLiteral,
-		js_lexer.TStringLiteral,
-		js_lexer.TOpenBracket,
-		js_lexer.TOpenBrace,
-		js_lexer.TFunction,
-		js_lexer.TClass,
-		js_lexer.TNew,
-		js_lexer.TSlash,
-		js_lexer.TSlashEquals,
-		js_lexer.TIdentifier,
-
-		// From "isBinaryOperator()"
-		js_lexer.TQuestionQuestion,
-		js_lexer.TBarBar,
-		js_lexer.TAmpersandAmpersand,
-		js_lexer.TBar,
-		js_lexer.TCaret,
-		js_lexer.TAmpersand,
-		js_lexer.TEqualsEquals,
-		js_lexer.TExclamationEquals,
-		js_lexer.TEqualsEqualsEquals,
-		js_lexer.TExclamationEqualsEquals,
-		js_lexer.TGreaterThan,
-		js_lexer.TLessThanEquals,
-		js_lexer.TGreaterThanEquals,
-		js_lexer.TInstanceof,
-		js_lexer.TLessThanLessThan,
-		js_lexer.TGreaterThanGreaterThan,
-		js_lexer.TGreaterThanGreaterThanGreaterThan,
-		js_lexer.TAsterisk,
-		js_lexer.TPercent,
-		js_lexer.TAsteriskAsterisk,
-
-		// TypeScript always sees "TGreaterThan" instead of these tokens since
-		// their scanner works a little differently than our lexer. So since
-		// "TGreaterThan" is forbidden above, we also forbid these too.
-		js_lexer.TGreaterThanGreaterThanEquals,
-		js_lexer.TGreaterThanGreaterThanGreaterThanEquals:
-		return false
-
-	case js_lexer.TIn:
-		return !p.allowIn
-
-	case js_lexer.TImport:
-		return !p.nextTokenIsOpenParenOrLessThanOrDot()
-
-	default:
 		return true
 	}
+
+	return false
 }
 
 func (p *parser) skipTypeScriptInterfaceStmt(opts parseStmtOpts) {
@@ -979,7 +1276,7 @@ func (p *parser) skipTypeScriptInterfaceStmt(opts parseStmtOpts) {
 		p.localTypeNames[name] = true
 	}
 
-	p.skipTypeScriptTypeParameters(typeParametersWithInOutVarianceAnnotations)
+	p.skipTypeScriptTypeParameters(allowInOutVarianceAnnotations | allowEmptyTypeParameters)
 
 	if p.lexer.Token == js_lexer.TExtends {
 		p.lexer.Next()
@@ -1054,71 +1351,10 @@ func (p *parser) skipTypeScriptTypeStmt(opts parseStmtOpts) {
 		p.localTypeNames[name] = true
 	}
 
-	p.skipTypeScriptTypeParameters(typeParametersWithInOutVarianceAnnotations)
+	p.skipTypeScriptTypeParameters(allowInOutVarianceAnnotations | allowEmptyTypeParameters)
 	p.lexer.Expect(js_lexer.TEquals)
 	p.skipTypeScriptType(js_ast.LLowest)
 	p.lexer.ExpectOrInsertSemicolon()
-}
-
-func (p *parser) parseTypeScriptDecorators(tsDecoratorScope *js_ast.Scope) []js_ast.Expr {
-	var tsDecorators []js_ast.Expr
-
-	if p.options.ts.Parse {
-		// TypeScript decorators cause us to temporarily revert to the scope that
-		// encloses the class declaration, since that's where the generated code
-		// for TypeScript decorators will be inserted.
-		oldScope := p.currentScope
-		p.currentScope = tsDecoratorScope
-
-		for p.lexer.Token == js_lexer.TAt {
-			loc := p.lexer.Loc()
-			p.lexer.Next()
-
-			// Parse a new/call expression with "exprFlagTSDecorator" so we ignore
-			// EIndex expressions, since they may be part of a computed property:
-			//
-			//   class Foo {
-			//     @foo ['computed']() {}
-			//   }
-			//
-			// This matches the behavior of the TypeScript compiler.
-			value := p.parseExprWithFlags(js_ast.LNew, exprFlagTSDecorator)
-			value.Loc = loc
-			tsDecorators = append(tsDecorators, value)
-		}
-
-		// Avoid "popScope" because this decorator scope is not hierarchical
-		p.currentScope = oldScope
-	}
-
-	return tsDecorators
-}
-
-func (p *parser) logInvalidDecoratorError(classKeyword logger.Range) {
-	if p.options.ts.Parse && p.lexer.Token == js_lexer.TAt {
-		// Forbid decorators inside class expressions
-		p.lexer.AddRangeErrorWithNotes(p.lexer.Range(), "Decorators can only be used with class declarations in TypeScript",
-			[]logger.MsgData{p.tracker.MsgData(classKeyword, "This is a class expression, not a class declaration:")})
-
-		// Parse and discard decorators for error recovery
-		scopeIndex := len(p.scopesInOrder)
-		p.parseTypeScriptDecorators(p.currentScope)
-		p.discardScopesUpTo(scopeIndex)
-	}
-}
-
-func (p *parser) logMisplacedDecoratorError(tsDecorators *deferredTSDecorators) {
-	found := fmt.Sprintf("%q", p.lexer.Raw())
-	if p.lexer.Token == js_lexer.TEndOfFile {
-		found = "end of file"
-	}
-
-	// Try to be helpful by pointing out the decorator
-	p.lexer.AddRangeErrorWithNotes(p.lexer.Range(), fmt.Sprintf("Expected \"class\" after TypeScript decorator but found %s", found), []logger.MsgData{
-		p.tracker.MsgData(logger.Range{Loc: tsDecorators.values[0].Loc}, "The preceding TypeScript decorator is here:"),
-		{Text: "Decorators can only be used with class declarations in TypeScript."},
-	})
-	p.discardScopesUpTo(tsDecorators.scopeIndex)
 }
 
 func (p *parser) parseTypeScriptEnumStmt(loc logger.Loc, opts parseStmtOpts) js_ast.Stmt {
@@ -1126,13 +1362,13 @@ func (p *parser) parseTypeScriptEnumStmt(loc logger.Loc, opts parseStmtOpts) js_
 	nameLoc := p.lexer.Loc()
 	nameText := p.lexer.Identifier.String
 	p.lexer.Expect(js_lexer.TIdentifier)
-	name := js_ast.LocRef{Loc: nameLoc, Ref: js_ast.InvalidRef}
+	name := ast.LocRef{Loc: nameLoc, Ref: ast.InvalidRef}
 
 	// Generate the namespace object
 	exportedMembers := p.getOrCreateExportedNamespaceMembers(nameText, opts.isExport)
 	tsNamespace := &js_ast.TSNamespaceScope{
 		ExportedMembers: exportedMembers,
-		ArgRef:          js_ast.InvalidRef,
+		ArgRef:          ast.InvalidRef,
 		IsEnumScope:     true,
 	}
 	enumMemberData := &js_ast.TSNamespaceMemberNamespace{
@@ -1140,8 +1376,9 @@ func (p *parser) parseTypeScriptEnumStmt(loc logger.Loc, opts parseStmtOpts) js_
 	}
 
 	// Declare the enum and create the scope
+	scopeIndex := len(p.scopesInOrder)
 	if !opts.isTypeScriptDeclare {
-		name.Ref = p.declareSymbol(js_ast.SymbolTSEnum, nameLoc, nameText)
+		name.Ref = p.declareSymbol(ast.SymbolTSEnum, nameLoc, nameText)
 		p.pushScopeForParsePass(js_ast.ScopeEntry, loc)
 		p.currentScope.TSNamespace = tsNamespace
 		p.refToTSNamespaceMemberData[name.Ref] = enumMemberData
@@ -1161,7 +1398,7 @@ func (p *parser) parseTypeScriptEnumStmt(loc logger.Loc, opts parseStmtOpts) js_
 		nameRange := p.lexer.Range()
 		value := js_ast.EnumValue{
 			Loc: nameRange.Loc,
-			Ref: js_ast.InvalidRef,
+			Ref: ast.InvalidRef,
 		}
 
 		// Parse the name
@@ -1178,8 +1415,8 @@ func (p *parser) parseTypeScriptEnumStmt(loc logger.Loc, opts parseStmtOpts) js_
 		p.lexer.Next()
 
 		// Identifiers can be referenced by other values
-		if !opts.isTypeScriptDeclare && js_lexer.IsIdentifierUTF16(value.Name) {
-			value.Ref = p.declareSymbol(js_ast.SymbolOther, value.Loc, helpers.UTF16ToString(value.Name))
+		if !opts.isTypeScriptDeclare && js_ast.IsIdentifierUTF16(value.Name) {
+			value.Ref = p.declareSymbol(ast.SymbolOther, value.Loc, helpers.UTF16ToString(value.Name))
 		}
 
 		// Parse the initializer
@@ -1262,10 +1499,10 @@ func (p *parser) parseTypeScriptEnumStmt(loc logger.Loc, opts parseStmtOpts) js_
 			// Add a "_" to make tests easier to read, since non-bundler tests don't
 			// run the renamer. For external-facing things the renamer will avoid
 			// collisions automatically so this isn't important for correctness.
-			tsNamespace.ArgRef = p.newSymbol(js_ast.SymbolHoisted, "_"+nameText)
+			tsNamespace.ArgRef = p.newSymbol(ast.SymbolHoisted, "_"+nameText)
 			p.currentScope.Generated = append(p.currentScope.Generated, tsNamespace.ArgRef)
 		} else {
-			tsNamespace.ArgRef = p.declareSymbol(js_ast.SymbolHoisted, nameLoc, nameText)
+			tsNamespace.ArgRef = p.declareSymbol(ast.SymbolHoisted, nameLoc, nameText)
 		}
 		p.refToTSNamespaceMemberData[tsNamespace.ArgRef] = enumMemberData
 
@@ -1279,8 +1516,17 @@ func (p *parser) parseTypeScriptEnumStmt(loc logger.Loc, opts parseStmtOpts) js_
 			p.hasNonLocalExportDeclareInsideNamespace = true
 		}
 
-		return js_ast.Stmt{Loc: loc, Data: &js_ast.STypeScript{}}
+		return js_ast.Stmt{Loc: loc, Data: js_ast.STypeScriptShared}
 	}
+
+	// Save these for when we do out-of-order enum visiting
+	if p.scopesInOrderForEnum == nil {
+		p.scopesInOrderForEnum = make(map[logger.Loc][]scopeOrder)
+	}
+
+	// Make a copy of "scopesInOrder" instead of a slice since the original
+	// array may be flattened in the future by "popAndFlattenScope"
+	p.scopesInOrderForEnum[loc] = append([]scopeOrder{}, p.scopesInOrder[scopeIndex:]...)
 
 	return js_ast.Stmt{Loc: loc, Data: &js_ast.SEnum{
 		Name:     name,
@@ -1315,9 +1561,10 @@ func (p *parser) parseTypeScriptImportEqualsStmt(loc logger.Loc, opts parseStmtO
 		for p.lexer.Token == js_lexer.TDot {
 			p.lexer.Next()
 			value.Data = &js_ast.EDot{
-				Target:  value,
-				Name:    p.lexer.Identifier.String,
-				NameLoc: p.lexer.Loc(),
+				Target:               value,
+				Name:                 p.lexer.Identifier.String,
+				NameLoc:              p.lexer.Loc(),
+				CanBeRemovedIfUnused: true,
 			}
 			p.lexer.Expect(js_lexer.TIdentifier)
 		}
@@ -1328,10 +1575,10 @@ func (p *parser) parseTypeScriptImportEqualsStmt(loc logger.Loc, opts parseStmtO
 	if opts.isTypeScriptDeclare {
 		// "import type foo = require('bar');"
 		// "import type foo = bar.baz;"
-		return js_ast.Stmt{Loc: loc, Data: &js_ast.STypeScript{}}
+		return js_ast.Stmt{Loc: loc, Data: js_ast.STypeScriptShared}
 	}
 
-	ref := p.declareSymbol(js_ast.SymbolConst, defaultNameLoc, defaultName)
+	ref := p.declareSymbol(ast.SymbolConst, defaultNameLoc, defaultName)
 	decls := []js_ast.Decl{{
 		Binding:    js_ast.Binding{Loc: defaultNameLoc, Data: &js_ast.BIdentifier{Ref: ref}},
 		ValueOrNil: value,
@@ -1383,14 +1630,14 @@ func (p *parser) parseTypeScriptNamespaceStmt(loc logger.Loc, opts parseStmtOpts
 	exportedMembers := p.getOrCreateExportedNamespaceMembers(nameText, opts.isExport)
 	tsNamespace := &js_ast.TSNamespaceScope{
 		ExportedMembers: exportedMembers,
-		ArgRef:          js_ast.InvalidRef,
+		ArgRef:          ast.InvalidRef,
 	}
 	nsMemberData := &js_ast.TSNamespaceMemberNamespace{
 		ExportedMembers: exportedMembers,
 	}
 
 	// Declare the namespace and create the scope
-	name := js_ast.LocRef{Loc: nameLoc, Ref: js_ast.InvalidRef}
+	name := ast.LocRef{Loc: nameLoc, Ref: ast.InvalidRef}
 	scopeIndex := p.pushScopeForParsePass(js_ast.ScopeEntry, loc)
 	p.currentScope.TSNamespace = tsNamespace
 
@@ -1488,7 +1735,15 @@ func (p *parser) parseTypeScriptNamespaceStmt(loc logger.Loc, opts parseStmtOpts
 
 		case *js_ast.SLocal:
 			if s.IsExport {
-				p.exportDeclsInsideNamespace(exportedMembers, s.Decls)
+				js_ast.ForEachIdentifierBindingInDecls(s.Decls, func(loc logger.Loc, b *js_ast.BIdentifier) {
+					name := p.symbols[b.Ref.InnerIndex].OriginalName
+					member := js_ast.TSNamespaceMember{
+						Loc:  loc,
+						Data: &js_ast.TSNamespaceMemberProperty{},
+					}
+					exportedMembers[name] = member
+					p.refToTSNamespaceMemberData[b.Ref] = member.Data
+				})
 			}
 		}
 	}
@@ -1519,7 +1774,7 @@ func (p *parser) parseTypeScriptNamespaceStmt(loc logger.Loc, opts parseStmtOpts
 		if opts.isModuleScope {
 			p.localTypeNames[nameText] = true
 		}
-		return js_ast.Stmt{Loc: loc, Data: &js_ast.STypeScript{}}
+		return js_ast.Stmt{Loc: loc, Data: js_ast.STypeScriptShared}
 	}
 
 	if !opts.isTypeScriptDeclare {
@@ -1543,17 +1798,17 @@ func (p *parser) parseTypeScriptNamespaceStmt(loc logger.Loc, opts parseStmtOpts
 			// Add a "_" to make tests easier to read, since non-bundler tests don't
 			// run the renamer. For external-facing things the renamer will avoid
 			// collisions automatically so this isn't important for correctness.
-			tsNamespace.ArgRef = p.newSymbol(js_ast.SymbolHoisted, "_"+nameText)
+			tsNamespace.ArgRef = p.newSymbol(ast.SymbolHoisted, "_"+nameText)
 			p.currentScope.Generated = append(p.currentScope.Generated, tsNamespace.ArgRef)
 		} else {
-			tsNamespace.ArgRef = p.declareSymbol(js_ast.SymbolHoisted, nameLoc, nameText)
+			tsNamespace.ArgRef = p.declareSymbol(ast.SymbolHoisted, nameLoc, nameText)
 		}
 		p.refToTSNamespaceMemberData[tsNamespace.ArgRef] = nsMemberData
 	}
 
 	p.popScope()
 	if !opts.isTypeScriptDeclare {
-		name.Ref = p.declareSymbol(js_ast.SymbolTSNamespace, nameLoc, nameText)
+		name.Ref = p.declareSymbol(ast.SymbolTSNamespace, nameLoc, nameText)
 		p.refToTSNamespaceMemberData[name.Ref] = nsMemberData
 	}
 	return js_ast.Stmt{Loc: loc, Data: &js_ast.SNamespace{
@@ -1564,54 +1819,20 @@ func (p *parser) parseTypeScriptNamespaceStmt(loc logger.Loc, opts parseStmtOpts
 	}}
 }
 
-func (p *parser) exportDeclsInsideNamespace(exportedMembers js_ast.TSNamespaceMembers, decls []js_ast.Decl) {
-	for _, decl := range decls {
-		p.exportBindingInsideNamespace(exportedMembers, decl.Binding)
-	}
-}
-
-func (p *parser) exportBindingInsideNamespace(exportedMembers js_ast.TSNamespaceMembers, binding js_ast.Binding) {
-	switch b := binding.Data.(type) {
-	case *js_ast.BMissing:
-
-	case *js_ast.BIdentifier:
-		name := p.symbols[b.Ref.InnerIndex].OriginalName
-		member := js_ast.TSNamespaceMember{
-			Loc:  binding.Loc,
-			Data: &js_ast.TSNamespaceMemberProperty{},
-		}
-		exportedMembers[name] = member
-		p.refToTSNamespaceMemberData[b.Ref] = member.Data
-
-	case *js_ast.BArray:
-		for _, item := range b.Items {
-			p.exportBindingInsideNamespace(exportedMembers, item.Binding)
-		}
-
-	case *js_ast.BObject:
-		for _, property := range b.Properties {
-			p.exportBindingInsideNamespace(exportedMembers, property.Value)
-		}
-
-	default:
-		panic("Internal error")
-	}
-}
-
 func (p *parser) generateClosureForTypeScriptNamespaceOrEnum(
 	stmts []js_ast.Stmt, stmtLoc logger.Loc, isExport bool, nameLoc logger.Loc,
-	nameRef js_ast.Ref, argRef js_ast.Ref, stmtsInsideClosure []js_ast.Stmt,
+	nameRef ast.Ref, argRef ast.Ref, stmtsInsideClosure []js_ast.Stmt,
 ) []js_ast.Stmt {
 	// Follow the link chain in case symbols were merged
 	symbol := p.symbols[nameRef.InnerIndex]
-	for symbol.Link != js_ast.InvalidRef {
+	for symbol.Link != ast.InvalidRef {
 		nameRef = symbol.Link
 		symbol = p.symbols[nameRef.InnerIndex]
 	}
 
 	// Make sure to only emit a variable once for a given namespace, since there
 	// can be multiple namespace blocks for the same namespace
-	if (symbol.Kind == js_ast.SymbolTSNamespace || symbol.Kind == js_ast.SymbolTSEnum) && !p.emittedNamespaceVars[nameRef] {
+	if (symbol.Kind == ast.SymbolTSNamespace || symbol.Kind == ast.SymbolTSEnum) && !p.emittedNamespaceVars[nameRef] {
 		decls := []js_ast.Decl{{Binding: js_ast.Binding{Loc: nameLoc, Data: &js_ast.BIdentifier{Ref: nameRef}}}}
 		p.emittedNamespaceVars[nameRef] = true
 		if p.currentScope == p.moduleScope {
@@ -1732,7 +1953,7 @@ func (p *parser) generateClosureForTypeScriptNamespaceOrEnum(
 
 func (p *parser) generateClosureForTypeScriptEnum(
 	stmts []js_ast.Stmt, stmtLoc logger.Loc, isExport bool, nameLoc logger.Loc,
-	nameRef js_ast.Ref, argRef js_ast.Ref, exprsInsideClosure []js_ast.Expr,
+	nameRef ast.Ref, argRef ast.Ref, exprsInsideClosure []js_ast.Expr,
 	allValuesArePure bool,
 ) []js_ast.Stmt {
 	// Bail back to the namespace code for enums that aren't at the top level.
@@ -1789,26 +2010,24 @@ func (p *parser) generateClosureForTypeScriptEnum(
 
 	// Follow the link chain in case symbols were merged
 	symbol := p.symbols[nameRef.InnerIndex]
-	for symbol.Link != js_ast.InvalidRef {
+	for symbol.Link != ast.InvalidRef {
 		nameRef = symbol.Link
 		symbol = p.symbols[nameRef.InnerIndex]
 	}
 
 	// Generate the body of the closure, including a return statement at the end
 	stmtsInsideClosure := []js_ast.Stmt{}
-	if len(exprsInsideClosure) > 0 {
-		argExpr := js_ast.Expr{Loc: nameLoc, Data: &js_ast.EIdentifier{Ref: argRef}}
-		if p.options.minifySyntax {
-			// "a; b; return c;" => "return a, b, c;"
-			joined := js_ast.JoinAllWithComma(exprsInsideClosure)
-			joined = js_ast.JoinWithComma(joined, argExpr)
-			stmtsInsideClosure = append(stmtsInsideClosure, js_ast.Stmt{Loc: joined.Loc, Data: &js_ast.SReturn{ValueOrNil: joined}})
-		} else {
-			for _, expr := range exprsInsideClosure {
-				stmtsInsideClosure = append(stmtsInsideClosure, js_ast.Stmt{Loc: expr.Loc, Data: &js_ast.SExpr{Value: expr}})
-			}
-			stmtsInsideClosure = append(stmtsInsideClosure, js_ast.Stmt{Loc: argExpr.Loc, Data: &js_ast.SReturn{ValueOrNil: argExpr}})
+	argExpr := js_ast.Expr{Loc: nameLoc, Data: &js_ast.EIdentifier{Ref: argRef}}
+	if p.options.minifySyntax {
+		// "a; b; return c;" => "return a, b, c;"
+		joined := js_ast.JoinAllWithComma(exprsInsideClosure)
+		joined = js_ast.JoinWithComma(joined, argExpr)
+		stmtsInsideClosure = append(stmtsInsideClosure, js_ast.Stmt{Loc: joined.Loc, Data: &js_ast.SReturn{ValueOrNil: joined}})
+	} else {
+		for _, expr := range exprsInsideClosure {
+			stmtsInsideClosure = append(stmtsInsideClosure, js_ast.Stmt{Loc: expr.Loc, Data: &js_ast.SExpr{Value: expr}})
 		}
+		stmtsInsideClosure = append(stmtsInsideClosure, js_ast.Stmt{Loc: argExpr.Loc, Data: &js_ast.SReturn{ValueOrNil: argExpr}})
 	}
 
 	// Try to use an arrow function if possible for compactness

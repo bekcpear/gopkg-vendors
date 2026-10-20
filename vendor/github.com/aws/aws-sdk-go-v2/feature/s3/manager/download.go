@@ -45,6 +45,8 @@ func (e *errReadingBody) Unwrap() error {
 // The Downloader structure that calls Download(). It is safe to call Download()
 // on this structure for multiple objects and across concurrent goroutines.
 // Mutating the Downloader's properties is not safe to be done concurrently.
+//
+// Deprecated: superceded by feature/s3/transfermanager. See https://github.com/aws/aws-sdk-go-v2/discussions/3306
 type Downloader struct {
 	// The size (in bytes) to request from S3 for each part.
 	// The minimum allowed part size is 5MB, and  if this value is set to zero,
@@ -77,6 +79,14 @@ type Downloader struct {
 	// operation requests made by the downloader.
 	ClientOptions []func(*s3.Options)
 
+	// By default, the downloader verifies that individual part ranges align
+	// based on the configured part size.
+	//
+	// You can disable that with this flag, however, Amazon S3 recommends
+	// against doing so because it damages the durability posture of object
+	// downloads.
+	DisableValidateParts bool
+
 	// Defines the buffer strategy used when downloading a part.
 	//
 	// If a WriterReadFromProvider is given the Download manager
@@ -100,7 +110,8 @@ func WithDownloaderClientOptions(opts ...func(*s3.Options)) func(*Downloader) {
 // interface.
 //
 // Example:
-// 	// Load AWS Config
+//
+//	// Load AWS Config
 //	cfg, err := config.LoadDefaultConfig(context.TODO())
 //	if err != nil {
 //		panic(err)
@@ -116,6 +127,8 @@ func WithDownloaderClientOptions(opts ...func(*s3.Options)) func(*Downloader) {
 //	downloader := manager.NewDownloader(client, func(d *manager.Downloader) {
 //		d.PartSize = 64 * 1024 * 1024 // 64MB per part
 //	})
+//
+// Deprecated: superceded by feature/s3/transfermanager. See https://github.com/aws/aws-sdk-go-v2/discussions/3306
 func NewDownloader(c DownloadAPIClient, options ...func(*Downloader)) *Downloader {
 	d := &Downloader{
 		S3:                 c,
@@ -153,10 +166,11 @@ func NewDownloader(c DownloadAPIClient, options ...func(*Downloader)) *Downloade
 // and GC runs.
 //
 // Example:
+//
 //	// pre-allocate in memory buffer, where headObject type is *s3.HeadObjectOutput
 //	buf := make([]byte, int(headObject.ContentLength))
 //	// wrap with aws.WriteAtBuffer
-//	w := s3manager.NewWriteAtBuffer(buf)
+//	w := manager.NewWriteAtBuffer(buf)
 //	// download file into the memory
 //	numBytesDownloaded, err := downloader.Download(ctx, w, &s3.GetObjectInput{
 //		Bucket: aws.String(bucket),
@@ -171,6 +185,8 @@ func NewDownloader(c DownloadAPIClient, options ...func(*Downloader)) *Downloade
 // If the GetObjectInput's Range value is provided that will cause the downloader
 // to perform a single GetObjectInput request for that object's range. This will
 // caused the part size, and concurrency configurations to be ignored.
+//
+// Deprecated: superceded by feature/s3/transfermanager. See https://github.com/aws/aws-sdk-go-v2/discussions/3306
 func (d Downloader) Download(ctx context.Context, w io.WriterAt, input *s3.GetObjectInput, options ...func(*Downloader)) (n int64, err error) {
 	if err := validateSupportedARNType(aws.ToString(input.Bucket)); err != nil {
 		return 0, err
@@ -181,7 +197,10 @@ func (d Downloader) Download(ctx context.Context, w io.WriterAt, input *s3.GetOb
 	// Copy ClientOptions
 	clientOptions := make([]func(*s3.Options), 0, len(impl.cfg.ClientOptions)+1)
 	clientOptions = append(clientOptions, func(o *s3.Options) {
-		o.APIOptions = append(o.APIOptions, middleware.AddSDKAgentKey(middleware.FeatureMetadata, userAgentKey))
+		o.APIOptions = append(o.APIOptions,
+			middleware.AddSDKAgentKey(middleware.FeatureMetadata, userAgentKey),
+			addFeatureUserAgent, // yes, there are two of these
+		)
 	})
 	clientOptions = append(clientOptions, impl.cfg.ClientOptions...)
 	impl.cfg.ClientOptions = clientOptions
@@ -215,14 +234,15 @@ type downloader struct {
 	in *s3.GetObjectInput
 	w  io.WriterAt
 
-	wg sync.WaitGroup
-	m  sync.Mutex
+	wg   sync.WaitGroup
+	m    sync.Mutex
+	once sync.Once
 
-	pos        int64
-	totalBytes int64
-	written    int64
-	err        error
-
+	pos                int64
+	totalBytes         int64
+	written            int64
+	err                error
+	etag               string
 	partBodyMaxRetries int
 }
 
@@ -348,16 +368,19 @@ func (d *downloader) downloadRange(rng string) {
 
 // downloadChunk downloads the chunk from s3
 func (d *downloader) downloadChunk(chunk dlchunk) error {
-	in := &s3.GetObjectInput{}
-	awsutil.Copy(in, d.in)
+	var params s3.GetObjectInput
+	awsutil.Copy(&params, d.in)
 
 	// Get the next byte range of data
-	in.Range = aws.String(chunk.ByteRange())
+	params.Range = aws.String(chunk.ByteRange())
+	if params.VersionId == nil && d.etag != "" {
+		params.IfMatch = aws.String(d.etag)
+	}
 
 	var n int64
 	var err error
 	for retry := 0; retry <= d.partBodyMaxRetries; retry++ {
-		n, err = d.tryDownloadChunk(in, &chunk)
+		n, err = d.tryDownloadChunk(&params, &chunk)
 		if err == nil {
 			break
 		}
@@ -374,8 +397,9 @@ func (d *downloader) downloadChunk(chunk dlchunk) error {
 
 		chunk.cur = 0
 
-		d.cfg.Logger.Logf(logging.Debug, "object part body download interrupted %s, err, %v, retrying attempt %d",
-			aws.ToString(in.Key), err, retry)
+		d.cfg.Logger.Logf(logging.Debug,
+			"object part body download interrupted %s, err, %v, retrying attempt %d",
+			aws.ToString(params.Key), err, retry)
 	}
 
 	d.incrWritten(n)
@@ -383,26 +407,82 @@ func (d *downloader) downloadChunk(chunk dlchunk) error {
 	return err
 }
 
-func (d *downloader) tryDownloadChunk(in *s3.GetObjectInput, w io.Writer) (int64, error) {
+func (d *downloader) tryDownloadChunk(params *s3.GetObjectInput, w io.Writer) (int64, error) {
 	cleanup := func() {}
 	if d.cfg.BufferProvider != nil {
 		w, cleanup = d.cfg.BufferProvider.GetReadFrom(w)
 	}
 	defer cleanup()
 
-	resp, err := d.cfg.S3.GetObject(d.ctx, in, d.cfg.ClientOptions...)
+	resp, err := d.cfg.S3.GetObject(d.ctx, params, d.cfg.ClientOptions...)
 	if err != nil {
 		return 0, err
 	}
-	d.setTotalBytes(resp) // Set total if not yet set.
 
-	n, err := io.Copy(w, resp.Body)
+	if !d.cfg.DisableValidateParts && params.Range != nil && resp.ContentRange != nil {
+		expectStart, expectEnd := parseContentRange(*params.Range)
+		actualStart, actualEnd := parseContentRange(*resp.ContentRange)
+		if isRangeMismatch(expectStart, expectEnd, actualStart, actualEnd) {
+			return 0, fmt.Errorf("invalid content range: expect %d-%d, got %d-%d", expectStart, expectEnd, actualStart, actualEnd)
+		}
+	}
+
+	d.setTotalBytes(resp) // Set total if not yet set.
+	d.once.Do(func() {
+		d.etag = aws.ToString(resp.ETag)
+	})
+
+	var src io.Reader = resp.Body
+	if d.cfg.BufferProvider != nil {
+		src = &suppressWriterAt{suppressed: src}
+	}
+	n, err := io.Copy(w, src)
 	resp.Body.Close()
 	if err != nil {
 		return n, &errReadingBody{err: err}
 	}
 
 	return n, nil
+}
+
+func parseContentRange(v string) (int, int) {
+	parts := strings.Split(v, "/") // chop the total off, if it's there
+
+	// we send "bytes=" but S3 appears to return "bytes ", handle both
+	trimmed := strings.TrimPrefix(parts[0], "bytes ")
+	trimmed = strings.TrimPrefix(trimmed, "bytes=")
+
+	parts = strings.Split(trimmed, "-")
+	if len(parts) != 2 {
+		return -1, -1
+	}
+
+	start, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return -1, -1
+	}
+
+	end, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return -1, -1
+	}
+
+	return start, end
+}
+
+func isRangeMismatch(expectStart, expectEnd, actualStart, actualEnd int) bool {
+	if expectStart == -1 || expectEnd == -1 || actualStart == -1 || actualEnd == -1 {
+		return false // we don't know, one of the ranges was missing or unparseable
+	}
+
+	// for the final chunk (or the first chunk if it's smaller) we still
+	// request a full chunk but we get back the actual final part of the
+	// object, which will be smaller
+	if expectStart == actualStart && actualEnd < expectEnd {
+		return false
+	}
+
+	return expectStart != actualStart || expectEnd != actualEnd
 }
 
 // getTotalBytes is a thread-safe getter for retrieving the total byte status.
@@ -429,8 +509,8 @@ func (d *downloader) setTotalBytes(resp *s3.GetObjectOutput) {
 	if resp.ContentRange == nil {
 		// ContentRange is nil when the full file contents is provided, and
 		// is not chunked. Use ContentLength instead.
-		if resp.ContentLength > 0 {
-			d.totalBytes = resp.ContentLength
+		if aws.ToInt64(resp.ContentLength) > 0 {
+			d.totalBytes = aws.ToInt64(resp.ContentLength)
 			return
 		}
 	} else {

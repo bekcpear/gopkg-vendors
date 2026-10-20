@@ -17,8 +17,8 @@ package stack
 import (
 	"fmt"
 
-	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
 func (lifetimes *AddressLifetimes) sanitize() {
@@ -30,6 +30,8 @@ func (lifetimes *AddressLifetimes) sanitize() {
 var _ AddressableEndpoint = (*AddressableEndpointState)(nil)
 
 // AddressableEndpointState is an implementation of an AddressableEndpoint.
+//
+// +stateify savable
 type AddressableEndpointState struct {
 	networkEndpoint NetworkEndpoint
 	options         AddressableEndpointStateOptions
@@ -38,15 +40,19 @@ type AddressableEndpointState struct {
 	//
 	// AddressableEndpointState.mu
 	//   addressState.mu
-	mu sync.RWMutex
+	mu addressableEndpointStateRWMutex `state:"nosave"`
+	// TODO(b/361075310): Enable s/r for the below fields.
+	//
 	// +checklocks:mu
-	endpoints map[tcpip.Address]*addressState
+	endpoints map[tcpip.Address]*addressState `state:"nosave"`
 	// +checklocks:mu
-	primary []*addressState
+	primary []*addressState `state:"nosave"`
 }
 
 // AddressableEndpointStateOptions contains options used to configure an
 // AddressableEndpointState.
+//
+// +stateify savable
 type AddressableEndpointStateOptions struct {
 	// HiddenWhileDisabled determines whether addresses should be returned to
 	// callers while the NetworkEndpoint this AddressableEndpointState belongs
@@ -223,7 +229,7 @@ func (a *AddressableEndpointState) addAndAcquireAddressLocked(addr tcpip.Address
 		}
 
 		addrState.mu.RLock()
-		if addrState.refs == 0 {
+		if addrState.refs.ReadRefs() == 0 {
 			panic(fmt.Sprintf("found an address that should have been released (ref count == 0); address = %s", addrState.addr))
 		}
 		isPermanent := addrState.kind.IsPermanent()
@@ -257,6 +263,7 @@ func (a *AddressableEndpointState) addAndAcquireAddressLocked(addr tcpip.Address
 				break
 			}
 		}
+		addrState.refs.IncRef()
 	} else {
 		addrState = &addressState{
 			addressableEndpointState: a,
@@ -266,11 +273,11 @@ func (a *AddressableEndpointState) addAndAcquireAddressLocked(addr tcpip.Address
 			// results in allocations on every call.
 			subnet: addr.Subnet(),
 		}
+		addrState.refs.InitRefs()
 		a.endpoints[addr.Address] = addrState
 		// We never promote an address to temporary - it can only be added as such.
 		// If we are actually adding a permanent address, it is promoted below.
 		addrState.kind = Temporary
-		addrState.disp = properties.Disp
 	}
 
 	// At this point we have an address we are either promoting from an expired or
@@ -287,15 +294,14 @@ func (a *AddressableEndpointState) addAndAcquireAddressLocked(addr tcpip.Address
 		}
 
 		// Primary addresses are biased by 1.
-		addrState.refs++
+		addrState.refs.IncRef()
 		addrState.kind = kind
 	}
-	// Acquire the address before returning it.
-	addrState.refs++
 	addrState.configType = properties.ConfigType
 	lifetimes := properties.Lifetimes
 	lifetimes.sanitize()
 	addrState.lifetimes = lifetimes
+	addrState.disp = properties.Disp
 
 	if attemptAddToPrimary {
 		switch properties.PEB {
@@ -384,19 +390,16 @@ func (a *AddressableEndpointState) decAddressRef(addrState *addressState) {
 //
 // +checklocks:a.mu
 func (a *AddressableEndpointState) decAddressRefLocked(addrState *addressState) {
-	addrState.mu.Lock()
-	defer addrState.mu.Unlock()
+	destroy := false
+	addrState.refs.DecRef(func() {
+		destroy = true
+	})
 
-	if addrState.refs == 0 {
-		panic(fmt.Sprintf("attempted to decrease ref count for AddressEndpoint w/ addr = %s when it is already released", addrState.addr))
-	}
-
-	addrState.refs--
-
-	if addrState.refs != 0 {
+	if !destroy {
 		return
 	}
-
+	addrState.mu.Lock()
+	defer addrState.mu.Unlock()
 	// A non-expired permanent address must not have its reference count dropped
 	// to 0.
 	if addrState.kind.IsPermanent() {
@@ -437,7 +440,7 @@ func (a *AddressableEndpointState) MainAddress() tcpip.AddressWithPrefix {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
-	ep := a.acquirePrimaryAddressRLocked(func(ep *addressState) bool {
+	ep := a.acquirePrimaryAddressRLocked(tcpip.Address{}, tcpip.Address{} /* srcHint */, func(ep *addressState) bool {
 		switch kind := ep.GetKind(); kind {
 		case Permanent:
 			return a.networkEndpoint.Enabled() || !a.options.HiddenWhileDisabled
@@ -465,7 +468,34 @@ func (a *AddressableEndpointState) MainAddress() tcpip.AddressWithPrefix {
 // valid according to isValid.
 //
 // +checklocksread:a.mu
-func (a *AddressableEndpointState) acquirePrimaryAddressRLocked(isValid func(*addressState) bool) *addressState {
+func (a *AddressableEndpointState) acquirePrimaryAddressRLocked(remoteAddr, srcHint tcpip.Address, isValid func(*addressState) bool) *addressState {
+	// TODO: Move this out into IPv4-specific code.
+	// IPv6 handles source IP selection elsewhere. We have to do source
+	// selection only for IPv4, in which case ep is never deprecated. Thus
+	// we don't have to worry about refcounts.
+	if remoteAddr.Len() == header.IPv4AddressSize && remoteAddr != (tcpip.Address{}) {
+		var best *addressState
+		var bestLen uint8
+		for _, state := range a.primary {
+			if !isValid(state) {
+				continue
+			}
+			// Source hint takes precedent over prefix matching.
+			if state.addr.Address == srcHint && srcHint != (tcpip.Address{}) {
+				best = state
+				break
+			}
+			stateLen := state.addr.Address.MatchingPrefix(remoteAddr)
+			if best == nil || bestLen < stateLen {
+				best = state
+				bestLen = stateLen
+			}
+		}
+		if best != nil && best.TryIncRef() {
+			return best
+		}
+	}
+
 	var deprecatedEndpoint *addressState
 	for _, ep := range a.primary {
 		if !isValid(ep) {
@@ -473,7 +503,7 @@ func (a *AddressableEndpointState) acquirePrimaryAddressRLocked(isValid func(*ad
 		}
 
 		if !ep.Deprecated() {
-			if ep.IncRef() {
+			if ep.TryIncRef() {
 				// ep is not deprecated, so return it immediately.
 				//
 				// If we kept track of a deprecated endpoint, decrement its reference
@@ -490,7 +520,7 @@ func (a *AddressableEndpointState) acquirePrimaryAddressRLocked(isValid func(*ad
 
 				return ep
 			}
-		} else if deprecatedEndpoint == nil && ep.IncRef() {
+		} else if deprecatedEndpoint == nil && ep.TryIncRef() {
 			// We prefer an endpoint that is not deprecated, but we keep track of
 			// ep in case a doesn't have any non-deprecated endpoints.
 			//
@@ -513,16 +543,20 @@ func (a *AddressableEndpointState) acquirePrimaryAddressRLocked(isValid func(*ad
 // If there is no matching address, a temporary address will be returned if
 // allowTemp is true.
 //
+// If readOnly is true, the address will be returned without an extra reference.
+// In this case it is not safe to modify the endpoint, only read attributes like
+// subnet.
+//
 // Regardless how the address was obtained, it will be acquired before it is
 // returned.
-func (a *AddressableEndpointState) AcquireAssignedAddressOrMatching(localAddr tcpip.Address, f func(AddressEndpoint) bool, allowTemp bool, tempPEB PrimaryEndpointBehavior) AddressEndpoint {
+func (a *AddressableEndpointState) AcquireAssignedAddressOrMatching(localAddr tcpip.Address, f func(AddressEndpoint) bool, allowTemp bool, tempPEB PrimaryEndpointBehavior, readOnly bool) AddressEndpoint {
 	lookup := func() *addressState {
 		if addrState, ok := a.endpoints[localAddr]; ok {
 			if !addrState.IsAssigned(allowTemp) {
 				return nil
 			}
 
-			if !addrState.IncRef() {
+			if !readOnly && !addrState.TryIncRef() {
 				panic(fmt.Sprintf("failed to increase the reference count for address = %s", addrState.addr))
 			}
 
@@ -531,7 +565,10 @@ func (a *AddressableEndpointState) AcquireAssignedAddressOrMatching(localAddr tc
 
 		if f != nil {
 			for _, addrState := range a.endpoints {
-				if addrState.IsAssigned(allowTemp) && f(addrState) && addrState.IncRef() {
+				if addrState.IsAssigned(allowTemp) && f(addrState) {
+					if !readOnly && !addrState.TryIncRef() {
+						continue
+					}
 					return addrState
 				}
 			}
@@ -565,7 +602,7 @@ func (a *AddressableEndpointState) AcquireAssignedAddressOrMatching(localAddr tc
 
 	// Proceed to add a new temporary endpoint.
 	addr := localAddr.WithPrefix()
-	ep, err := a.addAndAcquireAddressLocked(addr, AddressProperties{PEB: tempPEB}, Temporary)
+	ep, err := a.addAndAcquireAddressLocked(addr, AddressProperties{PEB: tempPEB, Temporary: true}, Temporary)
 	if err != nil {
 		// addAndAcquireAddressLocked only returns an error if the address is
 		// already assigned but we just checked above if the address exists so we
@@ -590,20 +627,30 @@ func (a *AddressableEndpointState) AcquireAssignedAddressOrMatching(localAddr tc
 	if ep == nil {
 		return nil
 	}
+	if readOnly {
+		if ep.addressableEndpointState == a {
+			// Checklocks doesn't understand that we are logically guaranteed to have
+			// ep.mu locked already. We need to use checklocksignore to appease the
+			// analyzer.
+			ep.addressableEndpointState.decAddressRefLocked(ep) // +checklocksignore
+		} else {
+			ep.DecRef()
+		}
+	}
 	return ep
 }
 
 // AcquireAssignedAddress implements AddressableEndpoint.
-func (a *AddressableEndpointState) AcquireAssignedAddress(localAddr tcpip.Address, allowTemp bool, tempPEB PrimaryEndpointBehavior) AddressEndpoint {
-	return a.AcquireAssignedAddressOrMatching(localAddr, nil, allowTemp, tempPEB)
+func (a *AddressableEndpointState) AcquireAssignedAddress(localAddr tcpip.Address, allowTemp bool, tempPEB PrimaryEndpointBehavior, readOnly bool) AddressEndpoint {
+	return a.AcquireAssignedAddressOrMatching(localAddr, nil, allowTemp, tempPEB, readOnly)
 }
 
 // AcquireOutgoingPrimaryAddress implements AddressableEndpoint.
-func (a *AddressableEndpointState) AcquireOutgoingPrimaryAddress(remoteAddr tcpip.Address, allowExpired bool) AddressEndpoint {
+func (a *AddressableEndpointState) AcquireOutgoingPrimaryAddress(remoteAddr tcpip.Address, srcHint tcpip.Address, allowExpired bool) AddressEndpoint {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	ep := a.acquirePrimaryAddressRLocked(func(ep *addressState) bool {
+	ep := a.acquirePrimaryAddressRLocked(remoteAddr, srcHint, func(ep *addressState) bool {
 		return ep.IsAssigned(allowExpired)
 	})
 
@@ -701,12 +748,11 @@ type addressState struct {
 	//
 	// AddressableEndpointState.mu
 	//   addressState.mu
-	mu sync.RWMutex
-	// checklocks:mu
-	refs uint32
-	// checklocks:mu
+	mu   addressStateRWMutex
+	refs addressStateRefs
+	// +checklocks:mu
 	kind AddressKind
-	// checklocks:mu
+	// +checklocks:mu
 	configType AddressConfigType
 	// lifetimes holds this address' lifetimes.
 	//
@@ -714,12 +760,12 @@ type addressState struct {
 	// must be the zero value. Note that the converse does not need to be
 	// upheld!
 	//
-	// checklocks:mu
+	// +checklocks:mu
 	lifetimes AddressLifetimes
 	// The enclosing mutex must be write-locked before calling methods on the
 	// dispatcher.
 	//
-	// checklocks:mu
+	// +checklocks:mu
 	disp AddressDispatcher
 }
 
@@ -787,15 +833,8 @@ func (a *addressState) IsAssigned(allowExpired bool) bool {
 }
 
 // IncRef implements AddressEndpoint.
-func (a *addressState) IncRef() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.refs == 0 {
-		return false
-	}
-
-	a.refs++
-	return true
+func (a *addressState) TryIncRef() bool {
+	return a.refs.TryIncRef()
 }
 
 // DecRef implements AddressEndpoint.
@@ -809,13 +848,9 @@ func (a *addressState) DecRef() {
 // Panics if the ref count is less than 2 after acquiring the lock in this
 // function.
 func (a *addressState) decRefMustNotFree() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.refs < 2 {
-		panic(fmt.Sprintf("cannot decrease addressState %s ref count %d without freeing the endpoint", a.addr, a.refs))
-	}
-	a.refs--
+	a.refs.DecRef(func() {
+		panic(fmt.Sprintf("cannot decrease addressState %s without freeing the endpoint", a.addr))
+	})
 }
 
 // ConfigType implements AddressEndpoint.

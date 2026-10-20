@@ -53,7 +53,7 @@ func NewPooledBufferedWriterReadFromProvider(size int) *PooledBufferedReadFromPr
 
 	return &PooledBufferedReadFromProvider{
 		pool: sync.Pool{
-			New: func() interface{} {
+			New: func() any {
 				return &bufferedReadFrom{bufferedWriter: bufio.NewWriterSize(nil, size)}
 			},
 		},
@@ -72,4 +72,12 @@ func (p *PooledBufferedReadFromProvider) GetReadFrom(writer io.Writer) (r Writer
 		p.pool.Put(buffer)
 	}
 	return r, cleanup
+}
+
+type suppressWriterAt struct {
+	suppressed io.Reader
+}
+
+func (s *suppressWriterAt) Read(p []byte) (n int, err error) {
+	return s.suppressed.Read(p)
 }

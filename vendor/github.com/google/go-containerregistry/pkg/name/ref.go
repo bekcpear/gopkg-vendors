@@ -16,6 +16,7 @@ package name
 
 import (
 	"fmt"
+	"strings"
 )
 
 // Reference defines the interface that consumers use when they can
@@ -37,14 +38,20 @@ type Reference interface {
 }
 
 // ParseReference parses the string as a reference, either by tag or digest.
+// References that include both a tag and digest parse as Digest references.
 func ParseReference(s string, opts ...Option) (Reference, error) {
+	// Image references never contain a URL scheme, so tell the user to
+	// strip it instead of returning a confusing parse error.
+	if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
+		return nil, newErrBadName("image reference must not contain a URL scheme (http:// or https://): %s; to connect to a registry over plain HTTP, use name.Insecure", s)
+	}
 	if t, err := NewTag(s, opts...); err == nil {
 		return t, nil
 	}
 	if d, err := NewDigest(s, opts...); err == nil {
 		return d, nil
 	}
-	return nil, newErrBadName("could not parse reference: " + s)
+	return nil, newErrBadName("could not parse reference: %s", s)
 }
 
 type stringConst string
@@ -56,16 +63,16 @@ type stringConst string
 // To discourage its use in scenarios where the value is not known at code
 // authoring time, it must be passed a string constant:
 //
-//    const str = "valid/string"
-//    MustParseReference(str)
-//    MustParseReference("another/valid/string")
-//    MustParseReference(str + "/and/more")
+//	const str = "valid/string"
+//	MustParseReference(str)
+//	MustParseReference("another/valid/string")
+//	MustParseReference(str + "/and/more")
 //
 // These will not compile:
 //
-//    var str = "valid/string"
-//    MustParseReference(str)
-//    MustParseReference(strings.Join([]string{"valid", "string"}, "/"))
+//	var str = "valid/string"
+//	MustParseReference(str)
+//	MustParseReference(strings.Join([]string{"valid", "string"}, "/"))
 func MustParseReference(s stringConst, opts ...Option) Reference {
 	ref, err := ParseReference(string(s), opts...)
 	if err != nil {

@@ -5,17 +5,18 @@ import (
 	"go/token"
 	"go/types"
 
+	"github.com/mgechev/revive/internal/astutils"
 	"github.com/mgechev/revive/lint"
 )
 
-// AtomicRule lints given else constructs.
+// AtomicRule lints usages of the `sync/atomic` package.
 type AtomicRule struct{}
 
 // Apply applies the rule to given file.
-func (r *AtomicRule) Apply(file *lint.File, _ lint.Arguments) []lint.Failure {
+func (*AtomicRule) Apply(file *lint.File, _ lint.Arguments) []lint.Failure {
 	var failures []lint.Failure
 	walker := atomic{
-		pkgTypesInfo: file.Pkg.TypesInfo,
+		pkgTypesInfo: file.Pkg.TypesInfo(),
 		onFailure: func(failure lint.Failure) {
 			failures = append(failures, failure)
 		},
@@ -27,7 +28,7 @@ func (r *AtomicRule) Apply(file *lint.File, _ lint.Arguments) []lint.Failure {
 }
 
 // Name returns the rule name.
-func (r *AtomicRule) Name() string {
+func (*AtomicRule) Name() string {
 	return "atomic"
 }
 
@@ -76,9 +77,9 @@ func (w atomic) Visit(node ast.Node) ast.Visitor {
 			broken := false
 
 			if uarg, ok := arg.(*ast.UnaryExpr); ok && uarg.Op == token.AND {
-				broken = gofmt(left) == gofmt(uarg.X)
+				broken = astutils.GoFmt(left) == astutils.GoFmt(uarg.X)
 			} else if star, ok := left.(*ast.StarExpr); ok {
-				broken = gofmt(star.X) == gofmt(arg)
+				broken = astutils.GoFmt(star.X) == astutils.GoFmt(arg)
 			}
 
 			if broken {

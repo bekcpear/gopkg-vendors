@@ -1,10 +1,10 @@
 // Copyright 2020 The gVisor Authors.
 //
 // Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd.
 
-//go:build amd64 && go1.8 && !go1.21 && !goexperiment.staticlockranking
-// +build amd64,go1.8,!go1.21,!goexperiment.staticlockranking
+//go:build amd64
 
 package sync
 

@@ -36,13 +36,13 @@ var ErrEmptyTypeSet = errors.New("empty type set")
 // restrictions may be arbitrarily complex. For example, consider the
 // following:
 //
-//  type A interface{ ~string|~[]byte }
+//	type A interface{ ~string|~[]byte }
 //
-//  type B interface{ int|string }
+//	type B interface{ int|string }
 //
-//  type C interface { ~string|~int }
+//	type C interface { ~string|~int }
 //
-//  type T[P interface{ A|B; C }] int
+//	type T[P interface{ A|B; C }] int
 //
 // In this example, the structural type restriction of P is ~string|int: A|B
 // expands to ~string|~[]byte|int|string, which reduces to ~string|~[]byte|int,
@@ -191,10 +191,4 @@ func computeTermSetInternal(t types.Type, seen map[types.Type]*termSet, depth in
 		}
 	}
 	return tset, nil
-}
-
-// under is a facade for the go/types internal function of the same name. It is
-// used by typeterm.go.
-func under(t types.Type) types.Type {
-	return t.Underlying()
 }

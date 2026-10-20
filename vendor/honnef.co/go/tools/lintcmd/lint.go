@@ -3,7 +3,6 @@ package lintcmd
 import (
 	"crypto/sha256"
 	"fmt"
-	"go/build"
 	"go/token"
 	"io"
 	"os"
@@ -29,8 +28,9 @@ import (
 
 // A linter lints Go source code.
 type linter struct {
-	Analyzers map[string]*lint.Analyzer
-	Runner    *runner.Runner
+	analyzers map[caseFoldedString]*lint.Analyzer
+	cache     cache.Cache
+	opts      options
 }
 
 func computeSalt() ([]byte, error) {
@@ -57,7 +57,7 @@ func computeSalt() ([]byte, error) {
 	}
 }
 
-func newLinter(cfg config.Config) (*linter, error) {
+func newLinter(opts options) (*linter, error) {
 	c, err := cache.Default()
 	if err != nil {
 		return nil, err
@@ -66,31 +66,102 @@ func newLinter(cfg config.Config) (*linter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not compute salt for cache: %s", err)
 	}
-	c.SetSalt(salt)
-	r, err := runner.New(cfg, c)
-	if err != nil {
-		return nil, err
+	cache.SetSalt(salt)
+
+	analyzers := make(map[caseFoldedString]*lint.Analyzer, len(opts.analyzers))
+	for _, a := range opts.analyzers {
+		analyzers[makeCaseFoldedString(a.Analyzer.Name)] = a
 	}
-	r.FallbackGoVersion = defaultGoVersion()
+
 	return &linter{
-		Runner: r,
+		cache:     c,
+		analyzers: analyzers,
+		opts:      opts,
 	}, nil
 }
 
-type LintResult struct {
+type lintResult struct {
+	// These fields are exported so that we can gob encode them.
+
 	CheckedFiles []string
 	Diagnostics  []diagnostic
 	Warnings     []string
 }
 
-func (l *linter) Lint(cfg *packages.Config, patterns []string) (LintResult, error) {
-	var out LintResult
+type options struct {
+	config                   config.Config
+	analyzers                []*lint.Analyzer
+	patterns                 []string
+	lintTests                bool
+	goVersion                string
+	printAnalyzerMeasurement func(analysis *analysis.Analyzer, pkg *loader.PackageSpec, d time.Duration)
+}
 
-	as := make([]*analysis.Analyzer, 0, len(l.Analyzers))
-	for _, a := range l.Analyzers {
+func (l *linter) run(bconf buildConfig) (lintResult, error) {
+	cfg := &packages.Config{}
+	if l.opts.lintTests {
+		cfg.Tests = true
+	}
+
+	cfg.BuildFlags = bconf.Flags
+	cfg.Env = append(os.Environ(), bconf.Envs...)
+
+	r, err := runner.New(l.opts.config, l.cache)
+	if err != nil {
+		return lintResult{}, err
+	}
+	r.GoVersion = l.opts.goVersion
+	r.Stats.PrintAnalyzerMeasurement = l.opts.printAnalyzerMeasurement
+
+	printStats := func() {
+		// Individual stats are read atomically, but overall there
+		// is no synchronisation. For printing rough progress
+		// information, this doesn't matter.
+		switch r.Stats.State() {
+		case runner.StateInitializing:
+			fmt.Fprintln(os.Stderr, "Status: initializing")
+		case runner.StateLoadPackageGraph:
+			fmt.Fprintln(os.Stderr, "Status: loading package graph")
+		case runner.StateBuildActionGraph:
+			fmt.Fprintln(os.Stderr, "Status: building action graph")
+		case runner.StateProcessing:
+			fmt.Fprintf(os.Stderr, "Packages: %d/%d initial, %d/%d total; Workers: %d/%d\n",
+				r.Stats.ProcessedInitialPackages(),
+				r.Stats.InitialPackages(),
+				r.Stats.ProcessedPackages(),
+				r.Stats.TotalPackages(),
+				r.ActiveWorkers(),
+				r.TotalWorkers(),
+			)
+		case runner.StateFinalizing:
+			fmt.Fprintln(os.Stderr, "Status: finalizing")
+		}
+	}
+	if len(infoSignals) > 0 {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, infoSignals...)
+		defer signal.Stop(ch)
+		go func() {
+			for range ch {
+				printStats()
+			}
+		}()
+	}
+	res, err := l.lint(r, cfg, l.opts.patterns)
+	for i := range res.Diagnostics {
+		res.Diagnostics[i].BuildName = bconf.Name
+	}
+	return res, err
+}
+
+func (l *linter) lint(r *runner.Runner, cfg *packages.Config, patterns []string) (lintResult, error) {
+	var out lintResult
+
+	as := make([]*analysis.Analyzer, 0, len(l.analyzers))
+	for _, a := range l.analyzers {
 		as = append(as, a.Analyzer)
 	}
-	results, err := l.Runner.Run(cfg, as, patterns)
+	results, err := r.Run(cfg, as, patterns)
 	if err != nil {
 		return out, err
 	}
@@ -103,8 +174,8 @@ func (l *linter) Lint(cfg *packages.Config, patterns []string) (LintResult, erro
 		}
 	}
 
-	analyzerNames := make([]string, 0, len(l.Analyzers))
-	for name := range l.Analyzers {
+	analyzerNames := make([]caseFoldedString, 0, len(l.analyzers))
+	for name := range l.analyzers {
 		analyzerNames = append(analyzerNames, name)
 	}
 	used := map[unusedKey]bool{}
@@ -126,7 +197,8 @@ func (l *linter) Lint(cfg *packages.Config, patterns []string) (LintResult, erro
 			}
 
 			out.CheckedFiles = append(out.CheckedFiles, res.Package.GoFiles...)
-			allowedAnalyzers := filterAnalyzerNames(analyzerNames, res.Config.Checks)
+			resChecks := makeCaseFoldedStrings(res.Config.Checks)
+			allowedAnalyzers := filterAnalyzerNames(analyzerNames, resChecks)
 			resd, err := res.Load()
 			if err != nil {
 				return out, err
@@ -138,7 +210,7 @@ func (l *linter) Lint(cfg *packages.Config, patterns []string) (LintResult, erro
 			}
 			// OPT move this code into the 'success' function.
 			for i, diag := range filtered {
-				a := l.Analyzers[diag.Category]
+				a := l.analyzers[makeCaseFoldedString(diag.Category)]
 				// Some diag.Category don't map to analyzers, such as "staticcheck"
 				if a != nil {
 					filtered[i].MergeIf = a.Doc.MergeIf
@@ -147,6 +219,11 @@ func (l *linter) Lint(cfg *packages.Config, patterns []string) (LintResult, erro
 			out.Diagnostics = append(out.Diagnostics, filtered...)
 
 			for _, obj := range resd.Unused.Used {
+				// Note: a side-effect of this code is that fields in instantiated structs are handled correctly. Even
+				// if only an instantiated field is marked as used, we will not flag the generic field, because it has
+				// the same position as the instance. At some point this won't be necessary anymore because we'll be
+				// able to make use of the Go 1.19+ Origin methods.
+
 				// FIXME(dh): pick the object whose filename does not include $GOROOT
 				key := unusedKey{
 					pkgPath: res.Package.PkgPath,
@@ -157,7 +234,7 @@ func (l *linter) Lint(cfg *packages.Config, patterns []string) (LintResult, erro
 				used[key] = true
 			}
 
-			if allowedAnalyzers["U1000"] {
+			if allowedAnalyzers[makeCaseFoldedString("U1000")] {
 				for _, obj := range resd.Unused.Unused {
 					key := unusedKey{
 						pkgPath: res.Package.PkgPath,
@@ -175,15 +252,7 @@ func (l *linter) Lint(cfg *packages.Config, patterns []string) (LintResult, erro
 	}
 
 	for _, uo := range unuseds {
-		if uo.obj.Kind == "type param" {
-			// We don't currently flag unused type parameters on used objects, and flagging them on unused objects isn't
-			// useful.
-			continue
-		}
 		if used[uo.key] {
-			continue
-		}
-		if uo.obj.InGenerated {
 			continue
 		}
 		out.Diagnostics = append(out.Diagnostics, diagnostic{
@@ -199,10 +268,14 @@ func (l *linter) Lint(cfg *packages.Config, patterns []string) (LintResult, erro
 	return out, nil
 }
 
-func filterIgnored(diagnostics []diagnostic, res runner.ResultData, allowedAnalyzers map[string]bool) ([]diagnostic, error) {
+func filterIgnored(
+	diagnostics []diagnostic,
+	res runner.ResultData,
+	allowedAnalyzers map[caseFoldedString]bool,
+) ([]diagnostic, error) {
 	couldHaveMatched := func(ig *lineIgnore) bool {
 		for _, c := range ig.Checks {
-			if c == "U1000" {
+			if c.String() == "u1000" {
 				// We never want to flag ignores for U1000,
 				// because U1000 isn't local to a single
 				// package. For example, an identifier may
@@ -231,7 +304,7 @@ func filterIgnored(diagnostics []diagnostic, res runner.ResultData, allowedAnaly
 	for _, ig := range ignores {
 		for i := range diagnostics {
 			diag := &diagnostics[i]
-			if ig.Match(*diag) {
+			if ig.match(*diag) {
 				diag.Severity = severityIgnored
 			}
 		}
@@ -252,24 +325,24 @@ func filterIgnored(diagnostics []diagnostic, res runner.ResultData, allowedAnaly
 }
 
 type ignore interface {
-	Match(diag diagnostic) bool
+	match(diag diagnostic) bool
 }
 
 type lineIgnore struct {
 	File    string
 	Line    int
-	Checks  []string
+	Checks  []caseFoldedString
 	Matched bool
 	Pos     token.Position
 }
 
-func (li *lineIgnore) Match(p diagnostic) bool {
+func (li *lineIgnore) match(p diagnostic) bool {
 	pos := p.Position
 	if pos.Filename != li.File || pos.Line != li.Line {
 		return false
 	}
 	for _, c := range li.Checks {
-		if m, _ := filepath.Match(c, p.Category); m {
+		if m, _ := filepath.Match(c.String(), makeCaseFoldedString(p.Category).String()); m {
 			li.Matched = true
 			return true
 		}
@@ -277,25 +350,17 @@ func (li *lineIgnore) Match(p diagnostic) bool {
 	return false
 }
 
-func (li *lineIgnore) String() string {
-	matched := "not matched"
-	if li.Matched {
-		matched = "matched"
-	}
-	return fmt.Sprintf("%s:%d %s (%s)", li.File, li.Line, strings.Join(li.Checks, ", "), matched)
-}
-
 type fileIgnore struct {
 	File   string
-	Checks []string
+	Checks []caseFoldedString
 }
 
-func (fi *fileIgnore) Match(p diagnostic) bool {
+func (fi *fileIgnore) match(p diagnostic) bool {
 	if p.Position.Filename != fi.File {
 		return false
 	}
 	for _, c := range fi.Checks {
-		if m, _ := filepath.Match(c, p.Category); m {
+		if m, _ := filepath.Match(c.String(), makeCaseFoldedString(p.Category).String()); m {
 			return true
 		}
 	}
@@ -326,6 +391,8 @@ func (s severity) String() string {
 // diagnostic represents a diagnostic in some source code.
 type diagnostic struct {
 	runner.Diagnostic
+
+	// These fields are exported so that we can gob encode them.
 	Severity  severity
 	MergeIf   lint.MergeStrategy
 	BuildName string
@@ -335,7 +402,7 @@ func (p diagnostic) equal(o diagnostic) bool {
 	return p.Position == o.Position &&
 		p.End == o.End &&
 		p.Message == o.Message &&
-		p.Category == o.Category &&
+		makeCaseFoldedString(p.Category) == makeCaseFoldedString(o.Category) &&
 		p.Severity == o.Severity &&
 		p.MergeIf == o.MergeIf &&
 		p.BuildName == o.BuildName
@@ -361,6 +428,11 @@ func failed(res runner.Result) []diagnostic {
 				msg = msg[1:]
 			}
 
+			cat := "compile"
+			if e.Kind == packages.ParseError {
+				cat = "config"
+			}
+
 			var posn token.Position
 			if e.Pos == "" {
 				// Under certain conditions (malformed package
@@ -381,14 +453,14 @@ func failed(res runner.Result) []diagnostic {
 				var err error
 				posn, _, err = parsePos(e.Pos)
 				if err != nil {
-					panic(fmt.Sprintf("internal error: %s", e))
+					panic(fmt.Sprintf("internal error: %s", err))
 				}
 			}
 			diag := diagnostic{
 				Diagnostic: runner.Diagnostic{
 					Position: posn,
 					Message:  msg,
-					Category: "compile",
+					Category: cat,
 				},
 				Severity: severityError,
 			}
@@ -418,14 +490,14 @@ type unusedKey struct {
 
 type unusedPair struct {
 	key unusedKey
-	obj unused.SerializedObject
+	obj unused.Object
 }
 
-func success(allowedAnalyzers map[string]bool, res runner.ResultData) []diagnostic {
+func success(allowedAnalyzers map[caseFoldedString]bool, res runner.ResultData) []diagnostic {
 	diags := res.Diagnostics
 	var diagnostics []diagnostic
 	for _, diag := range diags {
-		if !allowedAnalyzers[diag.Category] {
+		if !allowedAnalyzers[makeCaseFoldedString(diag.Category)] {
 			continue
 		}
 		diagnostics = append(diagnostics, diagnostic{Diagnostic: diag})
@@ -433,42 +505,36 @@ func success(allowedAnalyzers map[string]bool, res runner.ResultData) []diagnost
 	return diagnostics
 }
 
-func defaultGoVersion() string {
-	tags := build.Default.ReleaseTags
-	v := tags[len(tags)-1][2:]
-	return v
-}
+func filterAnalyzerNames(allAnalyzers []caseFoldedString, selection []caseFoldedString) map[caseFoldedString]bool {
+	allowedChecks := map[caseFoldedString]bool{}
 
-func filterAnalyzerNames(analyzers []string, checks []string) map[string]bool {
-	allowedChecks := map[string]bool{}
-
-	for _, check := range checks {
+	for _, check := range selection {
 		b := true
-		if len(check) > 1 && check[0] == '-' {
+		if check.Length() > 1 && check.Index(0) == '-' {
 			b = false
-			check = check[1:]
+			check = check.Slice(1, -1)
 		}
-		if check == "*" || check == "all" {
+		if check.String() == "*" || check.String() == "all" {
 			// Match all
-			for _, c := range analyzers {
-				allowedChecks[c] = b
+			for _, a := range allAnalyzers {
+				allowedChecks[a] = b
 			}
-		} else if strings.HasSuffix(check, "*") {
+		} else if strings.HasSuffix(check.String(), "*") {
 			// Glob
-			prefix := check[:len(check)-1]
-			isCat := strings.IndexFunc(prefix, func(r rune) bool { return unicode.IsNumber(r) }) == -1
+			prefix := check.Slice(0, check.Length()-1)
+			isCat := strings.IndexFunc(prefix.String(), unicode.IsNumber) == -1
 
-			for _, a := range analyzers {
-				idx := strings.IndexFunc(a, func(r rune) bool { return unicode.IsNumber(r) })
+			for _, a := range allAnalyzers {
+				idx := strings.IndexFunc(a.String(), unicode.IsNumber)
 				if isCat {
 					// Glob is S*, which should match S1000 but not SA1000
-					cat := a[:idx]
+					cat := a.Slice(0, idx)
 					if prefix == cat {
 						allowedChecks[a] = b
 					}
 				} else {
 					// Glob is S1*
-					if strings.HasPrefix(a, prefix) {
+					if strings.HasPrefix(a.String(), prefix.String()) {
 						allowedChecks[a] = b
 					}
 				}
@@ -481,7 +547,10 @@ func filterAnalyzerNames(analyzers []string, checks []string) map[string]bool {
 	return allowedChecks
 }
 
-var posRe = regexp.MustCompile(`^(.+?):(\d+)(?::(\d+)?)?`)
+// Note that the file name is optional and can be empty because of //line
+// directives of the form "//line :1" (but not "//line :1:1"). See
+// https://go.dev/issue/24183 and https://staticcheck.dev/issues/1582.
+var posRe = regexp.MustCompile(`^(?:(.+?):)?(\d+)(?::(\d+)?)?`)
 
 func parsePos(pos string) (token.Position, int, error) {
 	if pos == "-" || pos == "" {
@@ -489,7 +558,7 @@ func parsePos(pos string) (token.Position, int, error) {
 	}
 	parts := posRe.FindStringSubmatch(pos)
 	if parts == nil {
-		return token.Position{}, 0, fmt.Errorf("internal error: malformed position %q", pos)
+		return token.Position{}, 0, fmt.Errorf("malformed position %q", pos)
 	}
 	file := parts[1]
 	line, _ := strconv.Atoi(parts[2])
@@ -499,79 +568,4 @@ func parsePos(pos string) (token.Position, int, error) {
 		Line:     line,
 		Column:   col,
 	}, len(parts[0]), nil
-}
-
-type options struct {
-	Config      config.Config
-	BuildConfig BuildConfig
-
-	LintTests                bool
-	GoVersion                string
-	PrintAnalyzerMeasurement func(analysis *analysis.Analyzer, pkg *loader.PackageSpec, d time.Duration)
-}
-
-func doLint(as []*lint.Analyzer, paths []string, opt *options) (LintResult, error) {
-	if opt == nil {
-		opt = &options{}
-	}
-
-	l, err := newLinter(opt.Config)
-	if err != nil {
-		return LintResult{}, err
-	}
-	analyzers := make(map[string]*lint.Analyzer, len(as))
-	for _, a := range as {
-		analyzers[a.Analyzer.Name] = a
-	}
-	l.Analyzers = analyzers
-	l.Runner.GoVersion = opt.GoVersion
-	l.Runner.Stats.PrintAnalyzerMeasurement = opt.PrintAnalyzerMeasurement
-
-	cfg := &packages.Config{}
-	if opt.LintTests {
-		cfg.Tests = true
-	}
-
-	cfg.BuildFlags = opt.BuildConfig.Flags
-	cfg.Env = append(os.Environ(), opt.BuildConfig.Envs...)
-
-	printStats := func() {
-		// Individual stats are read atomically, but overall there
-		// is no synchronisation. For printing rough progress
-		// information, this doesn't matter.
-		switch l.Runner.Stats.State() {
-		case runner.StateInitializing:
-			fmt.Fprintln(os.Stderr, "Status: initializing")
-		case runner.StateLoadPackageGraph:
-			fmt.Fprintln(os.Stderr, "Status: loading package graph")
-		case runner.StateBuildActionGraph:
-			fmt.Fprintln(os.Stderr, "Status: building action graph")
-		case runner.StateProcessing:
-			fmt.Fprintf(os.Stderr, "Packages: %d/%d initial, %d/%d total; Workers: %d/%d\n",
-				l.Runner.Stats.ProcessedInitialPackages(),
-				l.Runner.Stats.InitialPackages(),
-				l.Runner.Stats.ProcessedPackages(),
-				l.Runner.Stats.TotalPackages(),
-				l.Runner.ActiveWorkers(),
-				l.Runner.TotalWorkers(),
-			)
-		case runner.StateFinalizing:
-			fmt.Fprintln(os.Stderr, "Status: finalizing")
-		}
-	}
-	if len(infoSignals) > 0 {
-		ch := make(chan os.Signal, 1)
-		signal.Notify(ch, infoSignals...)
-		defer signal.Stop(ch)
-		go func() {
-			for range ch {
-				printStats()
-			}
-		}()
-	}
-	res, err := l.Lint(cfg, paths)
-	for i := range res.Diagnostics {
-		res.Diagnostics[i].BuildName = opt.BuildConfig.Name
-	}
-	return res, err
 }

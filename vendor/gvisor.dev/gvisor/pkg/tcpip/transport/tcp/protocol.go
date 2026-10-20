@@ -16,13 +16,14 @@
 package tcp
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
 	"runtime"
 	"strings"
 	"time"
 
-	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/hash/jenkins"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/header/parse"
 	"gvisor.dev/gvisor/pkg/tcpip/internal/tcp"
@@ -84,32 +85,58 @@ const (
 	ccCubic = "cubic"
 )
 
+// +stateify savable
 type protocol struct {
 	stack *stack.Stack
 
-	mu                         sync.RWMutex
-	sackEnabled                bool
-	recovery                   tcpip.TCPRecovery
-	delayEnabled               bool
-	alwaysUseSynCookies        bool
-	sendBufferSize             tcpip.TCPSendBufferSizeRangeOption
-	recvBufferSize             tcpip.TCPReceiveBufferSizeRangeOption
-	congestionControl          string
-	availableCongestionControl []string
-	moderateReceiveBuffer      bool
-	lingerTimeout              time.Duration
-	timeWaitTimeout            time.Duration
-	timeWaitReuse              tcpip.TCPTimeWaitReuseOption
-	minRTO                     time.Duration
-	maxRTO                     time.Duration
-	maxRetries                 uint32
-	synRetries                 uint8
-	dispatcher                 dispatcher
+	mu protocolRWMutex `state:"nosave"`
 
-	// The following secrets are initialized once and stay unchanged after.
-	seqnumSecret     uint32
-	portOffsetSecret uint32
-	tsOffsetSecret   uint32
+	// +checklocks:mu
+	sackEnabled bool
+	// +checklocks:mu
+	recovery tcpip.TCPRecovery
+	// +checklocks:mu
+	delayEnabled bool
+	// +checklocks:mu
+	alwaysUseSynCookies bool
+	// +checklocks:mu
+	sendBufferSize tcpip.TCPSendBufferSizeRangeOption
+	// +checklocks:mu
+	recvBufferSize tcpip.TCPReceiveBufferSizeRangeOption
+	// +checklocks:mu
+	congestionControl string
+	// availableCongestionControl is immutable after construction.
+	availableCongestionControl []string
+	// +checklocks:mu
+	moderateReceiveBuffer bool
+	// +checklocks:mu
+	lingerTimeout time.Duration
+	// +checklocks:mu
+	timeWaitTimeout time.Duration
+	// +checklocks:mu
+	timeWaitReuse tcpip.TCPTimeWaitReuseOption
+	// +checklocks:mu
+	minRTO time.Duration
+	// +checklocks:mu
+	maxRTO time.Duration
+	// +checklocks:mu
+	maxRetries uint32
+	// +checklocks:mu
+	synRetries uint8
+
+	dispatcher dispatcher
+
+	// probe, if not nil, will be invoked any time an endpoint receives a
+	// TCP segment.
+	//
+	// This is immutable after creation.
+	probe TCPProbeFunc `state:"nosave"`
+
+	// The following secrets are used for ISN and timestamp-offset
+	// generation. They are not serialized into checkpoint state and are
+	// freshly drawn from the secure RNG on restore.
+	seqnumSecret   [16]byte `state:"nosave"`
+	tsOffsetSecret [16]byte `state:"nosave"`
 }
 
 // Number returns the tcp protocol number.
@@ -174,20 +201,19 @@ func (p *protocol) HandleUnknownDestinationPacket(id stack.TransportEndpointID, 
 
 func (p *protocol) tsOffset(src, dst tcpip.Address) tcp.TSOffset {
 	// Initialize a random tsOffset that will be added to the recentTS
-	// everytime the timestamp is sent when the Timestamp option is enabled.
+	// every time the timestamp is sent when the Timestamp option is enabled.
 	//
 	// See https://tools.ietf.org/html/rfc7323#section-5.4 for details on
 	// why this is required.
-	//
-	// TODO(https://gvisor.dev/issues/6473): This is not really secure as
-	// it does not use the recommended algorithm linked above.
-	h := jenkins.Sum32(p.tsOffsetSecret)
+	h := sha256.New()
+
 	// Per hash.Hash.Writer:
 	//
 	// It never returns an error.
-	_, _ = h.Write([]byte(src))
-	_, _ = h.Write([]byte(dst))
-	return tcp.NewTSOffset(h.Sum32())
+	_, _ = h.Write(p.tsOffsetSecret[:])
+	_, _ = h.Write(src.AsSlice())
+	_, _ = h.Write(dst.AsSlice())
+	return tcp.NewTSOffset(binary.LittleEndian.Uint32(h.Sum(nil)[:4]))
 }
 
 // replyWithReset replies to the given segment with a reset segment.
@@ -196,6 +222,7 @@ func (p *protocol) tsOffset(src, dst tcpip.Address) tcp.TSOffset {
 // then the route's default TTL will be used.
 func replyWithReset(st *stack.Stack, s *segment, tos, ipv4TTL uint8, ipv6HopLimit int16) tcpip.Error {
 	net := s.pkt.Network()
+	// TODO: b/528377510 - Verify if passing the NICID is correct.
 	route, err := st.FindRoute(s.pkt.NICID, net.DestinationAddress(), net.SourceAddress(), s.pkt.NetworkProtocolNumber, false /* multicastLoop */)
 	if err != nil {
 		return err
@@ -226,20 +253,32 @@ func replyWithReset(st *stack.Stack, s *segment, tos, ipv4TTL uint8, ipv6HopLimi
 		ack = s.sequenceNumber.Add(s.logicalLen())
 	}
 
-	p := stack.NewPacketBuffer(stack.PacketBufferOptions{ReserveHeaderBytes: header.TCPMinimumSize + int(route.MaxHeaderLength())})
+	var expOptVal uint16
+	if s.ep != nil {
+		expOptVal = s.ep.getExperimentOptionValue(route)
+	}
+	hdrSize := header.TCPMinimumSize + int(route.MaxHeaderLength())
+	if route.NetProto() == header.IPv6ProtocolNumber && expOptVal != 0 {
+		hdrSize += header.IPv6ExperimentHdrLength
+	}
+	p := stack.NewPacketBuffer(stack.PacketBufferOptions{ReserveHeaderBytes: hdrSize})
 	defer p.DecRef()
+
 	return sendTCP(route, tcpFields{
-		id:     s.id,
-		ttl:    ttl,
-		tos:    tos,
-		flags:  flags,
-		seq:    seq,
-		ack:    ack,
-		rcvWnd: 0,
+		id:        s.id,
+		ttl:       ttl,
+		tos:       tos,
+		flags:     flags,
+		seq:       seq,
+		ack:       ack,
+		rcvWnd:    0,
+		expOptVal: expOptVal,
 	}, p, stack.GSO{}, nil /* PacketOwner */)
 }
 
 // SetOption implements stack.TransportProtocol.SetOption.
+//
+// +checklocksexclude:p.mu
 func (p *protocol) SetOption(option tcpip.SettableTransportProtocolOption) tcpip.Error {
 	switch v := option.(type) {
 	case *tcpip.TCPSACKEnabled:
@@ -363,7 +402,7 @@ func (p *protocol) SetOption(option tcpip.SettableTransportProtocolOption) tcpip
 		return nil
 
 	case *tcpip.TCPSynRetriesOption:
-		if *v < 1 || *v > 255 {
+		if *v < 1 {
 			return &tcpip.ErrInvalidOptionValue{}
 		}
 		p.mu.Lock()
@@ -377,6 +416,8 @@ func (p *protocol) SetOption(option tcpip.SettableTransportProtocolOption) tcpip
 }
 
 // Option implements stack.TransportProtocol.Option.
+//
+// +checklocksexclude:p.mu
 func (p *protocol) Option(option tcpip.GettableTransportProtocolOption) tcpip.Error {
 	switch v := option.(type) {
 	case *tcpip.TCPSACKEnabled:
@@ -480,6 +521,15 @@ func (p *protocol) Option(option tcpip.GettableTransportProtocolOption) tcpip.Er
 	}
 }
 
+// SendBufferSize implements stack.SendBufSizeProto.
+//
+// +checklocksexclude:p.mu
+func (p *protocol) SendBufferSize() tcpip.TCPSendBufferSizeRangeOption {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.sendBufferSize
+}
+
 // Close implements stack.TransportProtocol.Close.
 func (p *protocol) Close() {
 	p.dispatcher.close()
@@ -500,13 +550,51 @@ func (p *protocol) Resume() {
 	p.dispatcher.resume()
 }
 
+// Restore implements stack.TransportProtocol.Restore.
+func (p *protocol) Restore() {
+	p.dispatcher.start()
+}
+
 // Parse implements stack.TransportProtocol.Parse.
 func (*protocol) Parse(pkt *stack.PacketBuffer) bool {
 	return parse.TCP(pkt)
 }
 
-// NewProtocol returns a TCP transport protocol.
+// NewProtocol returns a TCP transport protocol with Reno congestion control.
 func NewProtocol(s *stack.Stack) stack.TransportProtocol {
+	return newProtocol(s, ccReno, nil)
+}
+
+// NewProtocolProbe returns a TCP transport protocol with Reno congestion
+// control and the given probe.
+//
+// The probe will be invoked on every segment received by TCP endpoints. The
+// probe function is passed a copy of the TCP endpoint state before and after
+// processing of the segment.
+func NewProtocolProbe(probe TCPProbeFunc) func(*stack.Stack) stack.TransportProtocol {
+	return func(s *stack.Stack) stack.TransportProtocol {
+		return newProtocol(s, ccReno, probe)
+	}
+}
+
+// NewProtocolCUBIC returns a TCP transport protocol with CUBIC congestion
+// control.
+//
+// TODO(b/345835636): Remove this and make CUBIC the default across the board.
+func NewProtocolCUBIC(s *stack.Stack) stack.TransportProtocol {
+	return newProtocol(s, ccCubic, nil)
+}
+
+func newProtocol(s *stack.Stack, cc string, probe TCPProbeFunc) stack.TransportProtocol {
+	rng := s.SecureRNG()
+	var seqnumSecret [16]byte
+	var tsOffsetSecret [16]byte
+	if n, err := rng.Reader.Read(seqnumSecret[:]); err != nil || n != len(seqnumSecret) {
+		panic(fmt.Sprintf("Read() failed: %v", err))
+	}
+	if n, err := rng.Reader.Read(tsOffsetSecret[:]); err != nil || n != len(tsOffsetSecret) {
+		panic(fmt.Sprintf("Read() failed: %v", err))
+	}
 	p := protocol{
 		stack: s,
 		sendBufferSize: tcpip.TCPSendBufferSizeRangeOption{
@@ -519,8 +607,10 @@ func NewProtocol(s *stack.Stack) stack.TransportProtocol {
 			Default: DefaultReceiveBufferSize,
 			Max:     MaxBufferSize,
 		},
-		congestionControl:          ccReno,
+		sackEnabled:                true,
+		congestionControl:          cc,
 		availableCongestionControl: []string{ccReno, ccCubic},
+		moderateReceiveBuffer:      true,
 		lingerTimeout:              DefaultTCPLingerTimeout,
 		timeWaitTimeout:            DefaultTCPTimeWaitTimeout,
 		timeWaitReuse:              tcpip.TCPTimeWaitReuseLoopbackOnly,
@@ -529,11 +619,11 @@ func NewProtocol(s *stack.Stack) stack.TransportProtocol {
 		maxRTO:                     MaxRTO,
 		maxRetries:                 MaxRetries,
 		recovery:                   tcpip.TCPRACKLossDetection,
-		seqnumSecret:               s.Rand().Uint32(),
-		portOffsetSecret:           s.Rand().Uint32(),
-		tsOffsetSecret:             s.Rand().Uint32(),
+		seqnumSecret:               seqnumSecret,
+		tsOffsetSecret:             tsOffsetSecret,
+		probe:                      probe,
 	}
-	p.dispatcher.init(s.Rand(), runtime.GOMAXPROCS(0))
+	p.dispatcher.init(s.InsecureRNG(), runtime.GOMAXPROCS(0))
 	return &p
 }
 

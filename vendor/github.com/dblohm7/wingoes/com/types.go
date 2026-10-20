@@ -2,24 +2,16 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build windows
+
 package com
 
 import (
+	"unsafe"
+
 	"github.com/dblohm7/wingoes"
 	"golang.org/x/sys/windows"
 )
-
-// IID is a GUID that represents an interface ID.
-type IID windows.GUID
-
-// CLSID is a GUID that represents a class ID.
-type CLSID windows.GUID
-
-// AppID is a GUID that represents an application ID.
-type AppID windows.GUID
-
-// ServiceID is a GUID that represents a service ID.
-type ServiceID windows.GUID
 
 type coMTAUsageCookie windows.Handle
 
@@ -119,3 +111,40 @@ const (
 	rpcImpLevelImpersonate = rpcImpersonationLevel(3)
 	rpcImpLevelDelegate    = rpcImpersonationLevel(4)
 )
+
+// COMAllocatedString encapsulates a UTF-16 string that was allocated by COM
+// using its internal heap.
+type COMAllocatedString uintptr
+
+// Close frees the memory held by the string.
+func (s *COMAllocatedString) Close() error {
+	windows.CoTaskMemFree(unsafe.Pointer(*s))
+	*s = 0
+	return nil
+}
+
+func (s *COMAllocatedString) String() string {
+	return windows.UTF16PtrToString((*uint16)(unsafe.Pointer(*s)))
+}
+
+// UTF16 returns a slice containing a copy of the UTF-16 string, including a
+// NUL terminator.
+func (s *COMAllocatedString) UTF16() []uint16 {
+	p := (*uint16)(unsafe.Pointer(*s))
+	if p == nil {
+		return nil
+	}
+
+	n := 0
+	for ptr := unsafe.Pointer(p); *(*uint16)(ptr) != 0; n++ {
+		ptr = unsafe.Pointer(uintptr(ptr) + unsafe.Sizeof(*p))
+	}
+
+	// Make a copy, including the NUL terminator.
+	return append([]uint16{}, unsafe.Slice(p, n+1)...)
+}
+
+// UTF16Ptr returns a pointer to a NUL-terminated copy of the UTF-16 string.
+func (s *COMAllocatedString) UTF16Ptr() *uint16 {
+	return unsafe.SliceData(s.UTF16())
+}

@@ -1,11 +1,17 @@
 package logger
 
-// Logging is currently designed to look and feel like clang's error format.
+// Logging is either done to stderr (via "NewStderrLog") or to an in-memory
+// array (via "NewDeferLog"). In-memory arrays are used to capture messages
+// from parsing individual files because during incremental builds, log
+// messages for a given file can be replayed from memory if the file ends up
+// not being reparsed.
+//
 // Errors are streamed asynchronously as they happen, each error contains the
 // contents of the line with the error, and the error count is limited by
 // default.
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"runtime"
@@ -21,11 +27,7 @@ const defaultTerminalWidth = 80
 type Log struct {
 	AddMsg    func(Msg)
 	HasErrors func() bool
-
-	// This is called after the build has finished but before writing to stdout.
-	// It exists to ensure that deferred warning messages end up in the terminal
-	// before the data written to stdout.
-	AlmostDone func()
+	Peek      func() []Msg
 
 	Done func() []Msg
 
@@ -43,6 +45,13 @@ const (
 	LevelWarning
 	LevelError
 	LevelSilent
+)
+
+type LogStyle int8
+
+const (
+	StyleDefault LogStyle = iota
+	StyleVisualStudio
 )
 
 type MsgKind uint8
@@ -133,11 +142,8 @@ func isProbablyWindowsCommandPrompt() bool {
 		// because that means we're running in the new Windows Terminal instead.
 		if runtime.GOOS == "windows" {
 			windowsCommandPrompt.isProbablyCMD = true
-			for _, env := range os.Environ() {
-				if strings.HasPrefix(env, "WT_SESSION=") {
-					windowsCommandPrompt.isProbablyCMD = false
-					break
-				}
+			if _, ok := os.LookupEnv("WT_SESSION"); ok {
+				windowsCommandPrompt.isProbablyCMD = false
 			}
 		}
 	}
@@ -164,7 +170,7 @@ type MsgData struct {
 }
 
 type MsgLocation struct {
-	File       string
+	File       PrettyPaths
 	Namespace  string
 	LineText   string
 	Suggestion string
@@ -187,6 +193,21 @@ func (r Range) End() int32 {
 	return r.Loc.Start + r.Len
 }
 
+func (a *Range) ExpandBy(b Range) {
+	if a.Len == 0 {
+		*a = b
+	} else {
+		end := a.End()
+		if n := b.End(); n > end {
+			end = n
+		}
+		if b.Loc.Start < a.Loc.Start {
+			a.Loc.Start = b.Loc.Start
+		}
+		a.Len = end - a.Loc.Start
+	}
+}
+
 type Span struct {
 	Text  string
 	Range Range
@@ -207,7 +228,7 @@ func (a SortableMsgs) Less(i int, j int) bool {
 		return aiLoc == nil && ajLoc != nil
 	}
 	if aiLoc.File != ajLoc.File {
-		return aiLoc.File < ajLoc.File
+		return aiLoc.File.Abs < ajLoc.File.Abs || (aiLoc.File.Abs == ajLoc.File.Abs && aiLoc.File.Rel < ajLoc.File.Rel)
 	}
 	if aiLoc.Line != ajLoc.Line {
 		return aiLoc.Line < ajLoc.Line
@@ -235,7 +256,77 @@ type Path struct {
 	// the output. This is supported by other bundlers, so we also support this.
 	IgnoredSuffix string
 
+	// Import attributes (the "with" keyword after an import) can affect path
+	// resolution. In other words, two paths in the same file that are otherwise
+	// equal but that have different import attributes may resolve to different
+	// paths.
+	ImportAttributes ImportAttributes
+
 	Flags PathFlags
+}
+
+// We rely on paths as map keys. Go doesn't support custom hash codes and
+// only implements hash codes for certain types. In particular, hash codes
+// are implemented for strings but not for arrays of strings. So we have to
+// pack these import attributes into a string.
+type ImportAttributes struct {
+	packedData string
+}
+
+type ImportAttribute struct {
+	Key   string
+	Value string
+}
+
+// This returns a sorted array instead of a map to make determinism easier
+func (attrs ImportAttributes) DecodeIntoArray() (result []ImportAttribute) {
+	if attrs.packedData == "" {
+		return nil
+	}
+	bytes := []byte(attrs.packedData)
+	for len(bytes) > 0 {
+		kn := 4 + binary.LittleEndian.Uint32(bytes[:4])
+		k := string(bytes[4:kn])
+		bytes = bytes[kn:]
+		vn := 4 + binary.LittleEndian.Uint32(bytes[:4])
+		v := string(bytes[4:vn])
+		bytes = bytes[vn:]
+		result = append(result, ImportAttribute{Key: k, Value: v})
+	}
+	return result
+}
+
+func (attrs ImportAttributes) DecodeIntoMap() (result map[string]string) {
+	if array := attrs.DecodeIntoArray(); len(array) > 0 {
+		result = make(map[string]string, len(array))
+		for _, attr := range array {
+			result[attr.Key] = attr.Value
+		}
+	}
+	return
+}
+
+func EncodeImportAttributes(value map[string]string) ImportAttributes {
+	if len(value) == 0 {
+		return ImportAttributes{}
+	}
+	keys := make([]string, 0, len(value))
+	for k := range value {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	var n [4]byte
+	for _, k := range keys {
+		v := value[k]
+		binary.LittleEndian.PutUint32(n[:], uint32(len(k)))
+		sb.Write(n[:])
+		sb.WriteString(k)
+		binary.LittleEndian.PutUint32(n[:], uint32(len(v)))
+		sb.Write(n[:])
+		sb.WriteString(v)
+	}
+	return ImportAttributes{packedData: sb.String()}
 }
 
 type PathFlags uint8
@@ -249,24 +340,15 @@ func (p Path) IsDisabled() bool {
 	return (p.Flags & PathDisabled) != 0
 }
 
-func (a Path) ComesBeforeInSortedOrder(b Path) bool {
-	return a.Namespace > b.Namespace ||
-		(a.Namespace == b.Namespace && (a.Text < b.Text ||
-			(a.Text == b.Text && (a.Flags < b.Flags ||
-				(a.Flags == b.Flags && a.IgnoredSuffix < b.IgnoredSuffix)))))
-}
-
 var noColorResult bool
 var noColorOnce sync.Once
 
 func hasNoColorEnvironmentVariable() bool {
 	noColorOnce.Do(func() {
-		for _, key := range os.Environ() {
-			// Read "NO_COLOR" from the environment. This is a convention that some
-			// software follows. See https://no-color.org/ for more information.
-			if strings.HasPrefix(key, "NO_COLOR=") {
-				noColorResult = true
-			}
+		// Read "NO_COLOR" from the environment. This is a convention that some
+		// software follows. See https://no-color.org/ for more information.
+		if _, ok := os.LookupEnv("NO_COLOR"); ok {
+			noColorResult = true
 		}
 	})
 	return noColorResult
@@ -276,6 +358,17 @@ func hasNoColorEnvironmentVariable() bool {
 // because it should work the same on Unix and Windows. These names end up in
 // the generated output and the generated output should not depend on the OS.
 func PlatformIndependentPathDirBaseExt(path string) (dir string, base string, ext string) {
+	absRootSlash := -1
+
+	// Make sure we don't strip off the slash for the root of the file system
+	if len(path) > 0 && (path[0] == '/' || path[0] == '\\') {
+		absRootSlash = 0 // Unix
+	} else if len(path) > 2 && path[1] == ':' && (path[2] == '/' || path[2] == '\\') {
+		if c := path[0]; (c >= 'a' && c < 'z') || (c >= 'A' && c <= 'Z') {
+			absRootSlash = 2 // Windows
+		}
+	}
+
 	for {
 		i := strings.LastIndexAny(path, "/\\")
 
@@ -286,6 +379,10 @@ func PlatformIndependentPathDirBaseExt(path string) (dir string, base string, ex
 		}
 
 		// Stop if we found a non-trailing slash
+		if i == absRootSlash {
+			dir, base = path[:i+1], path[i+1:]
+			break
+		}
 		if i+1 != len(path) {
 			dir, base = path[:i], path[i+1:]
 			break
@@ -297,21 +394,57 @@ func PlatformIndependentPathDirBaseExt(path string) (dir string, base string, ex
 
 	// Strip off the extension
 	if dot := strings.LastIndexByte(base, '.'); dot >= 0 {
-		base, ext = base[:dot], base[dot:]
-	}
+		ext = base[dot:]
 
+		// We default to the "local-css" loader for ".module.css" files. Make sure
+		// the string names generated by this don't all have "_module_" in them.
+		if ext == ".css" {
+			if dot2 := strings.LastIndexByte(base[:dot], '.'); dot2 >= 0 && base[dot2:] == ".module.css" {
+				dot = dot2
+				ext = base[dot:]
+			}
+		}
+
+		base = base[:dot]
+	}
 	return
+}
+
+type PrettyPaths struct {
+	// This option exists to help people that run esbuild in many different
+	// directories and want a unified way of reporting file paths. It avoids
+	// needing to code to convert from relative paths back to absolute paths
+	// to find the original file. It means builds are not reproducible across
+	// machines, however.
+	Abs string
+
+	// This is a mostly platform-independent path. It's relative to the current
+	// working directory and always uses standard path separators. This is the
+	// default behavior since it leads to reproducible builds across machines.
+	//
+	// Note that these paths still use the original case of the path, so they may
+	// still work differently on file systems that are case-insensitive vs.
+	// case-sensitive.
+	Rel string
+}
+
+type PathStyle uint8
+
+const (
+	RelPath PathStyle = iota
+	AbsPath
+)
+
+func (paths *PrettyPaths) Select(style PathStyle) string {
+	if style == AbsPath {
+		return paths.Abs
+	}
+	return paths.Rel
 }
 
 type Source struct {
 	// This is used for error messages and the metadata JSON file.
-	//
-	// This is a mostly platform-independent path. It's relative to the current
-	// working directory and always uses standard path separators. Use this for
-	// referencing a file in all output data. These paths still use the original
-	// case of the path so they may still work differently on file systems that
-	// are case-insensitive vs. case-sensitive.
-	PrettyPath string
+	PrettyPaths PrettyPaths
 
 	// An identifier that is mixed in to automatically-generated symbol names to
 	// improve readability. For example, if the identifier is "util" then the
@@ -441,6 +574,74 @@ func (s *Source) RangeOfLegacyOctalEscape(loc Loc) (r Range) {
 	return
 }
 
+func (s *Source) CommentTextWithoutIndent(r Range) string {
+	text := s.Contents[r.Loc.Start:r.End()]
+	if len(text) < 2 || !strings.HasPrefix(text, "/*") {
+		return text
+	}
+	prefix := s.Contents[:r.Loc.Start]
+
+	// Figure out the initial indent
+	indent := 0
+seekBackwardToNewline:
+	for len(prefix) > 0 {
+		c, size := utf8.DecodeLastRuneInString(prefix)
+		switch c {
+		case '\r', '\n', '\u2028', '\u2029':
+			break seekBackwardToNewline
+		}
+		prefix = prefix[:len(prefix)-size]
+		indent++
+	}
+
+	// Split the comment into lines
+	var lines []string
+	start := 0
+	for i, c := range text {
+		switch c {
+		case '\r', '\n':
+			// Don't double-append for Windows style "\r\n" newlines
+			if start <= i {
+				lines = append(lines, text[start:i])
+			}
+
+			start = i + 1
+
+			// Ignore the second part of Windows style "\r\n" newlines
+			if c == '\r' && start < len(text) && text[start] == '\n' {
+				start++
+			}
+
+		case '\u2028', '\u2029':
+			lines = append(lines, text[start:i])
+			start = i + 3
+		}
+	}
+	lines = append(lines, text[start:])
+
+	// Find the minimum indent over all lines after the first line
+	for _, line := range lines[1:] {
+		lineIndent := 0
+		for _, c := range line {
+			if c != ' ' && c != '\t' {
+				break
+			}
+			lineIndent++
+		}
+		if indent > lineIndent {
+			indent = lineIndent
+		}
+	}
+
+	// Trim the indent off of all lines after the first line
+	for i, line := range lines {
+		if i > 0 {
+			lines[i] = line[indent:]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func plural(prefix string, count int, shown int, someAreMissing bool) string {
 	var text string
 	if count == 1 {
@@ -502,14 +703,8 @@ func NewStderrLog(options OutputOptions) Log {
 		remainingMessagesBeforeLimit = 0x7FFFFFFF
 	}
 	var deferredWarnings []Msg
-	didFinalizeLog := false
 
 	finalizeLog := func() {
-		if didFinalizeLog {
-			return
-		}
-		didFinalizeLog = true
-
 		// Print the deferred warning now if there was no error after all
 		for remainingMessagesBeforeLimit > 0 && len(deferredWarnings) > 0 {
 			shownWarnings++
@@ -608,17 +803,16 @@ func NewStderrLog(options OutputOptions) Log {
 			return hasErrors
 		},
 
-		AlmostDone: func() {
+		Peek: func() []Msg {
 			mutex.Lock()
 			defer mutex.Unlock()
-
-			finalizeLog()
+			sort.Stable(msgs)
+			return append([]Msg{}, msgs...)
 		},
 
 		Done: func() []Msg {
 			mutex.Lock()
 			defer mutex.Unlock()
-
 			finalizeLog()
 			sort.Stable(msgs)
 			return msgs
@@ -628,6 +822,17 @@ func NewStderrLog(options OutputOptions) Log {
 
 func PrintErrorToStderr(osArgs []string, text string) {
 	PrintMessageToStderr(osArgs, Msg{Kind: Error, Data: MsgData{Text: text}})
+}
+
+func PrintErrorWithNoteToStderr(osArgs []string, text string, note string) {
+	msg := Msg{
+		Kind: Error,
+		Data: MsgData{Text: text},
+	}
+	if note != "" {
+		msg.Notes = []MsgData{{Text: note}}
+	}
+	PrintMessageToStderr(osArgs, msg)
 }
 
 func OutputOptionsForArgs(osArgs []string) OutputOptions {
@@ -641,6 +846,7 @@ func OutputOptionsForArgs(osArgs []string) OutputOptions {
 			options.Color = ColorNever
 		case "--color=true", "--color":
 			options.Color = ColorAlways
+
 		case "--log-level=info":
 			options.LogLevel = LevelInfo
 		case "--log-level=warning":
@@ -649,6 +855,11 @@ func OutputOptionsForArgs(osArgs []string) OutputOptions {
 			options.LogLevel = LevelError
 		case "--log-level=silent":
 			options.LogLevel = LevelSilent
+
+		case "--log-style=default":
+			options.LogStyle = StyleDefault
+		case "--log-level=visualstudio":
+			options.LogStyle = StyleVisualStudio
 		}
 	}
 
@@ -976,7 +1187,10 @@ func NewDeferLog(kind DeferLogKind, overrides map[MsgID]LogLevel) Log {
 			return hasErrors
 		},
 
-		AlmostDone: func() {
+		Peek: func() []Msg {
+			mutex.Lock()
+			defer mutex.Unlock()
+			return append([]Msg{}, msgs...)
 		},
 
 		Done: func() []Msg {
@@ -1001,273 +1215,23 @@ type OutputOptions struct {
 	IncludeSource bool
 	Color         UseColor
 	LogLevel      LogLevel
+	LogStyle      LogStyle
+	PathStyle     PathStyle
 	Overrides     map[MsgID]LogLevel
 }
 
 func (msg Msg) String(options OutputOptions, terminalInfo TerminalInfo) string {
-	// Format the message
-	text := msgString(options.IncludeSource, terminalInfo, msg.ID, msg.Kind, msg.Data, msg.PluginName)
+	switch options.LogStyle {
+	case StyleVisualStudio:
+		return msgToStringVisualStudio(msg, options, terminalInfo)
 
-	// Format the notes
-	var oldData MsgData
-	for i, note := range msg.Notes {
-		if options.IncludeSource && (i == 0 || strings.IndexByte(oldData.Text, '\n') >= 0 || oldData.Location != nil) {
-			text += "\n"
-		}
-		text += msgString(options.IncludeSource, terminalInfo, MsgID_None, Note, note, "")
-		oldData = note
+	default:
+		return msgToStringDefault(msg, options, terminalInfo)
 	}
-
-	// Add extra spacing between messages if source code is present
-	if options.IncludeSource {
-		text += "\n"
-	}
-	return text
 }
 
 // The number of margin characters in addition to the line number
 const extraMarginChars = 9
-
-func marginWithLineText(maxMargin int, line int) string {
-	number := fmt.Sprintf("%d", line)
-	return fmt.Sprintf("      %s%s │ ", strings.Repeat(" ", maxMargin-len(number)), number)
-}
-
-func emptyMarginText(maxMargin int, isLast bool) string {
-	space := strings.Repeat(" ", maxMargin)
-	if isLast {
-		return fmt.Sprintf("      %s ╵ ", space)
-	}
-	return fmt.Sprintf("      %s │ ", space)
-}
-
-func msgString(includeSource bool, terminalInfo TerminalInfo, id MsgID, kind MsgKind, data MsgData, pluginName string) string {
-	if !includeSource {
-		if loc := data.Location; loc != nil {
-			return fmt.Sprintf("%s: %s: %s\n", loc.File, kind.String(), data.Text)
-		}
-		return fmt.Sprintf("%s: %s\n", kind.String(), data.Text)
-	}
-
-	var colors Colors
-	if terminalInfo.UseColorEscapes {
-		colors = TerminalColors
-	}
-
-	var iconColor string
-	var kindColorBrackets string
-	var kindColorText string
-
-	location := ""
-
-	if data.Location != nil {
-		maxMargin := len(fmt.Sprintf("%d", data.Location.Line))
-		d := detailStruct(data, terminalInfo, maxMargin)
-
-		if d.Suggestion != "" {
-			location = fmt.Sprintf("\n    %s:%d:%d:\n%s%s%s%s%s%s\n%s%s%s%s%s\n%s%s%s%s%s\n%s",
-				d.Path, d.Line, d.Column,
-				colors.Dim, d.SourceBefore, colors.Green, d.SourceMarked, colors.Dim, d.SourceAfter,
-				emptyMarginText(maxMargin, false), d.Indent, colors.Green, d.Marker, colors.Dim,
-				emptyMarginText(maxMargin, true), d.Indent, colors.Green, d.Suggestion, colors.Reset,
-				d.ContentAfter,
-			)
-		} else {
-			location = fmt.Sprintf("\n    %s:%d:%d:\n%s%s%s%s%s%s\n%s%s%s%s%s\n%s",
-				d.Path, d.Line, d.Column,
-				colors.Dim, d.SourceBefore, colors.Green, d.SourceMarked, colors.Dim, d.SourceAfter,
-				emptyMarginText(maxMargin, true), d.Indent, colors.Green, d.Marker, colors.Reset,
-				d.ContentAfter,
-			)
-		}
-	}
-
-	switch kind {
-	case Verbose:
-		iconColor = colors.Cyan
-		kindColorBrackets = colors.CyanBgCyan
-		kindColorText = colors.CyanBgBlack
-
-	case Debug:
-		iconColor = colors.Green
-		kindColorBrackets = colors.GreenBgGreen
-		kindColorText = colors.GreenBgWhite
-
-	case Info:
-		iconColor = colors.Blue
-		kindColorBrackets = colors.BlueBgBlue
-		kindColorText = colors.BlueBgWhite
-
-	case Error:
-		iconColor = colors.Red
-		kindColorBrackets = colors.RedBgRed
-		kindColorText = colors.RedBgWhite
-
-	case Warning:
-		iconColor = colors.Yellow
-		kindColorBrackets = colors.YellowBgYellow
-		kindColorText = colors.YellowBgBlack
-
-	case Note:
-		sb := strings.Builder{}
-
-		for _, line := range strings.Split(data.Text, "\n") {
-			// Special-case word wrapping
-			if wrapWidth := terminalInfo.Width; wrapWidth > 2 {
-				if !data.DisableMaximumWidth && wrapWidth > 100 {
-					wrapWidth = 100 // Enforce a maximum paragraph width for readability
-				}
-				for _, run := range wrapWordsInString(line, wrapWidth-2) {
-					sb.WriteString("  ")
-					sb.WriteString(linkifyText(run, colors.Underline, colors.Reset))
-					sb.WriteByte('\n')
-				}
-				continue
-			}
-
-			// Otherwise, just write an indented line
-			sb.WriteString("  ")
-			sb.WriteString(linkifyText(line, colors.Underline, colors.Reset))
-			sb.WriteByte('\n')
-		}
-
-		sb.WriteString(location)
-		return sb.String()
-	}
-
-	if pluginName != "" {
-		pluginName = fmt.Sprintf("%s%s[plugin %s]%s ", colors.Bold, colors.Magenta, pluginName, colors.Reset)
-	}
-
-	msgID := MsgIDToString(id)
-	if msgID != "" {
-		msgID = fmt.Sprintf(" [%s]", msgID)
-	}
-
-	return fmt.Sprintf("%s%s %s[%s%s%s]%s %s%s%s%s%s\n%s",
-		iconColor, kind.Icon(),
-		kindColorBrackets, kindColorText, kind.String(), kindColorBrackets, colors.Reset,
-		pluginName,
-		colors.Bold, data.Text, colors.Reset, msgID,
-		location,
-	)
-}
-
-func linkifyText(text string, underline string, reset string) string {
-	if underline == "" {
-		return text
-	}
-
-	https := strings.Index(text, "https://")
-	if https == -1 {
-		return text
-	}
-
-	sb := strings.Builder{}
-	for {
-		https := strings.Index(text, "https://")
-		if https == -1 {
-			break
-		}
-
-		end := strings.IndexByte(text[https:], ' ')
-		if end == -1 {
-			end = len(text)
-		} else {
-			end += https
-		}
-
-		// Remove trailing punctuation
-		if end > https {
-			switch text[end-1] {
-			case '.', ',', '?', '!', ')', ']', '}':
-				end--
-			}
-		}
-
-		sb.WriteString(text[:https])
-		sb.WriteString(underline)
-		sb.WriteString(text[https:end])
-		sb.WriteString(reset)
-		text = text[end:]
-	}
-
-	sb.WriteString(text)
-	return sb.String()
-}
-
-func wrapWordsInString(text string, width int) []string {
-	runs := []string{}
-
-outer:
-	for text != "" {
-		i := 0
-		x := 0
-		wordEndI := 0
-
-		// Skip over any leading spaces
-		for i < len(text) && text[i] == ' ' {
-			i++
-			x++
-		}
-
-		// Find out how many words will fit in this run
-		for i < len(text) {
-			oldWordEndI := wordEndI
-			wordStartI := i
-
-			// Find the end of the word
-			for i < len(text) {
-				c, width := utf8.DecodeRuneInString(text[i:])
-				if c == ' ' {
-					break
-				}
-				i += width
-				x += 1 // Naively assume that each unicode code point is a single column
-			}
-			wordEndI = i
-
-			// Split into a new run if this isn't the first word in the run and the end is past the width
-			if wordStartI > 0 && x > width {
-				runs = append(runs, text[:oldWordEndI])
-				text = text[wordStartI:]
-				continue outer
-			}
-
-			// Skip over any spaces after the word
-			for i < len(text) && text[i] == ' ' {
-				i++
-				x++
-			}
-		}
-
-		// If we get here, this is the last run (i.e. everything fits)
-		break
-	}
-
-	// Remove any trailing spaces on the last run
-	for len(text) > 0 && text[len(text)-1] == ' ' {
-		text = text[:len(text)-1]
-	}
-	runs = append(runs, text)
-	return runs
-}
-
-type MsgDetail struct {
-	SourceBefore string
-	SourceMarked string
-	SourceAfter  string
-
-	Indent     string
-	Marker     string
-	Suggestion string
-
-	ContentAfter string
-
-	Path   string
-	Line   int
-	Column int
-}
 
 // It's not common for large files to have many warnings. But when it happens,
 // we want to make sure that it's not too slow. Source code locations are
@@ -1288,7 +1252,7 @@ type MsgDetail struct {
 // the most important.
 type LineColumnTracker struct {
 	contents     string
-	prettyPath   string
+	prettyPaths  PrettyPaths
 	offset       int32
 	line         int32
 	lineStart    int32
@@ -1307,7 +1271,7 @@ func MakeLineColumnTracker(source *Source) LineColumnTracker {
 
 	return LineColumnTracker{
 		contents:     source.Contents,
-		prettyPath:   source.PrettyPath,
+		prettyPaths:  source.PrettyPaths,
 		hasLineStart: true,
 		hasSource:    true,
 	}
@@ -1429,197 +1393,12 @@ func (tracker *LineColumnTracker) MsgLocationOrNil(r Range) *MsgLocation {
 	lineCount, columnCount, lineStart, lineEnd := tracker.computeLineAndColumn(int(r.Loc.Start))
 
 	return &MsgLocation{
-		File:     tracker.prettyPath,
+		File:     tracker.prettyPaths,
 		Line:     lineCount + 1, // 0-based to 1-based
 		Column:   columnCount,
 		Length:   int(r.Len),
 		LineText: tracker.contents[lineStart:lineEnd],
 	}
-}
-
-func detailStruct(data MsgData, terminalInfo TerminalInfo, maxMargin int) MsgDetail {
-	// Only highlight the first line of the line text
-	loc := *data.Location
-	endOfFirstLine := len(loc.LineText)
-	for i, c := range loc.LineText {
-		if c == '\r' || c == '\n' || c == '\u2028' || c == '\u2029' {
-			endOfFirstLine = i
-			break
-		}
-	}
-	firstLine := loc.LineText[:endOfFirstLine]
-	afterFirstLine := loc.LineText[endOfFirstLine:]
-	if afterFirstLine != "" && !strings.HasSuffix(afterFirstLine, "\n") {
-		afterFirstLine += "\n"
-	}
-
-	// Clamp values in range
-	if loc.Line < 0 {
-		loc.Line = 0
-	}
-	if loc.Column < 0 {
-		loc.Column = 0
-	}
-	if loc.Length < 0 {
-		loc.Length = 0
-	}
-	if loc.Column > endOfFirstLine {
-		loc.Column = endOfFirstLine
-	}
-	if loc.Length > endOfFirstLine-loc.Column {
-		loc.Length = endOfFirstLine - loc.Column
-	}
-
-	spacesPerTab := 2
-	lineText := renderTabStops(firstLine, spacesPerTab)
-	textUpToLoc := renderTabStops(firstLine[:loc.Column], spacesPerTab)
-	markerStart := len(textUpToLoc)
-	markerEnd := markerStart
-	indent := strings.Repeat(" ", estimateWidthInTerminal(textUpToLoc))
-	marker := "^"
-
-	// Extend markers to cover the full range of the error
-	if loc.Length > 0 {
-		markerEnd = len(renderTabStops(firstLine[:loc.Column+loc.Length], spacesPerTab))
-	}
-
-	// Clip the marker to the bounds of the line
-	if markerStart > len(lineText) {
-		markerStart = len(lineText)
-	}
-	if markerEnd > len(lineText) {
-		markerEnd = len(lineText)
-	}
-	if markerEnd < markerStart {
-		markerEnd = markerStart
-	}
-
-	// Trim the line to fit the terminal width
-	width := terminalInfo.Width
-	if width < 1 {
-		width = defaultTerminalWidth
-	}
-	width -= maxMargin + extraMarginChars
-	if width < 1 {
-		width = 1
-	}
-	if loc.Column == endOfFirstLine {
-		// If the marker is at the very end of the line, the marker will be a "^"
-		// character that extends one column past the end of the line. In this case
-		// we should reserve a column at the end so the marker doesn't wrap.
-		width -= 1
-	}
-	if len(lineText) > width {
-		// Try to center the error
-		sliceStart := (markerStart + markerEnd - width) / 2
-		if sliceStart > markerStart-width/5 {
-			sliceStart = markerStart - width/5
-		}
-		if sliceStart < 0 {
-			sliceStart = 0
-		}
-		if sliceStart > len(lineText)-width {
-			sliceStart = len(lineText) - width
-		}
-		sliceEnd := sliceStart + width
-
-		// Slice the line
-		slicedLine := lineText[sliceStart:sliceEnd]
-		markerStart -= sliceStart
-		markerEnd -= sliceStart
-		if markerStart < 0 {
-			markerStart = 0
-		}
-		if markerEnd > len(slicedLine) {
-			markerEnd = len(slicedLine)
-		}
-
-		// Truncate the ends with "..."
-		if len(slicedLine) > 3 && sliceStart > 0 {
-			slicedLine = "..." + slicedLine[3:]
-			if markerStart < 3 {
-				markerStart = 3
-			}
-		}
-		if len(slicedLine) > 3 && sliceEnd < len(lineText) {
-			slicedLine = slicedLine[:len(slicedLine)-3] + "..."
-			if markerEnd > len(slicedLine)-3 {
-				markerEnd = len(slicedLine) - 3
-			}
-			if markerEnd < markerStart {
-				markerEnd = markerStart
-			}
-		}
-
-		// Now we can compute the indent
-		lineText = slicedLine
-		indent = strings.Repeat(" ", estimateWidthInTerminal(lineText[:markerStart]))
-	}
-
-	// If marker is still multi-character after clipping, make the marker wider
-	if markerEnd-markerStart > 1 {
-		marker = strings.Repeat("~", estimateWidthInTerminal(lineText[markerStart:markerEnd]))
-	}
-
-	// Put a margin before the marker indent
-	margin := marginWithLineText(maxMargin, loc.Line)
-
-	return MsgDetail{
-		Path:   loc.File,
-		Line:   loc.Line,
-		Column: loc.Column,
-
-		SourceBefore: margin + lineText[:markerStart],
-		SourceMarked: lineText[markerStart:markerEnd],
-		SourceAfter:  lineText[markerEnd:],
-
-		Indent:     indent,
-		Marker:     marker,
-		Suggestion: loc.Suggestion,
-
-		ContentAfter: afterFirstLine,
-	}
-}
-
-// Estimate the number of columns this string will take when printed
-func estimateWidthInTerminal(text string) int {
-	// For now just assume each code point is one column. This is wrong but is
-	// less wrong than assuming each code unit is one column.
-	width := 0
-	for text != "" {
-		c, size := utf8.DecodeRuneInString(text)
-		text = text[size:]
-
-		// Ignore the Zero Width No-Break Space character (UTF-8 BOM)
-		if c != 0xFEFF {
-			width++
-		}
-	}
-	return width
-}
-
-func renderTabStops(withTabs string, spacesPerTab int) string {
-	if !strings.ContainsRune(withTabs, '\t') {
-		return withTabs
-	}
-
-	withoutTabs := strings.Builder{}
-	count := 0
-
-	for _, c := range withTabs {
-		if c == '\t' {
-			spaces := spacesPerTab - count%spacesPerTab
-			for i := 0; i < spaces; i++ {
-				withoutTabs.WriteRune(' ')
-				count++
-			}
-		} else {
-			withoutTabs.WriteRune(c)
-			count++
-		}
-	}
-
-	return withoutTabs.String()
 }
 
 func (log Log) AddError(tracker *LineColumnTracker, r Range, text string) {
@@ -1685,4 +1464,185 @@ func allowOverride(overrides map[MsgID]LogLevel, id MsgID, kind MsgKind) (MsgKin
 		}
 	}
 	return kind, true
+}
+
+type StringInJSTableEntry struct {
+	innerLine   int32
+	innerColumn int32
+	innerLoc    Loc
+	outerLoc    Loc
+}
+
+// For Yarn PnP we sometimes parse JSON embedded in a JS string. This generates
+// a table that remaps locations inside the embedded JSON string literal into
+// locations in the actual JS file, which makes them easier to understand.
+func GenerateStringInJSTable(outerContents string, outerStringLiteralLoc Loc, innerContents string) (table []StringInJSTableEntry) {
+	i := int32(0)
+	n := int32(len(innerContents))
+	line := int32(1)
+	column := int32(0)
+	loc := Loc{Start: outerStringLiteralLoc.Start + 1}
+
+	for i < n {
+		// Ignore line continuations. A line continuation is not an escaped newline.
+		for {
+			if c, _ := utf8.DecodeRuneInString(outerContents[loc.Start:]); c != '\\' {
+				break
+			}
+			c, width := utf8.DecodeRuneInString(outerContents[loc.Start+1:])
+			switch c {
+			case '\n', '\r', '\u2028', '\u2029':
+				loc.Start += 1 + int32(width)
+				if c == '\r' && outerContents[loc.Start] == '\n' {
+					// Make sure Windows CRLF counts as a single newline
+					loc.Start++
+				}
+				continue
+			}
+			break
+		}
+
+		c, width := utf8.DecodeRuneInString(innerContents[i:])
+
+		// Compress the table using run-length encoding
+		table = append(table, StringInJSTableEntry{innerLine: line, innerColumn: column, innerLoc: Loc{Start: i}, outerLoc: loc})
+		if len(table) > 1 {
+			if last := table[len(table)-2]; line == last.innerLine && loc.Start-column == last.outerLoc.Start-last.innerColumn {
+				table = table[:len(table)-1]
+			}
+		}
+
+		// Advance the inner line/column
+		switch c {
+		case '\n', '\r', '\u2028', '\u2029':
+			line++
+			column = 0
+
+			// Handle newlines on Windows
+			if c == '\r' && i+1 < n && innerContents[i+1] == '\n' {
+				i++
+			}
+
+		default:
+			column += int32(width)
+		}
+		i += int32(width)
+
+		// Advance the outer loc, assuming the string syntax is already valid
+		c, width = utf8.DecodeRuneInString(outerContents[loc.Start:])
+		if c == '\r' && outerContents[loc.Start+1] == '\n' {
+			// Handle newlines on Windows in template literal strings
+			loc.Start += 2
+		} else if c != '\\' {
+			loc.Start += int32(width)
+		} else {
+			// Handle an escape sequence
+			c, width = utf8.DecodeRuneInString(outerContents[loc.Start+1:])
+			switch c {
+			case 'x':
+				// 2-digit hexadecimal
+				loc.Start += 1 + 2
+
+			case 'u':
+				loc.Start++
+				if outerContents[loc.Start] == '{' {
+					// Variable-length
+					for outerContents[loc.Start] != '}' {
+						loc.Start++
+					}
+					loc.Start++
+				} else {
+					// Fixed-length
+					loc.Start += 4
+				}
+
+			case '\n', '\r', '\u2028', '\u2029':
+				// This will be handled by the next iteration
+				break
+
+			default:
+				loc.Start += 1 + int32(width)
+			}
+		}
+	}
+
+	return
+}
+
+func RemapStringInJSLoc(table []StringInJSTableEntry, innerLoc Loc) Loc {
+	count := len(table)
+	index := 0
+
+	// Binary search to find the previous entry
+	for count > 0 {
+		step := count / 2
+		i := index + step
+		if i+1 < len(table) {
+			if entry := table[i+1]; entry.innerLoc.Start < innerLoc.Start {
+				index = i + 1
+				count -= step + 1
+				continue
+			}
+		}
+		count = step
+	}
+
+	entry := table[index]
+	entry.outerLoc.Start += innerLoc.Start - entry.innerLoc.Start // Undo run-length compression
+	return entry.outerLoc
+}
+
+func NewStringInJSLog(log Log, outerTracker *LineColumnTracker, table []StringInJSTableEntry) Log {
+	oldAddMsg := log.AddMsg
+
+	remapLineAndColumnToLoc := func(line int32, column int32) Loc {
+		count := len(table)
+		index := 0
+
+		// Binary search to find the previous entry
+		for count > 0 {
+			step := count / 2
+			i := index + step
+			if i+1 < len(table) {
+				if entry := table[i+1]; entry.innerLine < line || (entry.innerLine == line && entry.innerColumn < column) {
+					index = i + 1
+					count -= step + 1
+					continue
+				}
+			}
+			count = step
+		}
+
+		entry := table[index]
+		entry.outerLoc.Start += column - entry.innerColumn // Undo run-length compression
+		return entry.outerLoc
+	}
+
+	remapData := func(data MsgData) MsgData {
+		if data.Location == nil {
+			return data
+		}
+
+		// Generate a range in the outer source using the line/column/length in the inner source
+		r := Range{Loc: remapLineAndColumnToLoc(int32(data.Location.Line), int32(data.Location.Column))}
+		if data.Location.Length != 0 {
+			r.Len = remapLineAndColumnToLoc(int32(data.Location.Line), int32(data.Location.Column+data.Location.Length)).Start - r.Loc.Start
+		}
+
+		// Use that range to look up the line in the outer source
+		location := outerTracker.MsgData(r, data.Text).Location
+		location.Suggestion = data.Location.Suggestion
+		data.Location = location
+		return data
+	}
+
+	log.AddMsg = func(msg Msg) {
+		msg.Data = remapData(msg.Data)
+		for i, note := range msg.Notes {
+			msg.Notes[i] = remapData(note)
+		}
+		oldAddMsg(msg)
+	}
+
+	return log
 }

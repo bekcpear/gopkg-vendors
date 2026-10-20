@@ -2,7 +2,7 @@
 // of on-disk caching to reduce overall memory usage and to speed up
 // repeat runs.
 //
-// Public API
+// # Public API
 //
 // A Runner maps a list of analyzers and package patterns to a list of
 // results. Results provide access to diagnostics, directives, errors
@@ -12,7 +12,7 @@
 // that requires access to the loaded representation of a package has
 // to occur inside analyzers.
 //
-// Planning and execution
+// # Planning and execution
 //
 // Analyzing packages is split into two phases: planning and
 // execution.
@@ -38,7 +38,7 @@
 // execution of individual analyzers is bounded by the same semaphore
 // as executing packages.
 //
-// Parallelism
+// # Parallelism
 //
 // Actions are executed in parallel where the dependency graph allows.
 // Overall parallelism is bounded by a semaphore, sized according to
@@ -56,7 +56,7 @@
 // the dependency graph. A lot of inter-connected packages will see
 // less parallelism than a lot of independent packages.
 //
-// Caching
+// # Caching
 //
 // The runner caches facts, directives and diagnostics in a
 // content-addressable cache that is designed after Go's own cache.
@@ -118,6 +118,7 @@ import (
 	"go/token"
 	"go/types"
 	"io"
+	"maps"
 	"os"
 	"reflect"
 	"runtime"
@@ -209,7 +210,7 @@ func serializeDirective(dir lint.Directive, fset *token.FileSet) SerializedDirec
 type ResultData struct {
 	Directives  []SerializedDirective
 	Diagnostics []Diagnostic
-	Unused      unused.SerializedResult
+	Unused      unused.Result
 }
 
 func (r Result) Load() (ResultData, error) {
@@ -364,7 +365,7 @@ type analyzerAction struct {
 	// We can store actual results here without worrying about memory
 	// consumption because analyzer actions get garbage collected once
 	// a package has been fully analyzed.
-	Result       interface{}
+	Result       any
 	Diagnostics  []Diagnostic
 	ObjectFacts  map[objectFactKey]objectFact
 	PackageFacts map[packageFactKey]analysis.Fact
@@ -379,18 +380,13 @@ func (act *analyzerAction) String() string {
 type Runner struct {
 	Stats     Stats
 	GoVersion string
-	// if GoVersion == "module", and we couldn't determine the
-	// module's Go version, use this as the fallback
-	FallbackGoVersion string
+
 	// If set to true, Runner will populate results with data relevant to testing analyzers
 	TestMode bool
 
-	// GoVersion might be "module"; actualGoVersion contains the resolved version
-	actualGoVersion string
-
 	// Config that gets merged with per-package configs
 	cfg       config.Config
-	cache     *cache.Cache
+	cache     cache.Cache
 	semaphore tsync.Semaphore
 }
 
@@ -399,11 +395,11 @@ type subrunner struct {
 	analyzers     []*analysis.Analyzer
 	factAnalyzers []*analysis.Analyzer
 	analyzerNames string
-	cache         *cache.Cache
+	cache         cache.Cache
 }
 
 // New returns a new Runner.
-func New(cfg config.Config, c *cache.Cache) (*Runner, error) {
+func New(cfg config.Config, c cache.Cache) (*Runner, error) {
 	return &Runner{
 		cfg:       cfg,
 		cache:     c,
@@ -503,10 +499,10 @@ func newAnalyzerAction(an *analysis.Analyzer, cache map[*analysis.Analyzer]*anal
 	return a
 }
 
-func getCachedFiles(cache *cache.Cache, ids []cache.ActionID, out []*string) error {
+func getCachedFiles(c cache.Cache, ids []cache.ActionID, out []*string) error {
 	for i, id := range ids {
 		var err error
-		*out[i], _, err = cache.GetFile(id)
+		*out[i], _, err = cache.GetFile(c, id)
 		if err != nil {
 			return err
 		}
@@ -525,7 +521,7 @@ func (r *subrunner) do(act action) error {
 
 	// compute hash of action
 	a.cfg = a.Package.Config.Merge(r.cfg)
-	h := r.cache.NewHash("staticcheck " + a.Package.PkgPath)
+	h := cache.NewHash("staticcheck " + a.Package.PkgPath)
 
 	// Note that we do not filter the list of analyzers by the
 	// package's configuration. We don't allow configuration to
@@ -549,7 +545,8 @@ func (r *subrunner) do(act action) error {
 	fmt.Fprintf(h, "cfg %#v\n", hashCfg)
 	fmt.Fprintf(h, "pkg %x\n", a.Package.Hash)
 	fmt.Fprintf(h, "analyzers %s\n", r.analyzerNames)
-	fmt.Fprintf(h, "go %s\n", r.actualGoVersion)
+	fmt.Fprintf(h, "go %s\n", r.GoVersion)
+	fmt.Fprintf(h, "env godebug %q\n", os.Getenv("GODEBUG"))
 
 	// OPT(dh): do we actually need to hash vetx? can we not assume
 	// that for identical inputs, staticcheck will produce identical
@@ -658,7 +655,7 @@ func (r *Runner) writeCacheReader(a *packageAction, kind string, rs io.ReadSeeke
 	return r.cache.OutputFile(out), nil
 }
 
-func (r *Runner) writeCacheGob(a *packageAction, kind string, data interface{}) (string, error) {
+func (r *Runner) writeCacheGob(a *packageAction, kind string, data any) (string, error) {
 	f, err := os.CreateTemp("", "staticcheck")
 	if err != nil {
 		return "", err
@@ -677,7 +674,7 @@ func (r *Runner) writeCacheGob(a *packageAction, kind string, data interface{}) 
 type packageActionResult struct {
 	facts   []gobFact
 	diags   []Diagnostic
-	unused  unused.SerializedResult
+	unused  unused.Result
 	dirs    []lint.Directive
 	lpkg    *loader.Package
 	skipped bool
@@ -691,7 +688,7 @@ func (r *subrunner) doUncached(a *packageAction) (packageActionResult, error) {
 	// processed concurrently, we shouldn't load b's export data
 	// twice.
 
-	pkg, _, err := loader.Load(a.Package)
+	pkg, _, err := loader.Load(a.Package, &loader.Options{GoVersion: r.GoVersion})
 	if err != nil {
 		return packageActionResult{}, err
 	}
@@ -845,7 +842,7 @@ type analyzerRunner struct {
 
 func (ar *analyzerRunner) do(act action) error {
 	a := act.(*analyzerAction)
-	results := map[*analysis.Analyzer]interface{}{}
+	results := map[*analysis.Analyzer]any{}
 	// TODO(dh): does this have to be recursive?
 	for _, dep := range a.deps {
 		dep := dep.(*analyzerAction)
@@ -1001,7 +998,7 @@ func (ar *analyzerRunner) do(act action) error {
 type analysisResult struct {
 	facts       []gobFact
 	diagnostics []Diagnostic
-	unused      unused.SerializedResult
+	unused      unused.Result
 
 	// Only set when using test mode
 	testFacts []TestFact
@@ -1066,20 +1063,16 @@ func (r *subrunner) runAnalyzers(pkgAct *packageAction, pkg *loader.Package) (an
 		}
 	}
 
-	var unusedResult unused.SerializedResult
+	var unusedResult unused.Result
 	for _, a := range all {
 		if a != root && a.Analyzer.Name == "U1000" && !a.failed {
 			// TODO(dh): figure out a clean abstraction, instead of
 			// special-casing U1000.
-			unusedResult = unused.Serialize(a.Pass, a.Result.(unused.Result), pkg.Fset)
+			unusedResult = a.Result.(unused.Result)
 		}
 
-		for key, fact := range a.ObjectFacts {
-			depObjFacts[key] = fact
-		}
-		for key, fact := range a.PackageFacts {
-			depPkgFacts[key] = fact
-		}
+		maps.Copy(depObjFacts, a.ObjectFacts)
+		maps.Copy(depPkgFacts, a.PackageFacts)
 	}
 
 	// OPT(dh): cull objects not reachable via the exported closure
@@ -1192,7 +1185,7 @@ func (r *Runner) Run(cfg *packages.Config, analyzers []*analysis.Analyzer, patte
 	registerGobTypes(analyzers)
 
 	r.Stats.setState(StateLoadPackageGraph)
-	lpkgs, err := loader.Graph(r.cache, cfg, patterns...)
+	lpkgs, err := loader.Graph(cfg, patterns...)
 	if err != nil {
 		return nil, err
 	}
@@ -1200,43 +1193,6 @@ func (r *Runner) Run(cfg *packages.Config, analyzers []*analysis.Analyzer, patte
 
 	if len(lpkgs) == 0 {
 		return nil, nil
-	}
-
-	var goVersion string
-	if r.GoVersion == "module" {
-		for _, lpkg := range lpkgs {
-			if m := lpkg.Module; m != nil {
-				if goVersion == "" {
-					goVersion = m.GoVersion
-				} else if goVersion != m.GoVersion {
-					// Theoretically, we should only ever see a single Go
-					// module. At least that's currently (as of Go 1.15)
-					// true when using 'go list'.
-					fmt.Fprintln(os.Stderr, "warning: encountered multiple modules and could not deduce targeted Go version")
-					goVersion = ""
-					break
-				}
-			}
-		}
-	} else {
-		goVersion = r.GoVersion
-	}
-
-	if goVersion == "" {
-		if r.FallbackGoVersion == "" {
-			panic("could not determine Go version of module, and fallback version hasn't been set")
-		}
-		goVersion = r.FallbackGoVersion
-	}
-	r.actualGoVersion = goVersion
-	for _, a := range analyzers {
-		flag := a.Flags.Lookup("go")
-		if flag == nil {
-			continue
-		}
-		if err := flag.Value.Set(goVersion); err != nil {
-			return nil, err
-		}
 	}
 
 	r.Stats.setState(StateBuildActionGraph)

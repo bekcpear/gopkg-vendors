@@ -37,7 +37,7 @@ var (
 type macStore int
 
 // openStore is a function for opening a macStore.
-func openStore(location StoreLocation) (macStore, error) {
+func openStore(_ StoreLocation, _ ...StorePermission) (macStore, error) {
 	return macStore(0), nil
 }
 
@@ -155,24 +155,31 @@ func (i *macIdentity) CertificateChain() ([]*x509.Certificate, error) {
 	policy := C.SecPolicyCreateSSL(0, nilCFStringRef)
 
 	var trustRef C.SecTrustRef
-	if err := osStatusError(C.SecTrustCreateWithCertificates(C.CFTypeRef(certRef), C.CFTypeRef(policy), &trustRef)); err != nil {
+	osStatusResult := C.SecTrustCreateWithCertificates(C.CFTypeRef(certRef), C.CFTypeRef(policy), &trustRef)
+	if err := osStatusError(osStatusResult); err != nil {
 		return nil, err
 	}
 	defer C.CFRelease(C.CFTypeRef(trustRef))
 
-	var status C.SecTrustResultType
-	if err := osStatusError(C.SecTrustEvaluate(trustRef, &status)); err != nil {
-		return nil, err
+	// Evaluate trust to populate the certificate chain; ignore the trust
+	// result since we only need the chain structure, not trust validation.
+	var cfTrustErr C.CFErrorRef
+	C.SecTrustEvaluateWithError(trustRef, &cfTrustErr)
+	if cfTrustErr != nilCFErrorRef {
+		// ignore the error since we only care about the chain, not trust validation.
 	}
 
-	var (
-		nchain = C.SecTrustGetCertificateCount(trustRef)
-		chain  = make([]*x509.Certificate, 0, int(nchain))
-	)
+	certChain := C.SecTrustCopyCertificateChain(trustRef)
+	if certChain == nilCFArrayRef {
+		return nil, errors.New("error getting certificate chain")
+	}
+	defer C.CFRelease(C.CFTypeRef(certChain))
 
-	for i := C.CFIndex(0); i < nchain; i++ {
-		// TODO: do we need to release these?
-		chainCertref := C.SecTrustGetCertificateAtIndex(trustRef, i)
+	nchain := C.CFArrayGetCount(certChain)
+	chain := make([]*x509.Certificate, 0, int(nchain))
+
+	for j := C.CFIndex(0); j < nchain; j++ {
+		chainCertref := C.SecCertificateRef(C.CFArrayGetValueAtIndex(certChain, j))
 		if chainCertref == nilSecCertificateRef {
 			return nil, errors.New("nil certificate in chain")
 		}
@@ -308,21 +315,6 @@ func (i *macIdentity) getAlgo(opts crypto.SignerOpts) (algo C.SecKeyAlgorithm, e
 		return
 	}
 
-	if _, ok := opts.(*rsa.PSSOptions); ok {
-		switch hash {
-		case crypto.SHA256:
-			algo = C.kSecKeyAlgorithmRSASignatureDigestPSSSHA256
-		case crypto.SHA384:
-			algo = C.kSecKeyAlgorithmRSASignatureDigestPSSSHA384
-		case crypto.SHA512:
-			algo = C.kSecKeyAlgorithmRSASignatureDigestPSSSHA512
-		default:
-			err = ErrUnsupportedHash
-		}
-
-		return
-	}
-
 	switch crt.PublicKey.(type) {
 	case *ecdsa.PublicKey:
 		switch hash {
@@ -336,6 +328,21 @@ func (i *macIdentity) getAlgo(opts crypto.SignerOpts) (algo C.SecKeyAlgorithm, e
 			err = ErrUnsupportedHash
 		}
 	case *rsa.PublicKey:
+		if _, ok := opts.(*rsa.PSSOptions); ok {
+			switch hash {
+			case crypto.SHA256:
+				algo = C.kSecKeyAlgorithmRSASignatureDigestPSSSHA256
+			case crypto.SHA384:
+				algo = C.kSecKeyAlgorithmRSASignatureDigestPSSSHA384
+			case crypto.SHA512:
+				algo = C.kSecKeyAlgorithmRSASignatureDigestPSSSHA512
+			default:
+				err = ErrUnsupportedHash
+			}
+
+			return
+		}
+
 		switch hash {
 		case crypto.SHA256:
 			algo = C.kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA256

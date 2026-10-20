@@ -10,72 +10,68 @@ import (
 
 // Based on https://github.com/fzipp/gocyclo
 
-// CyclomaticRule lints given else constructs.
-type CyclomaticRule struct{}
+// CyclomaticRule sets restriction for maximum cyclomatic complexity.
+type CyclomaticRule struct {
+	maxComplexity int
+}
 
-// Apply applies the rule to given file.
-func (r *CyclomaticRule) Apply(file *lint.File, arguments lint.Arguments) []lint.Failure {
-	checkNumberOfArguments(1, arguments, r.Name())
+const defaultMaxCyclomaticComplexity = 10
+
+// Configure validates the rule configuration, and configures the rule accordingly.
+//
+// Configuration implements the [lint.ConfigurableRule] interface.
+func (r *CyclomaticRule) Configure(arguments lint.Arguments) error {
+	if len(arguments) < 1 {
+		r.maxComplexity = defaultMaxCyclomaticComplexity
+		return nil
+	}
 
 	complexity, ok := arguments[0].(int64) // Alt. non panicking version
 	if !ok {
-		panic("invalid argument for cyclomatic complexity")
+		return fmt.Errorf("invalid argument for cyclomatic complexity; expected int but got %T", arguments[0])
 	}
+	r.maxComplexity = int(complexity)
+	return nil
+}
 
+// Apply applies the rule to given file.
+func (r *CyclomaticRule) Apply(file *lint.File, _ lint.Arguments) []lint.Failure {
 	var failures []lint.Failure
+	for _, decl := range file.AST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
 
-	fileAst := file.AST
-	walker := lintCyclomatic{
-		file:       file,
-		complexity: int(complexity),
-		onFailure: func(failure lint.Failure) {
-			failures = append(failures, failure)
-		},
+		c := complexity(fn)
+		if c > r.maxComplexity {
+			failures = append(failures, lint.Failure{
+				Confidence: 1,
+				Category:   lint.FailureCategoryMaintenance,
+				Failure: fmt.Sprintf("function %s has cyclomatic complexity %d (> max enabled %d)",
+					funcName(fn), c, r.maxComplexity),
+				Node: fn,
+			})
+		}
 	}
-
-	ast.Walk(walker, fileAst)
 
 	return failures
 }
 
 // Name returns the rule name.
-func (r *CyclomaticRule) Name() string {
+func (*CyclomaticRule) Name() string {
 	return "cyclomatic"
-}
-
-type lintCyclomatic struct {
-	file       *lint.File
-	complexity int
-	onFailure  func(lint.Failure)
-}
-
-func (w lintCyclomatic) Visit(_ ast.Node) ast.Visitor {
-	f := w.file
-	for _, decl := range f.AST.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok {
-			c := complexity(fn)
-			if c > w.complexity {
-				w.onFailure(lint.Failure{
-					Confidence: 1,
-					Category:   "maintenance",
-					Failure:    fmt.Sprintf("function %s has cyclomatic complexity %d", funcName(fn), c),
-					Node:       fn,
-				})
-			}
-		}
-	}
-	return nil
 }
 
 // funcName returns the name representation of a function or method:
 // "(Type).Name" for methods or simply "Name" for functions.
 func funcName(fn *ast.FuncDecl) string {
-	if fn.Recv != nil {
-		if fn.Recv.NumFields() > 0 {
-			typ := fn.Recv.List[0].Type
-			return fmt.Sprintf("(%s).%s", recvString(typ), fn.Name)
-		}
+	declarationHasReceiver := fn.Recv != nil && fn.Recv.NumFields() > 0
+	if declarationHasReceiver {
+		typ := fn.Recv.List[0].Type
+		return fmt.Sprintf("(%s).%s", recvString(typ), fn.Name)
 	}
+
 	return fn.Name.Name
 }
 
@@ -103,7 +99,7 @@ type complexityVisitor struct {
 	Complexity int
 }
 
-// Visit implements the ast.Visitor interface.
+// Visit implements the [ast.Visitor] interface.
 func (v *complexityVisitor) Visit(n ast.Node) ast.Visitor {
 	switch n := n.(type) {
 	case *ast.FuncDecl, *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt, *ast.CaseClause, *ast.CommClause:

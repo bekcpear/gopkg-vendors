@@ -18,18 +18,14 @@ import (
 	"archive/tar"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"path"
-
-	"github.com/pkg/errors"
 )
 
 // FromTar reads a tar file and creates an rpm stuct.
 func FromTar(inp io.Reader, md RPMMetaData) (*RPM, error) {
-
 	r, err := NewRPM(md)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to create RPM structure")
+		return nil, fmt.Errorf("failed to create RPM structure: %w", err)
 	}
 	t := tar.NewReader(inp)
 	for {
@@ -37,7 +33,7 @@ func FromTar(inp io.Reader, md RPMMetaData) (*RPM, error) {
 		if err == io.EOF {
 			return r, nil
 		} else if err != nil {
-			return nil, errors.Wrap(err, "failed to read tar file")
+			return nil, fmt.Errorf("failed to read tar file: %w", err)
 		}
 		var body []byte
 		switch h.Typeflag {
@@ -47,9 +43,9 @@ func FromTar(inp io.Reader, md RPMMetaData) (*RPM, error) {
 			body = []byte(h.Linkname)
 			h.Mode |= 0120000
 		case tar.TypeReg:
-			b, err := ioutil.ReadAll(t)
+			b, err := io.ReadAll(t)
 			if err != nil {
-				return nil, errors.Wrapf(err, "failed to read file (%q)", h.Name)
+				return nil, fmt.Errorf("failed to read file (%q): %w", h.Name, err)
 			}
 			body = b
 		default:
@@ -57,13 +53,23 @@ func FromTar(inp io.Reader, md RPMMetaData) (*RPM, error) {
 		}
 		mtime := uint32(h.ModTime.Unix())
 
+		// Sometimes the tar has no uname and gname. RPM expects these to always exist.
+		owner := h.Uname
+		if owner == "" {
+			owner = "root"
+		}
+		group := h.Gname
+		if group == "" {
+			group = "root"
+		}
+
 		r.AddFile(
 			RPMFile{
 				Name:  path.Join("/", h.Name),
 				Body:  body,
 				Mode:  uint(h.Mode),
-				Owner: h.Uname,
-				Group: h.Gname,
+				Owner: owner,
+				Group: group,
 				MTime: mtime,
 			})
 	}

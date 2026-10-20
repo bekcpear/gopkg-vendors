@@ -5,11 +5,8 @@ package ssm
 import (
 	"context"
 	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // Retrieves information about upcoming executions of a maintenance window.
@@ -37,14 +34,14 @@ type DescribeMaintenanceWindowScheduleInput struct {
 
 	// The maximum number of items to return for this call. The call also returns a
 	// token that you can specify in a subsequent call to get the next set of results.
-	MaxResults int32
+	MaxResults *int32
 
 	// The token for the next set of items to return. (You received this token from a
 	// previous call.)
 	NextToken *string
 
 	// The type of resource you want to retrieve information about. For example,
-	// INSTANCE.
+	// INSTANCE .
 	ResourceType types.MaintenanceWindowResourceType
 
 	// The managed node ID or key-value pair to retrieve information about.
@@ -62,8 +59,8 @@ type DescribeMaintenanceWindowScheduleOutput struct {
 	// call.)
 	NextToken *string
 
-	// Information about maintenance window executions scheduled for the specified time
-	// range.
+	// Information about maintenance window executions scheduled for the specified
+	// time range.
 	ScheduledWindowExecutions []types.ScheduledWindowExecution
 
 	// Metadata pertaining to the operation's result.
@@ -81,43 +78,17 @@ func (c *Client) addOperationDescribeMaintenanceWindowScheduleMiddlewares(stack 
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeMaintenanceWindowSchedule(options.Region), middleware.Before); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -129,16 +100,14 @@ func (c *Client) addOperationDescribeMaintenanceWindowScheduleMiddlewares(stack 
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addInterceptors(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
-
-// DescribeMaintenanceWindowScheduleAPIClient is a client that implements the
-// DescribeMaintenanceWindowSchedule operation.
-type DescribeMaintenanceWindowScheduleAPIClient interface {
-	DescribeMaintenanceWindowSchedule(context.Context, *DescribeMaintenanceWindowScheduleInput, ...func(*Options)) (*DescribeMaintenanceWindowScheduleOutput, error)
-}
-
-var _ DescribeMaintenanceWindowScheduleAPIClient = (*Client)(nil)
 
 // DescribeMaintenanceWindowSchedulePaginatorOptions is the paginator options for
 // DescribeMaintenanceWindowSchedule
@@ -170,8 +139,8 @@ func NewDescribeMaintenanceWindowSchedulePaginator(client DescribeMaintenanceWin
 	}
 
 	options := DescribeMaintenanceWindowSchedulePaginatorOptions{}
-	if params.MaxResults != 0 {
-		options.Limit = params.MaxResults
+	if params.MaxResults != nil {
+		options.Limit = *params.MaxResults
 	}
 
 	for _, fn := range optFns {
@@ -183,12 +152,13 @@ func NewDescribeMaintenanceWindowSchedulePaginator(client DescribeMaintenanceWin
 		client:    client,
 		params:    params,
 		firstPage: true,
+		nextToken: params.NextToken,
 	}
 }
 
 // HasMorePages returns a boolean indicating whether more pages are available
 func (p *DescribeMaintenanceWindowSchedulePaginator) HasMorePages() bool {
-	return p.firstPage || p.nextToken != nil
+	return p.firstPage || (p.nextToken != nil && len(*p.nextToken) != 0)
 }
 
 // NextPage retrieves the next DescribeMaintenanceWindowSchedule page.
@@ -200,8 +170,15 @@ func (p *DescribeMaintenanceWindowSchedulePaginator) NextPage(ctx context.Contex
 	params := *p.params
 	params.NextToken = p.nextToken
 
-	params.MaxResults = p.options.Limit
+	var limit *int32
+	if p.options.Limit > 0 {
+		limit = &p.options.Limit
+	}
+	params.MaxResults = limit
 
+	optFns = append([]func(*Options){
+		addIsPaginatorUserAgent,
+	}, optFns...)
 	result, err := p.client.DescribeMaintenanceWindowSchedule(ctx, &params, optFns...)
 	if err != nil {
 		return nil, err
@@ -211,18 +188,20 @@ func (p *DescribeMaintenanceWindowSchedulePaginator) NextPage(ctx context.Contex
 	prevToken := p.nextToken
 	p.nextToken = result.NextToken
 
-	if p.options.StopOnDuplicateToken && prevToken != nil && p.nextToken != nil && *prevToken == *p.nextToken {
+	if p.options.StopOnDuplicateToken &&
+		prevToken != nil &&
+		p.nextToken != nil &&
+		*prevToken == *p.nextToken {
 		p.nextToken = nil
 	}
 
 	return result, nil
 }
 
-func newServiceMetadataMiddleware_opDescribeMaintenanceWindowSchedule(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "ssm",
-		OperationName: "DescribeMaintenanceWindowSchedule",
-	}
+// DescribeMaintenanceWindowScheduleAPIClient is a client that implements the
+// DescribeMaintenanceWindowSchedule operation.
+type DescribeMaintenanceWindowScheduleAPIClient interface {
+	DescribeMaintenanceWindowSchedule(context.Context, *DescribeMaintenanceWindowScheduleInput, ...func(*Options)) (*DescribeMaintenanceWindowScheduleOutput, error)
 }
+
+var _ DescribeMaintenanceWindowScheduleAPIClient = (*Client)(nil)

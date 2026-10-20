@@ -5,15 +5,12 @@ package ssm
 import (
 	"context"
 	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // Lists all related-item resources associated with a Systems Manager OpsCenter
-// OpsItem. OpsCenter is a capability of Amazon Web Services Systems Manager.
+// OpsItem. OpsCenter is a tool in Amazon Web Services Systems Manager.
 func (c *Client) ListOpsItemRelatedItems(ctx context.Context, params *ListOpsItemRelatedItemsInput, optFns ...func(*Options)) (*ListOpsItemRelatedItemsOutput, error) {
 	if params == nil {
 		params = &ListOpsItemRelatedItemsInput{}
@@ -73,46 +70,20 @@ func (c *Client) addOperationListOpsItemRelatedItemsMiddlewares(stack *middlewar
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpListOpsItemRelatedItemsValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opListOpsItemRelatedItems(options.Region), middleware.Before); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -124,16 +95,14 @@ func (c *Client) addOperationListOpsItemRelatedItemsMiddlewares(stack *middlewar
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addInterceptors(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
-
-// ListOpsItemRelatedItemsAPIClient is a client that implements the
-// ListOpsItemRelatedItems operation.
-type ListOpsItemRelatedItemsAPIClient interface {
-	ListOpsItemRelatedItems(context.Context, *ListOpsItemRelatedItemsInput, ...func(*Options)) (*ListOpsItemRelatedItemsOutput, error)
-}
-
-var _ ListOpsItemRelatedItemsAPIClient = (*Client)(nil)
 
 // ListOpsItemRelatedItemsPaginatorOptions is the paginator options for
 // ListOpsItemRelatedItems
@@ -177,12 +146,13 @@ func NewListOpsItemRelatedItemsPaginator(client ListOpsItemRelatedItemsAPIClient
 		client:    client,
 		params:    params,
 		firstPage: true,
+		nextToken: params.NextToken,
 	}
 }
 
 // HasMorePages returns a boolean indicating whether more pages are available
 func (p *ListOpsItemRelatedItemsPaginator) HasMorePages() bool {
-	return p.firstPage || p.nextToken != nil
+	return p.firstPage || (p.nextToken != nil && len(*p.nextToken) != 0)
 }
 
 // NextPage retrieves the next ListOpsItemRelatedItems page.
@@ -200,6 +170,9 @@ func (p *ListOpsItemRelatedItemsPaginator) NextPage(ctx context.Context, optFns 
 	}
 	params.MaxResults = limit
 
+	optFns = append([]func(*Options){
+		addIsPaginatorUserAgent,
+	}, optFns...)
 	result, err := p.client.ListOpsItemRelatedItems(ctx, &params, optFns...)
 	if err != nil {
 		return nil, err
@@ -209,18 +182,20 @@ func (p *ListOpsItemRelatedItemsPaginator) NextPage(ctx context.Context, optFns 
 	prevToken := p.nextToken
 	p.nextToken = result.NextToken
 
-	if p.options.StopOnDuplicateToken && prevToken != nil && p.nextToken != nil && *prevToken == *p.nextToken {
+	if p.options.StopOnDuplicateToken &&
+		prevToken != nil &&
+		p.nextToken != nil &&
+		*prevToken == *p.nextToken {
 		p.nextToken = nil
 	}
 
 	return result, nil
 }
 
-func newServiceMetadataMiddleware_opListOpsItemRelatedItems(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "ssm",
-		OperationName: "ListOpsItemRelatedItems",
-	}
+// ListOpsItemRelatedItemsAPIClient is a client that implements the
+// ListOpsItemRelatedItems operation.
+type ListOpsItemRelatedItemsAPIClient interface {
+	ListOpsItemRelatedItems(context.Context, *ListOpsItemRelatedItemsInput, ...func(*Options)) (*ListOpsItemRelatedItemsOutput, error)
 }
+
+var _ ListOpsItemRelatedItemsAPIClient = (*Client)(nil)

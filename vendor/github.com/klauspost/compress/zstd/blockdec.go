@@ -5,14 +5,10 @@
 package zstd
 
 import (
-	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
-	"io/ioutil"
-	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/klauspost/compress/huff0"
@@ -49,11 +45,8 @@ const (
 	// Maximum possible block size (all Raw+Uncompressed).
 	maxBlockSize = (1 << 21) - 1
 
-	// https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#literals_section_header
-	maxCompressedLiteralSize = 1 << 18
-	maxRLELiteralSize        = 1 << 20
-	maxMatchLen              = 131074
-	maxSequences             = 0x7f00 + 0xffff
+	maxMatchLen  = 131074
+	maxSequences = 0x7f00 + 0xffff
 
 	// We support slightly less than the reference decoder to be able to
 	// use ints on 32 bit archs.
@@ -61,11 +54,11 @@ const (
 )
 
 var (
-	huffDecoderPool = sync.Pool{New: func() interface{} {
+	huffDecoderPool = sync.Pool{New: func() any {
 		return &huff0.Scratch{}
 	}}
 
-	fseDecoderPool = sync.Pool{New: func() interface{} {
+	fseDecoderPool = sync.Pool{New: func() any {
 		return &fseDecoder{}
 	}}
 )
@@ -86,8 +79,9 @@ type blockDec struct {
 
 	err error
 
-	// Check against this crc
-	checkCRC []byte
+	// Check against this crc, if hasCRC is true.
+	checkCRC uint32
+	hasCRC   bool
 
 	// Frame to use for singlethreaded decoding.
 	// Should not be used by the decoder itself since parent may be another frame.
@@ -105,7 +99,6 @@ type blockDec struct {
 
 	// Block is RLE, this is the size.
 	RLESize uint32
-	tmp     [4]byte
 
 	Type blockType
 
@@ -196,15 +189,13 @@ func (b *blockDec) reset(br byteBuffer, windowSize uint64) error {
 	}
 
 	// Read block data.
-	if cap(b.dataStorage) < cSize {
+	if _, ok := br.(*byteBuf); !ok && cap(b.dataStorage) < cSize {
+		// byteBuf doesn't need a destination buffer.
 		if b.lowMem || cSize > maxCompressedBlockSize {
 			b.dataStorage = make([]byte, 0, cSize+compressedBlockOverAlloc)
 		} else {
 			b.dataStorage = make([]byte, 0, maxCompressedBlockSizeAlloc)
 		}
-	}
-	if cap(b.dst) <= maxSize {
-		b.dst = make([]byte, 0, maxSize+1)
 	}
 	b.data, err = br.readBig(cSize, b.dataStorage)
 	if err != nil {
@@ -213,6 +204,9 @@ func (b *blockDec) reset(br byteBuffer, windowSize uint64) error {
 			printf("%T", br)
 		}
 		return err
+	}
+	if cap(b.dst) <= maxSize {
+		b.dst = make([]byte, 0, maxSize+1)
 	}
 	return nil
 }
@@ -237,7 +231,7 @@ func (b *blockDec) decodeBuf(hist *history) error {
 			if b.lowMem {
 				b.dst = make([]byte, b.RLESize)
 			} else {
-				b.dst = make([]byte, maxBlockSize)
+				b.dst = make([]byte, maxCompressedBlockSize)
 			}
 		}
 		b.dst = b.dst[:b.RLESize]
@@ -368,14 +362,9 @@ func (b *blockDec) decodeLiterals(in []byte, hist *history) (remain []byte, err 
 		}
 		if cap(b.literalBuf) < litRegenSize {
 			if b.lowMem {
-				b.literalBuf = make([]byte, litRegenSize)
+				b.literalBuf = make([]byte, litRegenSize, litRegenSize+compressedBlockOverAlloc)
 			} else {
-				if litRegenSize > maxCompressedLiteralSize {
-					// Exceptional
-					b.literalBuf = make([]byte, litRegenSize)
-				} else {
-					b.literalBuf = make([]byte, litRegenSize, maxCompressedLiteralSize)
-				}
+				b.literalBuf = make([]byte, litRegenSize, maxCompressedBlockSize+compressedBlockOverAlloc)
 			}
 		}
 		literals = b.literalBuf[:litRegenSize]
@@ -405,14 +394,15 @@ func (b *blockDec) decodeLiterals(in []byte, hist *history) (remain []byte, err 
 		// Ensure we have space to store it.
 		if cap(b.literalBuf) < litRegenSize {
 			if b.lowMem {
-				b.literalBuf = make([]byte, 0, litRegenSize)
+				b.literalBuf = make([]byte, 0, litRegenSize+compressedBlockOverAlloc)
 			} else {
-				b.literalBuf = make([]byte, 0, maxCompressedLiteralSize)
+				b.literalBuf = make([]byte, 0, maxCompressedBlockSize+compressedBlockOverAlloc)
 			}
 		}
 		var err error
-		// Use our out buffer.
-		huff.MaxDecodedSize = maxCompressedBlockSize
+		// Decoder.Decompress* uses cap(dst) for the size limit. Do not write
+		// MaxDecodedSize on hist.huffTree: with a trained dictionary that
+		// pointer aliases the shared dict.litEnc and concurrent DecodeAll races.
 		if fourStreams {
 			literals, err = huff.Decoder().Decompress4X(b.literalBuf[:0:litRegenSize], literals)
 		} else {
@@ -437,9 +427,9 @@ func (b *blockDec) decodeLiterals(in []byte, hist *history) (remain []byte, err 
 		// Ensure we have space to store it.
 		if cap(b.literalBuf) < litRegenSize {
 			if b.lowMem {
-				b.literalBuf = make([]byte, 0, litRegenSize)
+				b.literalBuf = make([]byte, 0, litRegenSize+compressedBlockOverAlloc)
 			} else {
-				b.literalBuf = make([]byte, 0, maxCompressedBlockSize)
+				b.literalBuf = make([]byte, 0, maxCompressedBlockSize+compressedBlockOverAlloc)
 			}
 		}
 		huff := hist.huffTree
@@ -450,13 +440,16 @@ func (b *blockDec) decodeLiterals(in []byte, hist *history) (remain []byte, err 
 			}
 		}
 		var err error
+		if debugDecoder {
+			println("huff table input:", len(literals), "CRC:", crc32.ChecksumIEEE(literals))
+		}
 		huff, literals, err = huff0.ReadTable(literals, huff)
 		if err != nil {
 			println("reading huffman table:", err)
 			return in, err
 		}
 		hist.huffTree = huff
-		huff.MaxDecodedSize = maxCompressedBlockSize
+		huff.MaxDecodedSize = litRegenSize
 		// Use our out buffer.
 		if fourStreams {
 			literals, err = huff.Decoder().Decompress4X(b.literalBuf[:0:litRegenSize], literals)
@@ -471,6 +464,8 @@ func (b *blockDec) decodeLiterals(in []byte, hist *history) (remain []byte, err 
 		if len(literals) != litRegenSize {
 			return in, fmt.Errorf("literal output size mismatch want %d, got %d", litRegenSize, len(literals))
 		}
+		// Re-cap to get extra size.
+		literals = b.literalBuf[:len(literals)]
 		if debugDecoder {
 			printf("Decompressed %d literals into %d bytes\n", litCompSize, litRegenSize)
 		}
@@ -556,7 +551,10 @@ func (b *blockDec) prepareSequences(in []byte, hist *history) (err error) {
 		if debugDecoder {
 			printf("Compression modes: 0b%b", compMode)
 		}
-		for i := uint(0); i < 3; i++ {
+		if compMode&3 != 0 {
+			return errors.New("corrupt block: reserved bits not zero")
+		}
+		for i := range uint(3) {
 			mode := seqCompMode((compMode >> (6 - i*2)) & 3)
 			if debugDecoder {
 				println("Table", tableIndex(i), "is", mode)
@@ -594,10 +592,12 @@ func (b *blockDec) prepareSequences(in []byte, hist *history) (err error) {
 				}
 				seq.fse.setRLE(symb)
 				if debugDecoder {
-					printf("RLE set to %+v, code: %v", symb, v)
+					printf("RLE set to 0x%x, code: %v", symb, v)
 				}
 			case compModeFSE:
-				println("Reading table for", tableIndex(i))
+				if debugDecoder {
+					println("Reading table for", tableIndex(i))
+				}
 				if seq.fse == nil || seq.fse.preDefined {
 					seq.fse = fseDecoderPool.Get().(*fseDecoder)
 				}
@@ -645,21 +645,6 @@ func (b *blockDec) prepareSequences(in []byte, hist *history) (err error) {
 		println("initializing sequences:", err)
 		return err
 	}
-	// Extract blocks...
-	if false && hist.dict == nil {
-		fatalErr := func(err error) {
-			if err != nil {
-				panic(err)
-			}
-		}
-		fn := fmt.Sprintf("n-%d-lits-%d-prev-%d-%d-%d-win-%d.blk", hist.decoders.nSeqs, len(hist.decoders.literals), hist.recentOffsets[0], hist.recentOffsets[1], hist.recentOffsets[2], hist.windowSize)
-		var buf bytes.Buffer
-		fatalErr(binary.Write(&buf, binary.LittleEndian, hist.decoders.litLengths.fse))
-		fatalErr(binary.Write(&buf, binary.LittleEndian, hist.decoders.matchLengths.fse))
-		fatalErr(binary.Write(&buf, binary.LittleEndian, hist.decoders.offsets.fse))
-		buf.Write(in)
-		ioutil.WriteFile(filepath.Join("testdata", "seqs", fn), buf.Bytes(), os.ModePerm)
-	}
 
 	return nil
 }
@@ -689,10 +674,6 @@ func (b *blockDec) executeSequences(hist *history) error {
 	hbytes := hist.b
 	if len(hbytes) > hist.windowSize {
 		hbytes = hbytes[len(hbytes)-hist.windowSize:]
-		// We do not need history anymore.
-		if hist.dict != nil {
-			hist.dict.content = nil
-		}
 	}
 	hist.decoders.windowSize = hist.windowSize
 	hist.decoders.out = b.dst[:0]

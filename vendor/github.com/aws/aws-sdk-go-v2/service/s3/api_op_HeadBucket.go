@@ -6,38 +6,80 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	s3cust "github.com/aws/aws-sdk-go-v2/service/s3/internal/customizations"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
 	smithytime "github.com/aws/smithy-go/time"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 	smithywaiter "github.com/aws/smithy-go/waiter"
 	"time"
 )
 
-// This action is useful to determine if a bucket exists and you have permission to
-// access it. The action returns a 200 OK if the bucket exists and you have
-// permission to access it. If the bucket does not exist or you do not have
-// permission to access it, the HEAD request returns a generic 404 Not Found or 403
-// Forbidden code. A message body is not included, so you cannot determine the
-// exception beyond these error codes. To use this operation, you must have
-// permissions to perform the s3:ListBucket action. The bucket owner has this
-// permission by default and can grant this permission to others. For more
-// information about permissions, see Permissions Related to Bucket Subresource
-// Operations
-// (https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-with-s3-actions.html#using-with-s3-actions-related-to-bucket-subresources)
-// and Managing Access Permissions to Your Amazon S3 Resources
-// (https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-access-control.html).
-// To use this API against an access point, you must provide the alias of the
-// access point in place of the bucket name or specify the access point ARN. When
-// using the access point ARN, you must direct requests to the access point
-// hostname. The access point hostname takes the form
-// AccessPointName-AccountId.s3-accesspoint.Region.amazonaws.com. When using the
-// Amazon Web Services SDKs, you provide the ARN in place of the bucket name. For
-// more information see, Using access points
-// (https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-access-points.html).
+// You can use this operation to determine if a bucket exists and if you have
+// permission to access it. The action returns a 200 OK HTTP status code if the
+// bucket exists and you have permission to access it. You can make a HeadBucket
+// call on any bucket name to any Region in the partition, and regardless of the
+// permissions on the bucket, you will receive a response header with the correct
+// bucket location so that you can then make a proper, signed request to the
+// appropriate Regional endpoint.
+//
+// If the bucket doesn't exist or you don't have permission to access it, the HEAD
+// request returns a generic 400 Bad Request , 403 Forbidden , or 404 Not Found
+// HTTP status code. A message body isn't included, so you can't determine the
+// exception beyond these HTTP response codes.
+//
+// Authentication and authorization  General purpose buckets - Request to public
+// buckets that grant the s3:ListBucket permission publicly do not need to be
+// signed. All other HeadBucket requests must be authenticated and signed by using
+// IAM credentials (access key ID and secret access key for the IAM identities).
+// All headers with the x-amz- prefix, including x-amz-copy-source , must be
+// signed. For more information, see [REST Authentication].
+//
+// Directory buckets - You must use IAM credentials to authenticate and authorize
+// your access to the HeadBucket API operation, instead of using the temporary
+// security credentials through the CreateSession API operation.
+//
+// Amazon Web Services CLI or SDKs handles authentication and authorization on
+// your behalf.
+//
+// Permissions
+//
+//   - General purpose bucket permissions - To use this operation, you must have
+//     permissions to perform the s3:ListBucket action. The bucket owner has this
+//     permission by default and can grant this permission to others. For more
+//     information about permissions, see [Managing access permissions to your Amazon S3 resources]in the Amazon S3 User Guide.
+//
+//   - Directory bucket permissions - You must have the s3express:CreateSession
+//     permission in the Action element of a policy. If no session mode is specified,
+//     the session will be created with the maximum allowable privilege, attempting
+//     ReadWrite first, then ReadOnly if ReadWrite is not permitted. If you want to
+//     explicitly restrict the access to be read-only, you can set the
+//     s3express:SessionMode condition key to ReadOnly on the bucket.
+//
+// For more information about example bucket policies, see [Example bucket policies for S3 Express One Zone]and [Amazon Web Services Identity and Access Management (IAM) identity-based policies for S3 Express One Zone]in the Amazon S3
+//
+//	User Guide.
+//
+// HTTP Host header syntax  Directory buckets - The HTTP Host header syntax is
+// Bucket-name.s3express-zone-id.region-code.amazonaws.com .
+//
+// You must make requests for this API operation to the Zonal endpoint. These
+// endpoints support virtual-hosted-style requests in the format
+// https://bucket-name.s3express-zone-id.region-code.amazonaws.com . Path-style
+// requests are not supported. For more information about endpoints in Availability
+// Zones, see [Regional and Zonal endpoints for directory buckets in Availability Zones]in the Amazon S3 User Guide. For more information about endpoints in
+// Local Zones, see [Concepts for directory buckets in Local Zones]in the Amazon S3 User Guide.
+//
+// You must URL encode any signed header values that contain spaces. For example,
+// if your header value is my file.txt , containing two spaces after my , you must
+// URL encode this value to my%20%20file.txt .
+//
+// [Amazon Web Services Identity and Access Management (IAM) identity-based policies for S3 Express One Zone]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-express-security-iam-identity-policies.html
+// [Concepts for directory buckets in Local Zones]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-lzs-for-directory-buckets.html
+// [REST Authentication]: https://docs.aws.amazon.com/AmazonS3/latest/dev/RESTAuthentication.html
+// [Example bucket policies for S3 Express One Zone]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-express-security-iam-example-bucket-policies.html
+// [Managing access permissions to your Amazon S3 resources]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-access-control.html
+// [Regional and Zonal endpoints for directory buckets in Availability Zones]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/endpoint-directory-buckets-AZ.html
 func (c *Client) HeadBucket(ctx context.Context, params *HeadBucketInput, optFns ...func(*Options)) (*HeadBucketOutput, error) {
 	if params == nil {
 		params = &HeadBucketInput{}
@@ -55,34 +97,98 @@ func (c *Client) HeadBucket(ctx context.Context, params *HeadBucketInput, optFns
 
 type HeadBucketInput struct {
 
-	// The bucket name. When using this action with an access point, you must direct
+	// The bucket name.
+	//
+	// Directory buckets - When you use this operation with a directory bucket, you
+	// must use virtual-hosted-style requests in the format
+	// Bucket-name.s3express-zone-id.region-code.amazonaws.com . Path-style requests
+	// are not supported. Directory bucket names must be unique in the chosen Zone
+	// (Availability Zone or Local Zone). Bucket names must follow the format
+	// bucket-base-name--zone-id--x-s3 (for example,
+	// amzn-s3-demo-bucket--usw2-az1--x-s3 ). For information about bucket naming
+	// restrictions, see [Directory bucket naming rules]in the Amazon S3 User Guide.
+	//
+	// Access points - When you use this action with an access point for general
+	// purpose buckets, you must provide the alias of the access point in place of the
+	// bucket name or specify the access point ARN. When you use this action with an
+	// access point for directory buckets, you must provide the access point name in
+	// place of the bucket name. When using the access point ARN, you must direct
 	// requests to the access point hostname. The access point hostname takes the form
 	// AccessPointName-AccountId.s3-accesspoint.Region.amazonaws.com. When using this
 	// action with an access point through the Amazon Web Services SDKs, you provide
 	// the access point ARN in place of the bucket name. For more information about
-	// access point ARNs, see Using access points
-	// (https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-access-points.html)
-	// in the Amazon S3 User Guide. When using this action with Amazon S3 on Outposts,
-	// you must direct requests to the S3 on Outposts hostname. The S3 on Outposts
-	// hostname takes the form
-	// AccessPointName-AccountId.outpostID.s3-outposts.Region.amazonaws.com. When using
-	// this action using S3 on Outposts through the Amazon Web Services SDKs, you
-	// provide the Outposts bucket ARN in place of the bucket name. For more
-	// information about S3 on Outposts ARNs, see Using S3 on Outposts
-	// (https://docs.aws.amazon.com/AmazonS3/latest/userguide/S3onOutposts.html) in the
-	// Amazon S3 User Guide.
+	// access point ARNs, see [Using access points]in the Amazon S3 User Guide.
+	//
+	// Object Lambda access points - When you use this API operation with an Object
+	// Lambda access point, provide the alias of the Object Lambda access point in
+	// place of the bucket name. If the Object Lambda access point alias in a request
+	// is not valid, the error code InvalidAccessPointAliasError is returned. For more
+	// information about InvalidAccessPointAliasError , see [List of Error Codes].
+	//
+	// Object Lambda access points are not supported by directory buckets.
+	//
+	// S3 on Outposts - When you use this action with S3 on Outposts, you must direct
+	// requests to the S3 on Outposts hostname. The S3 on Outposts hostname takes the
+	// form AccessPointName-AccountId.outpostID.s3-outposts.Region.amazonaws.com . When
+	// you use this action with S3 on Outposts, the destination bucket must be the
+	// Outposts access point ARN or the access point alias. For more information about
+	// S3 on Outposts, see [What is S3 on Outposts?]in the Amazon S3 User Guide.
+	//
+	// [Directory bucket naming rules]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/directory-bucket-naming-rules.html
+	// [What is S3 on Outposts?]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/S3onOutposts.html
+	// [Using access points]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-access-points.html
+	// [List of Error Codes]: https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html#ErrorCodeList
 	//
 	// This member is required.
 	Bucket *string
 
-	// The account ID of the expected bucket owner. If the bucket is owned by a
-	// different account, the request will fail with an HTTP 403 (Access Denied) error.
+	// The account ID of the expected bucket owner. If the account ID that you provide
+	// does not match the actual owner of the bucket, the request fails with the HTTP
+	// status code 403 Forbidden (access denied).
 	ExpectedBucketOwner *string
 
 	noSmithyDocumentSerde
 }
 
+func (in *HeadBucketInput) bindEndpointParams(p *EndpointParameters) {
+
+	p.Bucket = in.Bucket
+
+}
+
 type HeadBucketOutput struct {
+
+	// Indicates whether the bucket name used in the request is an access point alias.
+	//
+	// For directory buckets, the value of this field is false .
+	AccessPointAlias *bool
+
+	// The Amazon Resource Name (ARN) of the S3 bucket. ARNs uniquely identify Amazon
+	// Web Services resources across all of Amazon Web Services.
+	//
+	// This parameter is only supported for S3 directory buckets. For more
+	// information, see [Using tags with directory buckets].
+	//
+	// [Using tags with directory buckets]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/directory-buckets-tagging.html
+	BucketArn *string
+
+	// The name of the location where the bucket will be created.
+	//
+	// For directory buckets, the Zone ID of the Availability Zone or the Local Zone
+	// where the bucket is created. An example Zone ID value for an Availability Zone
+	// is usw2-az1 .
+	//
+	// This functionality is only supported by directory buckets.
+	BucketLocationName *string
+
+	// The type of location where the bucket is created.
+	//
+	// This functionality is only supported by directory buckets.
+	BucketLocationType types.LocationType
+
+	// The Region that the bucket is located.
+	BucketRegion *string
+
 	// Metadata pertaining to the operation's result.
 	ResultMetadata middleware.Metadata
 
@@ -98,49 +204,26 @@ func (c *Client) addOperationHeadBucketMiddlewares(stack *middleware.Stack, opti
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
+	if err = addPutBucketContextMiddleware(stack); err != nil {
 		return err
 	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
+	if err = addIsExpressUserAgent(stack); err != nil {
 		return err
 	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = swapWithCustomHTTPSignerMiddleware(stack, options); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpHeadBucketValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opHeadBucket(options.Region), middleware.Before); err != nil {
 		return err
 	}
 	if err = addMetadataRetrieverMiddleware(stack); err != nil {
@@ -161,15 +244,17 @@ func (c *Client) addOperationHeadBucketMiddlewares(stack *middleware.Stack, opti
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addSerializeImmutableHostnameBucketMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addInterceptors(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
-
-// HeadBucketAPIClient is a client that implements the HeadBucket operation.
-type HeadBucketAPIClient interface {
-	HeadBucket(context.Context, *HeadBucketInput, ...func(*Options)) (*HeadBucketOutput, error)
-}
-
-var _ HeadBucketAPIClient = (*Client)(nil)
 
 // BucketExistsWaiterOptions are waiter options for BucketExistsWaiter
 type BucketExistsWaiterOptions struct {
@@ -177,16 +262,25 @@ type BucketExistsWaiterOptions struct {
 	// Set of options to modify how an operation is invoked. These apply to all
 	// operations invoked for this client. Use functional options on operation call to
 	// modify this list for per operation behavior.
+	//
+	// Passing options here is functionally equivalent to passing values to this
+	// config's ClientOptions field that extend the inner client's APIOptions directly.
 	APIOptions []func(*middleware.Stack) error
+
+	// Functional options to be passed to all operations invoked by this client.
+	//
+	// Function values that modify the inner APIOptions are applied after the waiter
+	// config's own APIOptions modifiers.
+	ClientOptions []func(*Options)
 
 	// MinDelay is the minimum amount of time to delay between retries. If unset,
 	// BucketExistsWaiter will use default minimum delay of 5 seconds. Note that
 	// MinDelay must resolve to a value lesser than or equal to the MaxDelay.
 	MinDelay time.Duration
 
-	// MaxDelay is the maximum amount of time to delay between retries. If unset or set
-	// to zero, BucketExistsWaiter will use default max delay of 120 seconds. Note that
-	// MaxDelay must resolve to value greater than or equal to the MinDelay.
+	// MaxDelay is the maximum amount of time to delay between retries. If unset or
+	// set to zero, BucketExistsWaiter will use default max delay of 120 seconds. Note
+	// that MaxDelay must resolve to value greater than or equal to the MinDelay.
 	MaxDelay time.Duration
 
 	// LogWaitAttempts is used to enable logging for waiter retry attempts
@@ -194,12 +288,13 @@ type BucketExistsWaiterOptions struct {
 
 	// Retryable is function that can be used to override the service defined
 	// waiter-behavior based on operation output, or returned error. This function is
-	// used by the waiter to decide if a state is retryable or a terminal state. By
-	// default service-modeled logic will populate this option. This option can thus be
-	// used to define a custom waiter state with fall-back to service-modeled waiter
-	// state mutators.The function returns an error in case of a failure state. In case
-	// of retry state, this function returns a bool value of true and nil error, while
-	// in case of success it returns a bool value of false and nil error.
+	// used by the waiter to decide if a state is retryable or a terminal state.
+	//
+	// By default service-modeled logic will populate this option. This option can
+	// thus be used to define a custom waiter state with fall-back to service-modeled
+	// waiter state mutators.The function returns an error in case of a failure state.
+	// In case of retry state, this function returns a bool value of true and nil
+	// error, while in case of success it returns a bool value of false and nil error.
 	Retryable func(context.Context, *HeadBucketInput, *HeadBucketOutput, error) (bool, error)
 }
 
@@ -275,7 +370,16 @@ func (w *BucketExistsWaiter) WaitForOutput(ctx context.Context, params *HeadBuck
 		}
 
 		out, err := w.client.HeadBucket(ctx, params, func(o *Options) {
+			baseOpts := []func(*Options){
+				addIsWaiterUserAgent,
+			}
 			o.APIOptions = append(o.APIOptions, apiOptions...)
+			for _, opt := range baseOpts {
+				opt(o)
+			}
+			for _, opt := range options.ClientOptions {
+				opt(o)
+			}
 		})
 
 		retryable, err := options.Retryable(ctx, params, out, err)
@@ -321,6 +425,9 @@ func bucketExistsStateRetryable(ctx context.Context, input *HeadBucketInput, out
 		}
 	}
 
+	if err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -330,16 +437,25 @@ type BucketNotExistsWaiterOptions struct {
 	// Set of options to modify how an operation is invoked. These apply to all
 	// operations invoked for this client. Use functional options on operation call to
 	// modify this list for per operation behavior.
+	//
+	// Passing options here is functionally equivalent to passing values to this
+	// config's ClientOptions field that extend the inner client's APIOptions directly.
 	APIOptions []func(*middleware.Stack) error
+
+	// Functional options to be passed to all operations invoked by this client.
+	//
+	// Function values that modify the inner APIOptions are applied after the waiter
+	// config's own APIOptions modifiers.
+	ClientOptions []func(*Options)
 
 	// MinDelay is the minimum amount of time to delay between retries. If unset,
 	// BucketNotExistsWaiter will use default minimum delay of 5 seconds. Note that
 	// MinDelay must resolve to a value lesser than or equal to the MaxDelay.
 	MinDelay time.Duration
 
-	// MaxDelay is the maximum amount of time to delay between retries. If unset or set
-	// to zero, BucketNotExistsWaiter will use default max delay of 120 seconds. Note
-	// that MaxDelay must resolve to value greater than or equal to the MinDelay.
+	// MaxDelay is the maximum amount of time to delay between retries. If unset or
+	// set to zero, BucketNotExistsWaiter will use default max delay of 120 seconds.
+	// Note that MaxDelay must resolve to value greater than or equal to the MinDelay.
 	MaxDelay time.Duration
 
 	// LogWaitAttempts is used to enable logging for waiter retry attempts
@@ -347,12 +463,13 @@ type BucketNotExistsWaiterOptions struct {
 
 	// Retryable is function that can be used to override the service defined
 	// waiter-behavior based on operation output, or returned error. This function is
-	// used by the waiter to decide if a state is retryable or a terminal state. By
-	// default service-modeled logic will populate this option. This option can thus be
-	// used to define a custom waiter state with fall-back to service-modeled waiter
-	// state mutators.The function returns an error in case of a failure state. In case
-	// of retry state, this function returns a bool value of true and nil error, while
-	// in case of success it returns a bool value of false and nil error.
+	// used by the waiter to decide if a state is retryable or a terminal state.
+	//
+	// By default service-modeled logic will populate this option. This option can
+	// thus be used to define a custom waiter state with fall-back to service-modeled
+	// waiter state mutators.The function returns an error in case of a failure state.
+	// In case of retry state, this function returns a bool value of true and nil
+	// error, while in case of success it returns a bool value of false and nil error.
 	Retryable func(context.Context, *HeadBucketInput, *HeadBucketOutput, error) (bool, error)
 }
 
@@ -379,9 +496,9 @@ func NewBucketNotExistsWaiter(client HeadBucketAPIClient, optFns ...func(*Bucket
 	}
 }
 
-// Wait calls the waiter function for BucketNotExists waiter. The maxWaitDur is the
-// maximum wait duration the waiter will wait. The maxWaitDur is required and must
-// be greater than zero.
+// Wait calls the waiter function for BucketNotExists waiter. The maxWaitDur is
+// the maximum wait duration the waiter will wait. The maxWaitDur is required and
+// must be greater than zero.
 func (w *BucketNotExistsWaiter) Wait(ctx context.Context, params *HeadBucketInput, maxWaitDur time.Duration, optFns ...func(*BucketNotExistsWaiterOptions)) error {
 	_, err := w.WaitForOutput(ctx, params, maxWaitDur, optFns...)
 	return err
@@ -429,7 +546,16 @@ func (w *BucketNotExistsWaiter) WaitForOutput(ctx context.Context, params *HeadB
 		}
 
 		out, err := w.client.HeadBucket(ctx, params, func(o *Options) {
+			baseOpts := []func(*Options){
+				addIsWaiterUserAgent,
+			}
 			o.APIOptions = append(o.APIOptions, apiOptions...)
+			for _, opt := range baseOpts {
+				opt(o)
+			}
+			for _, opt := range options.ClientOptions {
+				opt(o)
+			}
 		})
 
 		retryable, err := options.Retryable(ctx, params, out, err)
@@ -471,20 +597,29 @@ func bucketNotExistsStateRetryable(ctx context.Context, input *HeadBucketInput, 
 		}
 	}
 
+	if err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
-func newServiceMetadataMiddleware_opHeadBucket(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "s3",
-		OperationName: "HeadBucket",
+func (v *HeadBucketInput) bucket() (string, bool) {
+	if v.Bucket == nil {
+		return "", false
 	}
+	return *v.Bucket, true
 }
 
-// getHeadBucketBucketMember returns a pointer to string denoting a provided bucket
-// member valueand a boolean indicating if the input has a modeled bucket name,
+// HeadBucketAPIClient is a client that implements the HeadBucket operation.
+type HeadBucketAPIClient interface {
+	HeadBucket(context.Context, *HeadBucketInput, ...func(*Options)) (*HeadBucketOutput, error)
+}
+
+var _ HeadBucketAPIClient = (*Client)(nil)
+
+// getHeadBucketBucketMember returns a pointer to string denoting a provided
+// bucket member valueand a boolean indicating if the input has a modeled bucket
+// name,
 func getHeadBucketBucketMember(input interface{}) (*string, bool) {
 	in := input.(*HeadBucketInput)
 	if in.Bucket == nil {
@@ -506,4 +641,35 @@ func addHeadBucketUpdateEndpoint(stack *middleware.Stack, options Options) error
 		UseARNRegion:                   options.UseARNRegion,
 		DisableMultiRegionAccessPoints: options.DisableMultiRegionAccessPoints,
 	})
+}
+
+// PresignHeadBucket is used to generate a presigned HTTP Request which contains
+// presigned URL, signed headers and HTTP method used.
+func (c *PresignClient) PresignHeadBucket(ctx context.Context, params *HeadBucketInput, optFns ...func(*PresignOptions)) (*v4.PresignedHTTPRequest, error) {
+	if params == nil {
+		params = &HeadBucketInput{}
+	}
+	options := c.options.copy()
+	for _, fn := range optFns {
+		fn(&options)
+	}
+	clientOptFns := append(options.ClientOptions, withNopHTTPClientAPIOption)
+
+	result, _, err := c.client.invokeOperation(ctx, "HeadBucket", params, clientOptFns,
+		c.client.addOperationHeadBucketMiddlewares,
+		presignConverter(options).convertToPresignMiddleware,
+		addHeadBucketPayloadAsUnsigned,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	out := result.(*v4.PresignedHTTPRequest)
+	return out, nil
+}
+
+func addHeadBucketPayloadAsUnsigned(stack *middleware.Stack, options Options) error {
+	v4.RemoveContentSHA256HeaderMiddleware(stack)
+	v4.RemoveComputePayloadSHA256Middleware(stack)
+	return v4.AddUnsignedPayloadMiddleware(stack)
 }

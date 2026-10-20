@@ -17,7 +17,6 @@ package stack
 import (
 	"fmt"
 
-	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
@@ -34,7 +33,7 @@ type Route struct {
 	localAddressNIC *nic
 
 	// mu protects annotated fields below.
-	mu sync.RWMutex
+	mu routeRWMutex
 
 	// localAddressEndpoint is the local address this route is associated with.
 	// +checklocks:mu
@@ -50,6 +49,16 @@ type Route struct {
 	// linkRes is set if link address resolution is enabled for this protocol on
 	// the route's NIC.
 	linkRes *linkResolver
+
+	// neighborEntry is the cached result of fetching a neighbor entry from the
+	// neighbor cache.
+	// +checklocks:mu
+	neighborEntry *neighborEntry
+
+	// mtu is the maximum transmission unit to use for this route.
+	// If mtu is 0, this field is ignored and the MTU of the outgoing NIC
+	// is used for egress packets.
+	mtu uint32
 }
 
 // +stateify savable
@@ -97,6 +106,11 @@ func (r *Route) Loop() PacketLooping {
 	return r.routeInfo.Loop
 }
 
+// OutgoingNIC returns the route's outgoing NIC.
+func (r *Route) OutgoingNIC() tcpip.NICID {
+	return r.outgoingNIC.id
+}
+
 // RouteInfo contains all of Route's exported fields.
 //
 // +stateify savable
@@ -131,8 +145,8 @@ func (r *Route) fieldsLocked() RouteInfo {
 // ownership of the provided local address.
 //
 // Returns an empty route if validation fails.
-func constructAndValidateRoute(netProto tcpip.NetworkProtocolNumber, addressEndpoint AssignableAddressEndpoint, localAddressNIC, outgoingNIC *nic, gateway, localAddr, remoteAddr tcpip.Address, handleLocal, multicastLoop bool) *Route {
-	if len(localAddr) == 0 {
+func constructAndValidateRoute(netProto tcpip.NetworkProtocolNumber, addressEndpoint AssignableAddressEndpoint, localAddressNIC, outgoingNIC *nic, gateway, localAddr, remoteAddr tcpip.Address, handleLocal, multicastLoop bool, mtu uint32) *Route {
+	if localAddr.BitLen() == 0 {
 		localAddr = addressEndpoint.AddressWithPrefix().Address
 	}
 
@@ -142,7 +156,7 @@ func constructAndValidateRoute(netProto tcpip.NetworkProtocolNumber, addressEndp
 	}
 
 	// If no remote address is provided, use the local address.
-	if len(remoteAddr) == 0 {
+	if remoteAddr.BitLen() == 0 {
 		remoteAddr = localAddr
 	}
 
@@ -156,6 +170,7 @@ func constructAndValidateRoute(netProto tcpip.NetworkProtocolNumber, addressEndp
 		addressEndpoint,
 		handleLocal,
 		multicastLoop,
+		mtu,
 	)
 
 	return r
@@ -163,22 +178,22 @@ func constructAndValidateRoute(netProto tcpip.NetworkProtocolNumber, addressEndp
 
 // makeRoute initializes a new route. It takes ownership of the provided
 // AssignableAddressEndpoint.
-func makeRoute(netProto tcpip.NetworkProtocolNumber, gateway, localAddr, remoteAddr tcpip.Address, outgoingNIC, localAddressNIC *nic, localAddressEndpoint AssignableAddressEndpoint, handleLocal, multicastLoop bool) *Route {
+func makeRoute(netProto tcpip.NetworkProtocolNumber, gateway, localAddr, remoteAddr tcpip.Address, outgoingNIC, localAddressNIC *nic, localAddressEndpoint AssignableAddressEndpoint, handleLocal, multicastLoop bool, mtu uint32) *Route {
 	if localAddressNIC.stack != outgoingNIC.stack {
-		panic(fmt.Sprintf("cannot create a route with NICs from different stacks"))
+		panic("cannot create a route with NICs from different stacks")
 	}
 
-	if len(localAddr) == 0 {
+	if localAddr.BitLen() == 0 {
 		localAddr = localAddressEndpoint.AddressWithPrefix().Address
 	}
 
 	loop := PacketOut
 
-	// TODO(gvisor.dev/issue/4689): Loopback interface loops back packets at the
-	// link endpoint level. We can remove this check once loopback interfaces
-	// loop back packets at the network layer.
+	// Loopback interface loops back packets at the link endpoint level. We
+	// could remove this check if loopback interfaces looped back packets
+	// at the network layer.
 	if !outgoingNIC.IsLoopback() {
-		if handleLocal && localAddr != "" && remoteAddr == localAddr {
+		if handleLocal && localAddr != (tcpip.Address{}) && remoteAddr == localAddr {
 			loop = PacketLoop
 		} else if multicastLoop && (header.IsV4MulticastAddress(remoteAddr) || header.IsV6MulticastAddress(remoteAddr)) {
 			loop |= PacketLoop
@@ -189,7 +204,7 @@ func makeRoute(netProto tcpip.NetworkProtocolNumber, gateway, localAddr, remoteA
 		}
 	}
 
-	r := makeRouteInner(netProto, localAddr, remoteAddr, outgoingNIC, localAddressNIC, localAddressEndpoint, loop)
+	r := makeRouteInner(netProto, localAddr, remoteAddr, outgoingNIC, localAddressNIC, localAddressEndpoint, loop, mtu)
 	if r.Loop()&PacketOut == 0 {
 		// Packet will not leave the stack, no need for a gateway or a remote link
 		// address.
@@ -202,7 +217,7 @@ func makeRoute(netProto tcpip.NetworkProtocolNumber, gateway, localAddr, remoteA
 		}
 	}
 
-	if len(gateway) > 0 {
+	if gateway.BitLen() > 0 {
 		r.routeInfo.NextHop = gateway
 		return r
 	}
@@ -229,7 +244,15 @@ func makeRoute(netProto tcpip.NetworkProtocolNumber, gateway, localAddr, remoteA
 	return r
 }
 
-func makeRouteInner(netProto tcpip.NetworkProtocolNumber, localAddr, remoteAddr tcpip.Address, outgoingNIC, localAddressNIC *nic, localAddressEndpoint AssignableAddressEndpoint, loop PacketLooping) *Route {
+func makeRouteInner(netProto tcpip.NetworkProtocolNumber, localAddr, remoteAddr tcpip.Address, outgoingNIC, localAddressNIC *nic, localAddressEndpoint AssignableAddressEndpoint, loop PacketLooping, mtu uint32) *Route {
+	if mtu != 0 {
+		adjusted := mtu - outgoingNIC.getNetworkEndpoint(netProto).EndpointHeaderSize()
+		if adjusted > mtu {
+			mtu = 0
+		} else {
+			mtu = adjusted
+		}
+	}
 	r := &Route{
 		routeInfo: routeInfo{
 			NetProto:         netProto,
@@ -240,6 +263,7 @@ func makeRouteInner(netProto tcpip.NetworkProtocolNumber, localAddr, remoteAddr 
 		},
 		localAddressNIC: localAddressNIC,
 		outgoingNIC:     outgoingNIC,
+		mtu:             mtu,
 	}
 
 	r.mu.Lock()
@@ -255,13 +279,13 @@ func makeRouteInner(netProto tcpip.NetworkProtocolNumber, localAddr, remoteAddr 
 // A local route is a route to a destination that is local to the stack.
 func makeLocalRoute(netProto tcpip.NetworkProtocolNumber, localAddr, remoteAddr tcpip.Address, outgoingNIC, localAddressNIC *nic, localAddressEndpoint AssignableAddressEndpoint) *Route {
 	loop := PacketLoop
-	// TODO(gvisor.dev/issue/4689): Loopback interface loops back packets at the
-	// link endpoint level. We can remove this check once loopback interfaces
-	// loop back packets at the network layer.
+	// Loopback interface loops back packets at the link endpoint level. We
+	// could remove this check if loopback interfaces looped back packets
+	// at the network layer.
 	if outgoingNIC.IsLoopback() {
 		loop = PacketOut
 	}
-	return makeRouteInner(netProto, localAddr, remoteAddr, outgoingNIC, localAddressNIC, localAddressEndpoint, loop)
+	return makeRouteInner(netProto, localAddr, remoteAddr, outgoingNIC, localAddressNIC, localAddressEndpoint, loop, 0 /* mtu */)
 }
 
 // RemoteLinkAddress returns the link-layer (MAC) address of the next hop in
@@ -302,10 +326,10 @@ func (r *Route) RequiresTXTransportChecksum() bool {
 	return r.outgoingNIC.NetworkLinkEndpoint.Capabilities()&CapabilityTXChecksumOffload == 0
 }
 
-// HasGvisorGSOCapability returns true if the route supports gVisor GSO.
-func (r *Route) HasGvisorGSOCapability() bool {
+// HasGVisorGSOCapability returns true if the route supports gVisor GSO.
+func (r *Route) HasGVisorGSOCapability() bool {
 	if gso, ok := r.outgoingNIC.NetworkLinkEndpoint.(GSOEndpoint); ok {
-		return gso.SupportedGSO() == GvisorGSOSupported
+		return gso.SupportedGSO() == GVisorGSOSupported
 	}
 	return false
 }
@@ -321,11 +345,6 @@ func (r *Route) HasHostGSOCapability() bool {
 // HasSaveRestoreCapability returns true if the route supports save/restore.
 func (r *Route) HasSaveRestoreCapability() bool {
 	return r.outgoingNIC.NetworkLinkEndpoint.Capabilities()&CapabilitySaveRestore != 0
-}
-
-// HasDisconncetOkCapability returns true if the route supports disconnecting.
-func (r *Route) HasDisconncetOkCapability() bool {
-	return r.outgoingNIC.NetworkLinkEndpoint.Capabilities()&CapabilityDisconnectOk != 0
 }
 
 // GSOMaxSize returns the maximum GSO packet size.
@@ -390,24 +409,47 @@ func (r *Route) resolvedFields(afterResolve func(ResolvedFieldsResult)) (RouteIn
 		linkAddressResolutionRequestLocalAddr = r.LocalAddress()
 	}
 
+	nEntry := r.getCachedNeighborEntry()
+	if nEntry != nil {
+		if addr, ok := nEntry.getRemoteLinkAddress(); ok {
+			fields.RemoteLinkAddress = addr
+			if afterResolve != nil {
+				afterResolve(ResolvedFieldsResult{RouteInfo: fields, Err: nil})
+			}
+			return fields, nil, nil
+		}
+	}
 	afterResolveFields := fields
-	linkAddr, ch, err := r.linkRes.getNeighborLinkAddress(r.nextHop(), linkAddressResolutionRequestLocalAddr, func(r LinkResolutionResult) {
+	entry, ch, err := r.linkRes.neigh.entry(r.nextHop(), linkAddressResolutionRequestLocalAddr, func(lrr LinkResolutionResult) {
 		if afterResolve != nil {
-			if r.Err == nil {
-				afterResolveFields.RemoteLinkAddress = r.LinkAddress
+			if lrr.Err == nil {
+				afterResolveFields.RemoteLinkAddress = lrr.LinkAddress
 			}
 
-			afterResolve(ResolvedFieldsResult{RouteInfo: afterResolveFields, Err: r.Err})
+			afterResolve(ResolvedFieldsResult{RouteInfo: afterResolveFields, Err: lrr.Err})
 		}
 	})
 	if err == nil {
-		fields.RemoteLinkAddress = linkAddr
+		fields.RemoteLinkAddress, _ = entry.getRemoteLinkAddress()
 	}
+	r.setCachedNeighborEntry(entry)
 	return fields, ch, err
 }
 
+func (r *Route) getCachedNeighborEntry() *neighborEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.neighborEntry
+}
+
+func (r *Route) setCachedNeighborEntry(entry *neighborEntry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.neighborEntry = entry
+}
+
 func (r *Route) nextHop() tcpip.Address {
-	if len(r.NextHop()) == 0 {
+	if r.NextHop().BitLen() == 0 {
 		return r.RemoteAddress()
 	}
 	return r.NextHop()
@@ -483,8 +525,12 @@ func (r *Route) DefaultTTL() uint8 {
 	return r.outgoingNIC.getNetworkEndpoint(r.NetProto()).DefaultTTL()
 }
 
-// MTU returns the MTU of the underlying network endpoint.
+// MTU returns the MTU of the route if present, otherwise the MTU of the underlying network endpoint.
 func (r *Route) MTU() uint32 {
+	if r.mtu > 0 {
+		// r.mtu is already adjusted to account for IP headers. See makeRouteInner.
+		return r.mtu
+	}
 	return r.outgoingNIC.getNetworkEndpoint(r.NetProto()).MTU()
 }
 
@@ -510,7 +556,7 @@ func (r *Route) Acquire() {
 // +checklocksread:r.mu
 func (r *Route) acquireLocked() {
 	if ep := r.localAddressEndpoint; ep != nil {
-		if !ep.IncRef() {
+		if !ep.TryIncRef() {
 			panic(fmt.Sprintf("failed to increment reference count for local address endpoint = %s", r.LocalAddress()))
 		}
 	}
@@ -550,7 +596,7 @@ func (r *Route) IsOutboundBroadcast() bool {
 // "Reachable" is defined as having full-duplex communication between the
 // local and remote ends of the route.
 func (r *Route) ConfirmReachable() {
-	if r.linkRes != nil {
-		r.linkRes.confirmReachable(r.nextHop())
+	if entry := r.getCachedNeighborEntry(); entry != nil {
+		entry.handleUpperLevelConfirmation()
 	}
 }

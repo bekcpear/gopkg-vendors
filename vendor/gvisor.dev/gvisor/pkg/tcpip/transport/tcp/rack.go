@@ -19,7 +19,6 @@ import (
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/seqnum"
-	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 const (
@@ -47,7 +46,7 @@ const (
 //
 // +stateify savable
 type rackControl struct {
-	stack.TCPRACKState
+	TCPRACKState
 
 	// exitedRecovery indicates if the connection is exiting loss recovery.
 	// This flag is set if the sender is leaving the recovery after
@@ -78,8 +77,18 @@ func (rc *rackControl) init(snd *sender, iss seqnum.Value) {
 
 // update will update the RACK related fields when an ACK has been received.
 // See: https://tools.ietf.org/html/draft-ietf-tcpm-rack-09#section-6.2
+//
+// +checklocks:rc.snd.ep.mu
 func (rc *rackControl) update(seg *segment, ackSeg *segment) {
-	rtt := rc.snd.ep.stack.Clock().NowMonotonic().Sub(seg.xmitTime)
+	// Compute the RTT sample against the time the ACK was received at ingress
+	// (ackSeg.rcvdTime), not the current clock. The two differ when the ACK was
+	// delayed inside the stack before being processed (e.g. it sat in the
+	// endpoint's segment queue while the application held the endpoint lock
+	// during a Write that synchronously flushed a window). Using the processing
+	// time would inflate the RTT by that internal delay, corrupting RACK.RTT,
+	// RACK.minRTT and the reorder window, and causing spurious loss detection.
+	// detectLoss already uses ackSeg.rcvdTime; this keeps update consistent.
+	rtt := ackSeg.rcvdTime.Sub(seg.xmitTime)
 
 	// If the ACK is for a retransmitted packet, do not update if it is a
 	// spurious inference which is determined by below checks:
@@ -149,6 +158,8 @@ func (rc *rackControl) setDSACKSeen(dsackSeen bool) {
 
 // shouldSchedulePTO dictates whether we should schedule a PTO or not.
 // See https://tools.ietf.org/html/draft-ietf-tcpm-rack-08#section-7.5.1.
+//
+// +checklocks:s.ep.mu
 func (s *sender) shouldSchedulePTO() bool {
 	// Schedule PTO only if RACK loss detection is enabled.
 	return s.ep.tcpRecovery&tcpip.TCPRACKLossDetection != 0 &&
@@ -162,6 +173,9 @@ func (s *sender) shouldSchedulePTO() bool {
 
 // schedulePTO schedules the probe timeout as defined in
 // https://tools.ietf.org/html/draft-ietf-tcpm-rack-08#section-7.5.1.
+//
+// +checklocks:s.ep.mu
+// +checklocksexclude:s.rtt.rttMutex
 func (s *sender) schedulePTO() {
 	pto := time.Second
 	s.rtt.Lock()
@@ -188,9 +202,10 @@ func (s *sender) schedulePTO() {
 // https://tools.ietf.org/html/draft-ietf-tcpm-rack-08#section-7.5.2.
 //
 // +checklocks:s.ep.mu
-func (s *sender) probeTimerExpired() {
-	if s.probeTimer.isZero() || !s.probeTimer.checkExpiration() {
-		return
+// +checklocksexclude:s.rtt.rttMutex
+func (s *sender) probeTimerExpired() tcpip.Error {
+	if s.probeTimer.isUninitialized() || !s.probeTimer.checkExpiration() {
+		return nil
 	}
 
 	var dataSent bool
@@ -231,12 +246,14 @@ func (s *sender) probeTimerExpired() {
 	// not the probe timer. This ensures that the sender does not send repeated,
 	// back-to-back tail loss probes.
 	s.postXmit(dataSent, false /* shouldScheduleProbe */)
-	return
+	return nil
 }
 
 // detectTLPRecovery detects if recovery was accomplished by the loss probes
 // and updates TLP state accordingly.
 // See https://tools.ietf.org/html/draft-ietf-tcpm-rack-08#section-7.6.3.
+//
+// +checklocks:s.ep.mu
 func (s *sender) detectTLPRecovery(ack seqnum.Value, rcvdSeg *segment) {
 	if !(s.ep.SACKPermitted && s.rc.tlpRxtOut) {
 		return
@@ -280,6 +297,9 @@ func (s *sender) detectTLPRecovery(ack seqnum.Value, rcvdSeg *segment) {
 //     been observed RACK uses reo_wnd of zero during loss recovery, in order to
 //     retransmit quickly, or when the number of DUPACKs exceeds the classic
 //     DUPACKthreshold.
+//
+// +checklocks:rc.snd.ep.mu
+// +checklocksexclude:rc.snd.rtt.rttMutex
 func (rc *rackControl) updateRACKReorderWindow() {
 	dsackSeen := rc.DSACKSeen
 	snd := rc.snd
@@ -353,9 +373,12 @@ func (rc *rackControl) exitRecovery() {
 // detectLoss marks the segment as lost if the reordering window has elapsed
 // and the ACK is not received. It will also arm the reorder timer.
 // See: https://tools.ietf.org/html/draft-ietf-tcpm-rack-08#section-7.2 Step 5.
+//
+// +checklocks:rc.snd.ep.mu
 func (rc *rackControl) detectLoss(rcvTime tcpip.MonotonicTime) int {
 	var timeout time.Duration
 	numLost := 0
+	clockResolution := rc.snd.ep.stack.ClockResolution()
 	for seg := rc.snd.writeList.Front(); seg != nil && seg.xmitCount != 0; seg = seg.Next() {
 		if rc.snd.ep.scoreboard.IsSACKED(seg.sackBlock()) {
 			continue
@@ -367,13 +390,27 @@ func (rc *rackControl) detectLoss(rcvTime tcpip.MonotonicTime) int {
 		}
 
 		endSeq := seg.sequenceNumber.Add(seqnum.Size(seg.payloadSize()))
-		if seg.xmitTime.Before(rc.XmitTime) || (seg.xmitTime == rc.XmitTime && rc.EndSequence.LessThan(endSeq)) {
-			timeRemaining := seg.xmitTime.Sub(rcvTime) + rc.RTT + rc.ReoWnd
-			if timeRemaining <= 0 {
+		if seg.xmitTime.Before(rc.XmitTime) || (seg.xmitTime == rc.XmitTime && endSeq.LessThan(rc.EndSequence)) {
+			// Timestamp quantization can make two events less than one clock tick
+			// apart appear a full tick apart. Keep that uncertainty separate from
+			// the network reordering window, which RACK may intentionally reduce to
+			// zero during recovery.
+			timeRemaining := seg.xmitTime.Sub(rcvTime) + rc.RTT + rc.ReoWnd + clockResolution
+			if timeRemaining < 0 || (timeRemaining == 0 && clockResolution == 0) {
 				seg.lost = true
 				numLost++
-			} else if timeRemaining > timeout {
-				timeout = timeRemaining
+			} else {
+				// Arm the timer through the uncertainty boundary, so that a timer
+				// target re-evaluation is strictly negative and loss is declared on
+				// the first expiry. Arming only to timeRemaining would make the
+				// expiry a no-op at equality that re-arms a second timer.
+				timeWait := timeRemaining
+				if clockResolution > 0 {
+					timeWait += clockResolution
+				}
+				if timeWait > timeout {
+					timeout = timeWait
+				}
 			}
 		}
 	}
@@ -388,14 +425,25 @@ func (rc *rackControl) detectLoss(rcvTime tcpip.MonotonicTime) int {
 // before the reorder timer expired.
 //
 // +checklocks:rc.snd.ep.mu
-func (rc *rackControl) reorderTimerExpired() {
-	if rc.snd.reorderTimer.isZero() || !rc.snd.reorderTimer.checkExpiration() {
-		return
+// +checklocksexclude:rc.snd.rtt.rttMutex
+func (rc *rackControl) reorderTimerExpired() tcpip.Error {
+	if rc.snd.reorderTimer.isUninitialized() || !rc.snd.reorderTimer.checkExpiration() {
+		return nil
 	}
 
-	numLost := rc.detectLoss(rc.snd.ep.stack.Clock().NowMonotonic())
+	// Evaluate loss as of the time the reorder timer was scheduled to fire (its
+	// target), not the current clock. The timer is armed for the instant a
+	// segment's reorder window elapses, but the timer callback itself can run
+	// arbitrarily late under load (the processor goroutine is busy, or the
+	// endpoint lock is held while a Write flushes a window). Using the
+	// (possibly much later) processing time would make timeRemaining strongly
+	// negative and mark not-yet-lost segments as lost, triggering spurious
+	// retransmits and recovery on a path with little or no real loss
+	// (gvisor#9707/#9778). detectLoss arms the timer from rcvdTime-derived
+	// values, so evaluating it at the timer target keeps the two consistent.
+	numLost := rc.detectLoss(rc.snd.reorderTimer.target)
 	if numLost == 0 {
-		return
+		return nil
 	}
 
 	fastRetransmit := false
@@ -406,12 +454,13 @@ func (rc *rackControl) reorderTimerExpired() {
 	}
 
 	rc.DoRecovery(nil, fastRetransmit)
-	return
+	return nil
 }
 
 // DoRecovery implements lossRecovery.DoRecovery.
 //
 // +checklocks:rc.snd.ep.mu
+// +checklocksexclude:rc.snd.rtt.rttMutex
 func (rc *rackControl) DoRecovery(_ *segment, fastRetransmit bool) {
 	snd := rc.snd
 	if fastRetransmit {

@@ -16,21 +16,19 @@
 package ipv6
 
 import (
-	"encoding/binary"
 	"fmt"
-	"hash/fnv"
 	"math"
 	"reflect"
 	"sort"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/atomicbitops"
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/header/parse"
-	"gvisor.dev/gvisor/pkg/tcpip/network/hash"
 	"gvisor.dev/gvisor/pkg/tcpip/network/internal/fragmentation"
 	"gvisor.dev/gvisor/pkg/tcpip/network/internal/ip"
 	"gvisor.dev/gvisor/pkg/tcpip/network/internal/multicast"
@@ -133,7 +131,7 @@ var policyTable = [...]struct {
 	// 2001::/32 (Teredo prefix as per RFC 4380 section 2.6).
 	{
 		subnet: tcpip.AddressWithPrefix{
-			Address:   "\x20\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+			Address:   tcpip.AddrFrom16([16]byte{0x20, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}),
 			PrefixLen: 32,
 		}.Subnet(),
 		label: 5,
@@ -141,7 +139,7 @@ var policyTable = [...]struct {
 	// 2002::/16 (6to4 prefix as per RFC 3056 section 2).
 	{
 		subnet: tcpip.AddressWithPrefix{
-			Address:   "\x20\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+			Address:   tcpip.AddrFrom16([16]byte{0x20, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}),
 			PrefixLen: 16,
 		}.Subnet(),
 		label: 2,
@@ -149,7 +147,7 @@ var policyTable = [...]struct {
 	// fc00::/7 (Unique local addresses as per RFC 4193 section 3.1).
 	{
 		subnet: tcpip.AddressWithPrefix{
-			Address:   "\xfc\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+			Address:   tcpip.AddrFrom16([16]byte{0xfc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}),
 			PrefixLen: 7,
 		}.Subnet(),
 		label: 13,
@@ -180,8 +178,42 @@ var _ stack.GroupAddressableEndpoint = (*endpoint)(nil)
 var _ stack.AddressableEndpoint = (*endpoint)(nil)
 var _ stack.NetworkEndpoint = (*endpoint)(nil)
 var _ stack.NDPEndpoint = (*endpoint)(nil)
+var _ MLDEndpoint = (*endpoint)(nil)
 var _ NDPEndpoint = (*endpoint)(nil)
 
+// +stateify savable
+type endpointMu struct {
+	sync.RWMutex `state:"nosave"`
+
+	// +checklocks:RWMutex
+	addressableEndpointState stack.AddressableEndpointState
+
+	// +checklocks:RWMutex
+	ndp ndpState
+
+	// +checklocks:RWMutex
+	mld mldState
+}
+
+// +stateify savable
+type dadMu struct {
+	sync.Mutex `state:"nosave"`
+
+	// +checklocks:Mutex
+	dad ip.DAD
+}
+
+// +stateify savable
+type endpointDAD struct {
+	mu dadMu
+}
+
+// NDP and MLD retain their containing endpoint after NewEndpoint initializes
+// them, so their lock paths refer to the same mutex.
+//
+// +checklocksalias:mu.ndp.ep.mu.RWMutex=mu.RWMutex
+// +checklocksalias:mu.mld.ep.mu.RWMutex=mu.RWMutex
+// +stateify savable
 type endpoint struct {
 	nic        stack.NetworkInterface
 	dispatcher stack.TransportDispatcher
@@ -198,18 +230,9 @@ type endpoint struct {
 
 	// multicastForwarding is set to forwardingEnabled when the endpoint has
 	// forwarding enabled and forwardingDisabled when it is disabled.
-	//
-	// TODO(https://gvisor.dev/issue/7338): Implement support for multicast
-	// forwarding. Currently, setting this value to true is a no-op.
 	multicastForwarding atomicbitops.Uint32
 
-	mu struct {
-		sync.RWMutex
-
-		addressableEndpointState stack.AddressableEndpointState
-		ndp                      ndpState
-		mld                      mldState
-	}
+	mu endpointMu
 
 	// dad is used to check if an arbitrary address is already assigned to some
 	// neighbor.
@@ -220,13 +243,7 @@ type endpoint struct {
 	// not be called with the actual DAD result.
 	//
 	// LOCK ORDERING: mu > dad.mu.
-	dad struct {
-		mu struct {
-			sync.Mutex
-
-			dad ip.DAD
-		}
-	}
+	dad endpointDAD
 }
 
 // NICNameFromID is a function that returns a stable name for the specified NIC,
@@ -240,12 +257,14 @@ type NICNameFromID func(tcpip.NICID, string) string
 
 // OpaqueInterfaceIdentifierOptions holds the options related to the generation
 // of opaque interface identifiers (IIDs) as defined by RFC 7217.
+//
+// +stateify savable
 type OpaqueInterfaceIdentifierOptions struct {
 	// NICNameFromID is a function that returns a stable name for a specified NIC,
 	// even if the NIC ID changes over time.
 	//
 	// Must be specified to generate the opaque IID.
-	NICNameFromID NICNameFromID
+	NICNameFromID NICNameFromID `state:"nosave"`
 
 	// SecretKey is a pseudo-random number used as the secret key when generating
 	// opaque IIDs as defined by RFC 7217. The key SHOULD be at least
@@ -309,7 +328,7 @@ func (e *endpoint) HandleLinkResolutionFailure(pkt *stack.PacketBuffer) {
 
 // onAddressAssignedLocked handles an address being assigned.
 //
-// Precondition: e.mu must be exclusively locked.
+// +checklocks:e.mu.RWMutex
 func (e *endpoint) onAddressAssignedLocked(addr tcpip.Address) {
 	// As per RFC 2710 section 3,
 	//
@@ -356,12 +375,33 @@ func (e *endpoint) InvalidateDefaultRouter(rtr tcpip.Address) {
 	e.mu.ndp.invalidateOffLinkRoute(offLinkRoute{dest: header.IPv6EmptySubnet, router: rtr})
 }
 
+// SetMLDVersion implements MLDEndpoint.
+func (e *endpoint) SetMLDVersion(v MLDVersion) MLDVersion {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.mu.mld.setVersion(v)
+}
+
+// GetMLDVersion implements MLDEndpoint.
+func (e *endpoint) GetMLDVersion() MLDVersion {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.mu.mld.getVersion()
+}
+
 // SetNDPConfigurations implements NDPEndpoint.
 func (e *endpoint) SetNDPConfigurations(c NDPConfigurations) {
 	c.validate()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.mu.ndp.configs = c
+}
+
+// NDPConfigurations implements NDPEndpoint.
+func (e *endpoint) NDPConfigurations() NDPConfigurations {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.mu.ndp.configs
 }
 
 // hasTentativeAddr returns true if addr is tentative on e.
@@ -558,7 +598,7 @@ func (e *endpoint) Enable() tcpip.Error {
 			addressEndpoint.SetKind(stack.PermanentTentative)
 			fallthrough
 		case stack.PermanentTentative:
-			err = e.mu.ndp.startDuplicateAddressDetection(addr, addressEndpoint)
+			err = e.mu.ndp.startDuplicateAddressDetection(addr, addressEndpoint) // +checklocksforce: ForEachEndpoint calls back synchronously with e.mu held.
 			return err == nil
 		case stack.Temporary, stack.PermanentExpired:
 			return true
@@ -643,8 +683,9 @@ func (e *endpoint) Disable() {
 	e.disableLocked()
 }
 
+// +checklocks:e.mu.RWMutex
 func (e *endpoint) disableLocked() {
-	if !e.Enabled() {
+	if !e.isEnabled() {
 		return
 	}
 
@@ -668,7 +709,7 @@ func (e *endpoint) disableLocked() {
 		switch kind := addressEndpoint.GetKind(); kind {
 		case stack.Permanent, stack.PermanentTentative:
 			if header.IsV6UnicastAddress(addrWithPrefix.Address) {
-				e.mu.ndp.stopDuplicateAddressDetection(addrWithPrefix.Address, &stack.DADAborted{})
+				e.mu.ndp.stopDuplicateAddressDetection(addrWithPrefix.Address, &stack.DADAborted{}) // +checklocksforce: ForEachEndpoint calls back synchronously with e.mu held.
 			}
 		case stack.Temporary, stack.PermanentExpired:
 		default:
@@ -700,6 +741,11 @@ func (e *endpoint) MTU() uint32 {
 	return networkMTU
 }
 
+// EndpointHeaderSize returns the size necessary for the IPv6 header.
+func (e *endpoint) EndpointHeaderSize() uint32 {
+	return header.IPv6MinimumSize
+}
+
 // MaxHeaderLength returns the maximum length needed by ipv6 headers (and
 // underlying protocols).
 func (e *endpoint) MaxHeaderLength() uint16 {
@@ -710,6 +756,9 @@ func (e *endpoint) MaxHeaderLength() uint16 {
 }
 
 func addIPHeader(srcAddr, dstAddr tcpip.Address, pkt *stack.PacketBuffer, params stack.NetworkHeaderParams, extensionHeaders header.IPv6ExtHdrSerializer) tcpip.Error {
+	if params.ExperimentOptionValue != 0 {
+		extensionHeaders = append(extensionHeaders, &header.IPv6ExperimentExtHdr{Value: params.ExperimentOptionValue})
+	}
 	extHdrsLen := extensionHeaders.Length()
 	length := pkt.Size() + extensionHeaders.Length()
 	if length > math.MaxUint16 {
@@ -762,7 +811,7 @@ func (e *endpoint) handleFragments(r *stack.Route, networkMTU uint32, pkt *stack
 
 	pf := fragmentation.MakePacketFragmenter(pkt, fragmentPayloadLen, calculateFragmentReserve(pkt))
 	defer pf.Release()
-	id := e.protocol.ids[hashRoute(r, e.protocol.hashIV)%buckets].Add(1)
+	id := e.getFragmentID()
 
 	var n int
 	for {
@@ -779,6 +828,64 @@ func (e *endpoint) handleFragments(r *stack.Route, networkMTU uint32, pkt *stack
 	}
 }
 
+// recalculateChecksum recalculates the checksum of a TCP or UDP packet.
+func recalculateChecksum(pkt *stack.PacketBuffer, r *stack.Route) tcpip.Error {
+	// RXChecksumValidated indicates that checksum verification may be
+	// safely skipped.
+	if pkt.RXChecksumValidated {
+		return nil
+	}
+	// NeedsCsum is set if the checksum offload is enabled, so no need to
+	// calculate the checksum.
+	if pkt.GSOOptions.Type != stack.GSONone && pkt.GSOOptions.NeedsCsum {
+		return nil
+	}
+	transportHeader := pkt.TransportHeader().Slice()
+	payload := len(transportHeader) + pkt.Data().Size()
+	if payload > math.MaxUint16 {
+		return &tcpip.ErrMessageTooLong{}
+	}
+	payloadLength := uint16(payload)
+	switch pkt.TransportProtocolNumber {
+	case header.TCPProtocolNumber:
+		if len(transportHeader) < header.TCPMinimumSize {
+			return &tcpip.ErrMalformedHeader{}
+		}
+		tcp := header.TCP(transportHeader)
+		xsum := r.PseudoHeaderChecksum(header.TCPProtocolNumber, payloadLength)
+		xsum = checksum.Combine(xsum, pkt.Data().Checksum())
+		tcp.SetChecksum(0)
+		tcp.SetChecksum(^tcp.CalculateChecksum(xsum))
+	case header.UDPProtocolNumber:
+		if len(transportHeader) < header.UDPMinimumSize {
+			return &tcpip.ErrMalformedHeader{}
+		}
+		udp := header.UDP(transportHeader)
+		xsum := r.PseudoHeaderChecksum(header.UDPProtocolNumber, payloadLength)
+		xsum = checksum.Combine(xsum, pkt.Data().Checksum())
+		udp.SetChecksum(0)
+		csum := ^udp.CalculateChecksum(xsum)
+		// RFC 768: If the computed checksum is zero, it is transmitted as all ones.
+		if csum == 0 {
+			csum = 0xFFFF
+		}
+		udp.SetChecksum(csum)
+	case header.ICMPv6ProtocolNumber:
+		if len(transportHeader) < header.ICMPv6MinimumSize {
+			return &tcpip.ErrMalformedHeader{}
+		}
+		icmp := header.ICMPv6(transportHeader)
+		icmp.SetChecksum(header.ICMPv6Checksum(header.ICMPv6ChecksumParams{
+			Header:      icmp,
+			Src:         r.LocalAddress(),
+			Dst:         r.RemoteAddress(),
+			PayloadCsum: pkt.Data().Checksum(),
+			PayloadLen:  pkt.Data().Size(),
+		}))
+	}
+	return nil
+}
+
 // WritePacket writes a packet to the given destination address and protocol.
 func (e *endpoint) WritePacket(r *stack.Route, params stack.NetworkHeaderParams, pkt *stack.PacketBuffer) tcpip.Error {
 	dstAddr := r.RemoteAddress()
@@ -786,13 +893,20 @@ func (e *endpoint) WritePacket(r *stack.Route, params stack.NetworkHeaderParams,
 		return err
 	}
 
-	// iptables filtering. All packets that reach here are locally
-	// generated.
-	outNicName := e.protocol.stack.FindNICNameFromID(e.nic.ID())
-	if ok := e.protocol.stack.IPTables().CheckOutput(pkt, r, outNicName); !ok {
+	stk := e.protocol.stack
+	// iptables filtering. All packets that reach here are locally generated.
+	outNicName := stk.FindNICNameFromID(e.nic.ID())
+	if ok := stk.IPTables().CheckOutput(pkt, r, outNicName); !ok {
 		// iptables is telling us to drop the packet.
 		e.stats.ip.IPTablesOutputDropped.Increment()
 		return nil
+	}
+
+	if nft := stk.NFTables(); nft != nil && stk.IsNFTablesConfigured() {
+		if !nft.CheckOutput(pkt, r, stack.IP6) {
+			// nftables is telling us to drop the packet.
+			return nil
+		}
 	}
 
 	// If the packet is manipulated as per DNAT Output rules, handle packet
@@ -803,12 +917,46 @@ func (e *endpoint) WritePacket(r *stack.Route, params stack.NetworkHeaderParams,
 	// removing this check short circuits broadcasts before they are sent out to
 	// other hosts.
 	if netHeader := header.IPv6(pkt.NetworkHeader().Slice()); dstAddr != netHeader.DestinationAddress() {
-		if ep := e.protocol.findEndpointWithAddress(netHeader.DestinationAddress()); ep != nil {
+		newDstAddr := netHeader.DestinationAddress()
+		if ep := e.protocol.findEndpointWithAddress(newDstAddr); ep != nil {
 			// Since we rewrote the packet but it is being routed back to us, we
 			// can safely assume the checksum is valid.
 			ep.handleLocalPacket(pkt, true /* canSkipRXChecksum */)
 			return nil
 		}
+
+		// Similar to the `ip_route_me_harder` in the kernel,
+		// we need to find a new route for the packet.
+		// Implementation is similar to the func forwardUnicastPacket.
+		newRoute, err := stk.FindRoute(0 /* nic id */, netHeader.SourceAddress(), newDstAddr, ProtocolNumber, false /* multicastLoop */)
+		if err != nil {
+			e.stats.ip.OutgoingPacketErrors.Increment()
+			return err // Drop the packet
+		}
+		// Release the new route on exit.
+		defer newRoute.Release()
+
+		// Check if we need to recalculate the checksum.
+		// If the original route did not require a checksum but the new one does,
+		// we must calculate the full checksum; otherwise, NAT should have already
+		// done it.
+		if !r.RequiresTXTransportChecksum() && newRoute.RequiresTXTransportChecksum() {
+			if err := recalculateChecksum(pkt, newRoute); err != nil {
+				e.stats.ip.OutgoingPacketErrors.Increment()
+				return err // Drop the packet
+			}
+		}
+
+		// Update the route to the new route.
+		r = newRoute
+
+		// Use the new endpoint to write the packet.
+		forwardToEp, ok := e.protocol.getEndpointForNIC(r.NICID())
+		if !ok {
+			e.stats.ip.OutgoingPacketErrors.Increment()
+			return &tcpip.ErrUnknownNICID{}
+		}
+		return forwardToEp.writePacket(r, pkt, params.Protocol, true /* headerIncluded */)
 	}
 
 	return e.writePacket(r, pkt, params.Protocol, false /* headerIncluded */)
@@ -825,13 +973,21 @@ func (e *endpoint) writePacket(r *stack.Route, pkt *stack.PacketBuffer, protocol
 		return nil
 	}
 
+	stk := e.protocol.stack
 	// Postrouting NAT can only change the source address, and does not alter the
 	// route or outgoing interface of the packet.
-	outNicName := e.protocol.stack.FindNICNameFromID(e.nic.ID())
-	if ok := e.protocol.stack.IPTables().CheckPostrouting(pkt, r, e, outNicName); !ok {
+	outNicName := stk.FindNICNameFromID(e.nic.ID())
+	if ok := stk.IPTables().CheckPostrouting(pkt, r, e, outNicName); !ok {
 		// iptables is telling us to drop the packet.
 		e.stats.ip.IPTablesPostroutingDropped.Increment()
 		return nil
+	}
+
+	if nft := stk.NFTables(); nft != nil && stk.IsNFTablesConfigured() {
+		if !nft.CheckPostrouting(pkt, r, stack.IP6) {
+			// nftables is telling us to drop the packet.
+			return nil
+		}
 	}
 
 	stats := e.stats.ip
@@ -902,14 +1058,33 @@ func (e *endpoint) WriteHeaderIncludedPacket(r *stack.Route, pkt *stack.PacketBu
 }
 
 func validateAddressesForForwarding(h header.IPv6) ip.ForwardingError {
+	srcAddr := h.SourceAddress()
+
+	// As per RFC 4291 section 2.5.2,
+	//
+	//   The address 0:0:0:0:0:0:0:0 is called the unspecified address. It
+	//   must never be assigned to any node. It indicates the absence of an
+	//   address. One example of its use is in the Source Address field of
+	//   any IPv6 packets sent by an initializing host before it has learned
+	//   its own address.
+	//
+	//   The unspecified address must not be used as the destination address
+	//   of IPv6 packets or in IPv6 Routing headers. An IPv6 packet with a
+	//   source address of unspecified must never be forwarded by an IPv6
+	//   router.
+	if srcAddr.Unspecified() {
+		return &ip.ErrInitializingSourceAddress{}
+	}
+
 	// As per RFC 4291 section 2.5.6,
 	//
 	//   Routers must not forward any packets with Link-Local source or
 	//   destination addresses to other links.
-	if header.IsV6LinkLocalUnicastAddress(h.SourceAddress()) {
+	if header.IsV6LinkLocalUnicastAddress(srcAddr) {
 		return &ip.ErrLinkLocalSourceAddress{}
 	}
-	if header.IsV6LinkLocalUnicastAddress(h.DestinationAddress()) || header.IsV6LinkLocalMulticastAddress(h.DestinationAddress()) {
+
+	if dstAddr := h.DestinationAddress(); header.IsV6LinkLocalUnicastAddress(dstAddr) || header.IsV6LinkLocalMulticastAddress(dstAddr) {
 		return &ip.ErrLinkLocalDestinationAddress{}
 	}
 	return nil
@@ -955,6 +1130,14 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 			return nil
 		}
 
+		if nft := stk.NFTables(); nft != nil && stk.IsNFTablesConfigured() {
+
+			if !nft.CheckForward(pkt, nil, stack.IP6) {
+				// nftables is telling us to drop the packet.
+				return nil
+			}
+		}
+
 		// The packet originally arrived on e so provide its NIC as the input NIC.
 		ep.handleValidatedPacket(h, pkt, e.nic.Name() /* inNICName */)
 		return nil
@@ -965,14 +1148,14 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 		return &ip.ErrParameterProblem{}
 	}
 
-	r, err := stk.FindRoute(0, "", dstAddr, ProtocolNumber, false /* multicastLoop */)
+	r, err := stk.FindRoute(0, tcpip.Address{}, dstAddr, ProtocolNumber, false /* multicastLoop */)
 	switch err.(type) {
 	case nil:
-	case *tcpip.ErrNoRoute, *tcpip.ErrNetworkUnreachable:
+	case *tcpip.ErrNetworkUnreachable:
 		// We return the original error rather than the result of returning the
 		// ICMP packet because the original error is more relevant to the caller.
 		_ = e.protocol.returnError(&icmpReasonNetUnreachable{}, pkt, false /* deliveredLocally */)
-		return &ip.ErrNoRoute{}
+		return &ip.ErrHostUnreachable{}
 	default:
 		return &ip.ErrOther{Err: err}
 	}
@@ -996,6 +1179,13 @@ func (e *endpoint) forwardPacketWithRoute(route *stack.Route, pkt *stack.PacketB
 		return nil
 	}
 
+	if nft := stk.NFTables(); nft != nil && stk.IsNFTablesConfigured() {
+		if !nft.CheckForward(pkt, route, stack.IP6) {
+			// nftables is telling us to drop the packet.
+			return nil
+		}
+	}
+
 	hopLimit := h.HopLimit()
 
 	// We need to do a deep copy of the IP packet because
@@ -1010,6 +1200,10 @@ func (e *endpoint) forwardPacketWithRoute(route *stack.Route, pkt *stack.PacketB
 	//   Hop Limit           8-bit unsigned integer. Decremented by 1 by
 	//                       each node that forwards the packet.
 	newHdr.SetHopLimit(hopLimit - 1)
+
+	if route.RequiresTXTransportChecksum() {
+		newPkt.CalculateTransportChecksum()
+	}
 
 	forwardToEp, ok := e.protocol.getEndpointForNIC(route.NICID())
 	if !ok {
@@ -1027,6 +1221,8 @@ func (e *endpoint) forwardPacketWithRoute(route *stack.Route, pkt *stack.PacketB
 		//   outgoing link.
 		_ = e.protocol.returnError(&icmpReasonPacketTooBig{}, pkt, false /* deliveredLocally */)
 		return &ip.ErrMessageTooLong{}
+	case *tcpip.ErrNoBufferSpace:
+		return &ip.ErrOutgoingDeviceNoBufferSpace{}
 	default:
 		return &ip.ErrOther{Err: err}
 	}
@@ -1044,9 +1240,15 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 		return
 	}
 
-	h, ok := e.protocol.parseAndValidate(pkt)
+	hView, ok := e.protocol.parseAndValidate(pkt)
 	if !ok {
 		stats.MalformedPacketsReceived.Increment()
+		return
+	}
+	defer hView.Release()
+	h := header.IPv6(hView.AsSlice())
+
+	if !checkV4Mapped(h, stats) {
 		return
 	}
 
@@ -1063,11 +1265,10 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 			}
 		}
 
-		if e.protocol.stack.HandleLocal() {
-			addressEndpoint := e.AcquireAssignedAddress(header.IPv6(pkt.NetworkHeader().Slice()).SourceAddress(), e.nic.Promiscuous(), stack.CanBePrimaryEndpoint)
+		stk := e.protocol.stack
+		if stk.HandleLocal() {
+			addressEndpoint := e.AcquireAssignedAddress(header.IPv6(pkt.NetworkHeader().Slice()).SourceAddress(), e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */)
 			if addressEndpoint != nil {
-				addressEndpoint.DecRef()
-
 				// The source address is one of our own, so we never should have gotten
 				// a packet like this unless HandleLocal is false or our NIC is the
 				// loopback interface.
@@ -1076,15 +1277,27 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 			}
 		}
 
+		nicID := e.nic.ID()
 		// Loopback traffic skips the prerouting chain.
-		inNicName := e.protocol.stack.FindNICNameFromID(e.nic.ID())
-		if ok := e.protocol.stack.IPTables().CheckPrerouting(pkt, e, inNicName); !ok {
+		inNicName := stk.FindNICNameFromID(nicID)
+		pkt.InputNICID = nicID
+		if ok := stk.IPTables().CheckPrerouting(pkt, e, inNicName); !ok {
 			// iptables is telling us to drop the packet.
 			stats.IPTablesPreroutingDropped.Increment()
 			return
 		}
+
+		if nft := stk.NFTables(); nft != nil && stk.IsNFTablesConfigured() {
+			if !nft.CheckPrerouting(pkt, nil, stack.IP6) {
+				// nftables is telling us to drop the packet.
+				return
+			}
+		}
 	}
 
+	// CheckPrerouting can modify the backing storage of the packet, so refresh
+	// the header.
+	h = header.IPv6(pkt.NetworkHeader().Slice())
 	e.handleValidatedPacket(h, pkt, e.nic.Name() /* inNICName */)
 }
 
@@ -1097,11 +1310,17 @@ func (e *endpoint) handleLocalPacket(pkt *stack.PacketBuffer, canSkipRXChecksum 
 
 	pkt = pkt.CloneToInbound()
 	defer pkt.DecRef()
-	pkt.RXTransportChecksumValidated = canSkipRXChecksum
+	pkt.RXChecksumValidated = canSkipRXChecksum
 
-	h, ok := e.protocol.parseAndValidate(pkt)
+	hView, ok := e.protocol.parseAndValidate(pkt)
 	if !ok {
 		stats.MalformedPacketsReceived.Increment()
+		return
+	}
+	defer hView.Release()
+	h := header.IPv6(hView.AsSlice())
+
+	if !checkV4Mapped(h, stats) {
 		return
 	}
 
@@ -1151,7 +1370,7 @@ func (e *endpoint) forwardMulticastPacket(h header.IPv6, pkt *stack.PacketBuffer
 	default:
 		panic(fmt.Sprintf("unexpected GetRouteResultState: %s", result.GetRouteResultState))
 	}
-	return &ip.ErrNoRoute{}
+	return &ip.ErrHostUnreachable{}
 }
 
 // forwardValidatedMulticastPacket attempts to forward the pkt using the
@@ -1211,7 +1430,7 @@ func (e *endpoint) forwardMulticastPacketForOutgoingInterface(pkt *stack.PacketB
 	if route == nil {
 		// Failed to convert to a stack.Route. This likely means that the outgoing
 		// endpoint no longer exists.
-		return &ip.ErrNoRoute{}
+		return &ip.ErrHostUnreachable{}
 	}
 	defer route.Release()
 	return e.forwardPacketWithRoute(route, pkt)
@@ -1221,16 +1440,18 @@ func (e *endpoint) forwardMulticastPacketForOutgoingInterface(pkt *stack.PacketB
 // counters.
 func (e *endpoint) handleForwardingError(err ip.ForwardingError) {
 	stats := e.stats.ip
-	switch err.(type) {
+	switch err := err.(type) {
 	case nil:
 		return
+	case *ip.ErrInitializingSourceAddress:
+		stats.Forwarding.InitializingSource.Increment()
 	case *ip.ErrLinkLocalSourceAddress:
 		stats.Forwarding.LinkLocalSource.Increment()
 	case *ip.ErrLinkLocalDestinationAddress:
 		stats.Forwarding.LinkLocalDestination.Increment()
 	case *ip.ErrTTLExceeded:
 		stats.Forwarding.ExhaustedTTL.Increment()
-	case *ip.ErrNoRoute:
+	case *ip.ErrHostUnreachable:
 		stats.Forwarding.Unrouteable.Increment()
 	case *ip.ErrParameterProblem:
 		stats.Forwarding.ExtensionHeaderProblem.Increment()
@@ -1242,6 +1463,15 @@ func (e *endpoint) handleForwardingError(err ip.ForwardingError) {
 		stats.Forwarding.UnexpectedMulticastInputInterface.Increment()
 	case *ip.ErrUnknownOutputEndpoint:
 		stats.Forwarding.UnknownOutputEndpoint.Increment()
+	case *ip.ErrOutgoingDeviceNoBufferSpace:
+		stats.Forwarding.OutgoingDeviceNoBufferSpace.Increment()
+	case *ip.ErrOther:
+		switch err := err.Err.(type) {
+		case *tcpip.ErrClosedForSend:
+			stats.Forwarding.OutgoingDeviceClosedForSend.Increment()
+		default:
+			panic(fmt.Sprintf("unrecognized tcpip forwarding error: %s", err))
+		}
 	default:
 		panic(fmt.Sprintf("unrecognized forwarding error: %s", err))
 	}
@@ -1297,8 +1527,7 @@ func (e *endpoint) handleValidatedPacket(h header.IPv6, pkt *stack.PacketBuffer,
 
 	// The destination address should be an address we own for us to receive the
 	// packet. Otherwise, attempt to forward the packet.
-	if addressEndpoint := e.AcquireAssignedAddress(dstAddr, e.nic.Promiscuous(), stack.CanBePrimaryEndpoint); addressEndpoint != nil {
-		addressEndpoint.DecRef()
+	if addressEndpoint := e.AcquireAssignedAddress(dstAddr, e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
 		e.deliverPacketLocally(h, pkt, inNICName)
 	} else if e.Forwarding() {
 		e.handleForwardingError(e.forwardUnicastPacket(pkt))
@@ -1309,13 +1538,18 @@ func (e *endpoint) handleValidatedPacket(h header.IPv6, pkt *stack.PacketBuffer,
 
 func (e *endpoint) deliverPacketLocally(h header.IPv6, pkt *stack.PacketBuffer, inNICName string) {
 	stats := e.stats.ip
-
-	// iptables filtering. All packets that reach here are intended for
-	// this machine and need not be forwarded.
-	if ok := e.protocol.stack.IPTables().CheckInput(pkt, inNICName); !ok {
+	stk := e.protocol.stack
+	if ok := stk.IPTables().CheckInput(pkt, inNICName); !ok {
 		// iptables is telling us to drop the packet.
 		stats.IPTablesInputDropped.Increment()
 		return
+	}
+
+	if nft := stk.NFTables(); nft != nil && stk.IsNFTablesConfigured() {
+		if !nft.CheckInput(pkt, nil, stack.IP6) {
+			// nftables is telling us to drop the packet.
+			return
+		}
 	}
 
 	// Any returned error is only useful for terminating execution early, but
@@ -1389,6 +1623,7 @@ func (e *endpoint) processExtensionHeader(it *header.IPv6PayloadIterator, pkt **
 		if err := e.processIPv6RawPayloadHeader(&extHdr, it, *pkt, *routerAlert, previousHeaderStart, *hasFragmentHeader); err != nil {
 			return true, err
 		}
+	case header.IPv6ExperimentExtHdr:
 	default:
 		// Since the iterator returns IPv6RawPayloadHeader for unknown Extension
 		// Header IDs this should never happen unless we missed a supported type
@@ -1411,18 +1646,19 @@ func (e *endpoint) processExtensionHeaders(h header.IPv6, pkt *stack.PacketBuffe
 	if v != nil {
 		v.TrimFront(header.IPv6MinimumSize)
 	}
-	buf := bufferv2.MakeWithView(v)
+	buf := buffer.MakeWithView(v)
 	buf.Append(pkt.TransportHeader().View())
 	dataBuf := pkt.Data().ToBuffer()
 	buf.Merge(&dataBuf)
 	it := header.MakeIPv6PayloadIterator(header.IPv6ExtensionHeaderIdentifier(h.NextHeader()), buf)
 
-	// Add a reference to pkt because fragment header processing can replace this
-	// packet with a new one that has an extra reference. Adding a reference here
-	// keeps the two in parity so they can both be DecRef'd the same way.
-	pkt.IncRef()
+	// Clone the pkt here because fragment header processing can replace this
+	// packet with a new one that has an extra reference. Cloning here
+	// keeps it so this method owns the packet either way so the packet can always
+	// be DecRef'd after processing is done.
+	processingPkt := pkt.Clone()
 	defer func() {
-		pkt.DecRef()
+		processingPkt.DecRef()
 		it.Release()
 	}()
 
@@ -1431,7 +1667,8 @@ func (e *endpoint) processExtensionHeaders(h header.IPv6, pkt *stack.PacketBuffe
 		routerAlert       *header.IPv6RouterAlertOption
 	)
 	for {
-		if done, err := e.processExtensionHeader(&it, &pkt, h, &routerAlert, &hasFragmentHeader, forwarding); err != nil || done {
+		h := header.IPv6(pkt.NetworkHeader().Slice())
+		if done, err := e.processExtensionHeader(&it, &processingPkt, h, &routerAlert, &hasFragmentHeader, forwarding); err != nil || done {
 			return err
 		}
 	}
@@ -1471,7 +1708,6 @@ func (e *endpoint) processIPv6RawPayloadHeader(extHdr *header.IPv6RawPayloadHead
 		e.handleICMP(pkt, hasFragmentHeader, routerAlert)
 		return nil
 	}
-	stats.PacketsDelivered.Increment()
 	switch res := e.dispatcher.DeliverTransportPacket(proto, pkt); res {
 	case stack.TransportPacketHandled:
 		return nil
@@ -1865,7 +2101,7 @@ func (e *endpoint) AddAndAcquirePermanentAddress(addr tcpip.AddressWithPrefix, p
 // addAndAcquirePermanentAddressLocked also joins the passed address's
 // solicited-node multicast group and start duplicate address detection.
 //
-// Precondition: e.mu must be write locked.
+// +checklocks:e.mu.RWMutex
 func (e *endpoint) addAndAcquirePermanentAddressLocked(addr tcpip.AddressWithPrefix, properties stack.AddressProperties) (stack.AddressEndpoint, tcpip.Error) {
 	addressEndpoint, err := e.mu.addressableEndpointState.AddAndAcquireAddress(addr, properties, stack.PermanentTentative)
 	if err != nil {
@@ -1908,7 +2144,7 @@ func (e *endpoint) RemovePermanentAddress(addr tcpip.Address) tcpip.Error {
 // removePermanentEndpointLocked is like removePermanentAddressLocked except
 // it works with a stack.AddressEndpoint.
 //
-// Precondition: e.mu must be write locked.
+// +checklocks:e.mu.RWMutex
 func (e *endpoint) removePermanentEndpointLocked(addressEndpoint stack.AddressEndpoint, allowSLAACInvalidation bool, reason stack.AddressRemovalReason, dadResult stack.DADResult) tcpip.Error {
 	addr := addressEndpoint.AddressWithPrefix()
 	// If we are removing an address generated via SLAAC, cleanup
@@ -1927,7 +2163,7 @@ func (e *endpoint) removePermanentEndpointLocked(addressEndpoint stack.AddressEn
 // removePermanentEndpointInnerLocked is like removePermanentEndpointLocked
 // except it does not cleanup SLAAC address state.
 //
-// Precondition: e.mu must be write locked.
+// +checklocks:e.mu.RWMutex
 func (e *endpoint) removePermanentEndpointInnerLocked(addressEndpoint stack.AddressEndpoint, reason stack.AddressRemovalReason, dadResult stack.DADResult) tcpip.Error {
 	addr := addressEndpoint.AddressWithPrefix()
 	e.mu.ndp.stopDuplicateAddressDetection(addr.Address, dadResult)
@@ -1948,7 +2184,7 @@ func (e *endpoint) removePermanentEndpointInnerLocked(addressEndpoint stack.Addr
 // hasPermanentAddressLocked returns true if the endpoint has a permanent
 // address equal to the passed address.
 //
-// Precondition: e.mu must be read or write locked.
+// +checklocksread:e.mu.RWMutex
 func (e *endpoint) hasPermanentAddressRLocked(addr tcpip.Address) bool {
 	addressEndpoint := e.getAddressRLocked(addr)
 	if addressEndpoint == nil {
@@ -1959,7 +2195,7 @@ func (e *endpoint) hasPermanentAddressRLocked(addr tcpip.Address) bool {
 
 // getAddressRLocked returns the endpoint for the passed address.
 //
-// Precondition: e.mu must be read or write locked.
+// +checklocksread:e.mu.RWMutex
 func (e *endpoint) getAddressRLocked(localAddr tcpip.Address) stack.AddressEndpoint {
 	return e.mu.addressableEndpointState.GetAddress(localAddr)
 }
@@ -1986,25 +2222,25 @@ func (e *endpoint) MainAddress() tcpip.AddressWithPrefix {
 }
 
 // AcquireAssignedAddress implements stack.AddressableEndpoint.
-func (e *endpoint) AcquireAssignedAddress(localAddr tcpip.Address, allowTemp bool, tempPEB stack.PrimaryEndpointBehavior) stack.AddressEndpoint {
+func (e *endpoint) AcquireAssignedAddress(localAddr tcpip.Address, allowTemp bool, tempPEB stack.PrimaryEndpointBehavior, readOnly bool) stack.AddressEndpoint {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.acquireAddressOrCreateTempLocked(localAddr, allowTemp, tempPEB)
+	return e.acquireAddressOrCreateTempLocked(localAddr, allowTemp, tempPEB, readOnly)
 }
 
 // acquireAddressOrCreateTempLocked is like AcquireAssignedAddress but with
 // locking requirements.
 //
-// Precondition: e.mu must be write locked.
-func (e *endpoint) acquireAddressOrCreateTempLocked(localAddr tcpip.Address, allowTemp bool, tempPEB stack.PrimaryEndpointBehavior) stack.AddressEndpoint {
-	return e.mu.addressableEndpointState.AcquireAssignedAddress(localAddr, allowTemp, tempPEB)
+// +checklocksread:e.mu.RWMutex
+func (e *endpoint) acquireAddressOrCreateTempLocked(localAddr tcpip.Address, allowTemp bool, tempPEB stack.PrimaryEndpointBehavior, readOnly bool) stack.AddressEndpoint {
+	return e.mu.addressableEndpointState.AcquireAssignedAddress(localAddr, allowTemp, tempPEB, readOnly)
 }
 
 // AcquireOutgoingPrimaryAddress implements stack.AddressableEndpoint.
-func (e *endpoint) AcquireOutgoingPrimaryAddress(remoteAddr tcpip.Address, allowExpired bool) stack.AddressEndpoint {
+func (e *endpoint) AcquireOutgoingPrimaryAddress(remoteAddr, srcHint tcpip.Address, allowExpired bool) stack.AddressEndpoint {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.acquireOutgoingPrimaryAddressRLocked(remoteAddr, allowExpired)
+	return e.acquireOutgoingPrimaryAddressRLocked(remoteAddr, srcHint, allowExpired)
 }
 
 // getLinkLocalAddressRLocked returns a link-local address from the primary list
@@ -2012,7 +2248,7 @@ func (e *endpoint) AcquireOutgoingPrimaryAddress(remoteAddr tcpip.Address, allow
 //
 // See stack.PrimaryEndpointBehavior for more details about the primary list.
 //
-// Precondition: e.mu must be read locked.
+// +checklocksread:e.mu.RWMutex
 func (e *endpoint) getLinkLocalAddressRLocked() tcpip.Address {
 	var linkLocalAddr tcpip.Address
 	e.mu.addressableEndpointState.ForEachPrimaryEndpoint(func(addressEndpoint stack.AddressEndpoint) bool {
@@ -2030,8 +2266,10 @@ func (e *endpoint) getLinkLocalAddressRLocked() tcpip.Address {
 // acquireOutgoingPrimaryAddressRLocked is like AcquireOutgoingPrimaryAddress
 // but with locking requirements.
 //
-// Precondition: e.mu must be read locked.
-func (e *endpoint) acquireOutgoingPrimaryAddressRLocked(remoteAddr tcpip.Address, allowExpired bool) stack.AddressEndpoint {
+// +checklocksread:e.mu.RWMutex
+func (e *endpoint) acquireOutgoingPrimaryAddressRLocked(remoteAddr, srcHint tcpip.Address, allowExpired bool) stack.AddressEndpoint {
+	// TODO(b/309216156): Support IPv6 hints.
+
 	// addrCandidate is a candidate for Source Address Selection, as per
 	// RFC 6724 section 5.
 	type addrCandidate struct {
@@ -2043,8 +2281,8 @@ func (e *endpoint) acquireOutgoingPrimaryAddressRLocked(remoteAddr tcpip.Address
 		matchingPrefix uint8
 	}
 
-	if len(remoteAddr) == 0 {
-		return e.mu.addressableEndpointState.AcquireOutgoingPrimaryAddress(remoteAddr, allowExpired)
+	if remoteAddr.BitLen() == 0 {
+		return e.mu.addressableEndpointState.AcquireOutgoingPrimaryAddress(remoteAddr, srcHint, allowExpired)
 	}
 
 	// Create a candidate set of available addresses we can potentially use as a
@@ -2143,7 +2381,7 @@ func (e *endpoint) acquireOutgoingPrimaryAddressRLocked(remoteAddr tcpip.Address
 	// Return the most preferred address that can have its reference count
 	// incremented.
 	for _, c := range cs {
-		if c.addressEndpoint.IncRef() {
+		if c.addressEndpoint.TryIncRef() {
 			return c.addressEndpoint
 		}
 	}
@@ -2174,7 +2412,7 @@ func (e *endpoint) JoinGroup(addr tcpip.Address) tcpip.Error {
 
 // joinGroupLocked is like JoinGroup but with locking requirements.
 //
-// Precondition: e.mu must be locked.
+// +checklocks:e.mu.RWMutex
 func (e *endpoint) joinGroupLocked(addr tcpip.Address) tcpip.Error {
 	if !header.IsV6MulticastAddress(addr) {
 		return &tcpip.ErrBadAddress{}
@@ -2193,7 +2431,7 @@ func (e *endpoint) LeaveGroup(addr tcpip.Address) tcpip.Error {
 
 // leaveGroupLocked is like LeaveGroup but with locking requirements.
 //
-// Precondition: e.mu must be locked.
+// +checklocks:e.mu.RWMutex
 func (e *endpoint) leaveGroupLocked(addr tcpip.Address) tcpip.Error {
 	return e.mu.mld.leaveGroup(addr)
 }
@@ -2215,28 +2453,35 @@ var _ stack.MulticastForwardingNetworkProtocol = (*protocol)(nil)
 var _ stack.RejectIPv6WithHandler = (*protocol)(nil)
 var _ fragmentation.TimeoutHandler = (*protocol)(nil)
 
+// +stateify savable
+type protocolMu struct {
+	sync.RWMutex `state:"nosave"`
+
+	// eps is keyed by NICID to allow protocol methods to retrieve an endpoint
+	// when handling a packet, by looking at which NIC handled the packet.
+	//
+	// +checklocks:RWMutex
+	eps map[tcpip.NICID]*endpoint
+
+	// ICMP types for which the stack's global rate limiting must apply.
+	//
+	// +checklocks:RWMutex
+	icmpRateLimitedTypes map[header.ICMPv6Type]struct{}
+
+	// multicastForwardingDisp is the multicast forwarding event dispatcher that
+	// an integrator can provide to receive multicast forwarding events. Note
+	// that multicast packets will only be forwarded if this is non-nil.
+	//
+	// +checklocks:RWMutex
+	multicastForwardingDisp stack.MulticastForwardingEventDispatcher
+}
+
+// +stateify savable
 type protocol struct {
 	stack   *stack.Stack
 	options Options
 
-	mu struct {
-		sync.RWMutex
-
-		// eps is keyed by NICID to allow protocol methods to retrieve an endpoint
-		// when handling a packet, by looking at which NIC handled the packet.
-		eps map[tcpip.NICID]*endpoint
-
-		// ICMP types for which the stack's global rate limiting must apply.
-		icmpRateLimitedTypes map[header.ICMPv6Type]struct{}
-
-		// multicastForwardingDisp is the multicast forwarding event dispatcher that
-		// an integrator can provide to receive multicast forwarding events. Note
-		// that multicast packets will only be forwarded if this is non-nil.
-		multicastForwardingDisp stack.MulticastForwardingEventDispatcher
-	}
-
-	ids    []atomicbitops.Uint32
-	hashIV uint32
+	mu protocolMu
 
 	// defaultTTL is the current default TTL for the protocol. Only the
 	// uint8 portion of it is meaningful.
@@ -2288,7 +2533,7 @@ func (p *protocol) NewEndpoint(nic stack.NetworkInterface, dispatcher stack.Tran
 	const maxMulticastSolicit = 3
 	dadOptions := ip.DADOptions{
 		Clock:              p.stack.Clock(),
-		SecureRNG:          p.stack.SecureRNG(),
+		SecureRNG:          p.stack.SecureRNG().Reader,
 		NonceSize:          nonceSize,
 		ExtendDADTransmits: maxMulticastSolicit,
 		Protocol:           &e.mu.ndp,
@@ -2320,8 +2565,7 @@ func (p *protocol) findEndpointWithAddress(addr tcpip.Address) *endpoint {
 	defer p.mu.RUnlock()
 
 	for _, e := range p.mu.eps {
-		if addressEndpoint := e.AcquireAssignedAddress(addr, false /* allowTemp */, stack.NeverPrimaryEndpoint); addressEndpoint != nil {
-			addressEndpoint.DecRef()
+		if addressEndpoint := e.AcquireAssignedAddress(addr, false /* allowTemp */, stack.NeverPrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
 			return e
 		}
 	}
@@ -2460,7 +2704,7 @@ func (p *protocol) RemoveMulticastRoute(addresses stack.UnicastSourceAndMulticas
 	}
 
 	if removed := p.multicastRouteTable.RemoveInstalledRoute(addresses); !removed {
-		return &tcpip.ErrNoRoute{}
+		return &tcpip.ErrHostUnreachable{}
 	}
 
 	return nil
@@ -2476,7 +2720,7 @@ func (p *protocol) MulticastRouteLastUsedTime(addresses stack.UnicastSourceAndMu
 	timestamp, found := p.multicastRouteTable.GetLastUsedTimestamp(addresses)
 
 	if !found {
-		return tcpip.MonotonicTime{}, &tcpip.ErrNoRoute{}
+		return tcpip.MonotonicTime{}, &tcpip.ErrHostUnreachable{}
 	}
 
 	return timestamp, nil
@@ -2535,10 +2779,11 @@ func (p *protocol) forwardPendingMulticastPacket(pkt *stack.PacketBuffer, instal
 func (*protocol) Wait() {}
 
 // parseAndValidate parses the packet (including its transport layer header) and
-// returns the parsed IP header.
+// returns a view containing the parsed IP header. The caller is responsible
+// for releasing the returned View.
 //
 // Returns true if the IP header was successfully parsed.
-func (p *protocol) parseAndValidate(pkt *stack.PacketBuffer) (header.IPv6, bool) {
+func (p *protocol) parseAndValidate(pkt *stack.PacketBuffer) (*buffer.View, bool) {
 	transProtoNum, hasTransportHdr, ok := p.Parse(pkt)
 	if !ok {
 		return nil, false
@@ -2555,7 +2800,7 @@ func (p *protocol) parseAndValidate(pkt *stack.PacketBuffer) (header.IPv6, bool)
 		p.parseTransport(pkt, transProtoNum)
 	}
 
-	return h, true
+	return pkt.NetworkHeader().View(), true
 }
 
 func (p *protocol) parseTransport(pkt *stack.PacketBuffer, transProtoNum tcpip.TransportProtocolNumber) {
@@ -2608,6 +2853,8 @@ func (p *protocol) SendRejectionError(pkt *stack.PacketBuffer, rejectWith stack.
 		return p.returnError(&icmpReasonPortUnreachable{}, pkt, inputHook)
 	case stack.RejectIPv6WithICMPAdminProhibited:
 		return p.returnError(&icmpReasonAdministrativelyProhibited{}, pkt, inputHook)
+	case stack.RejectIPv6WithTCPReset:
+		return ip.RejectWithTCPReset(pkt, ProtocolNumber, p.stack, inputHook)
 	default:
 		panic(fmt.Sprintf("unhandled %[1]T = %[1]d", rejectWith))
 	}
@@ -2641,6 +2888,8 @@ func calculateNetworkMTU(linkMTU, networkHeadersLen uint32) (uint32, tcpip.Error
 }
 
 // Options holds options to configure a new protocol.
+//
+// +stateify savable
 type Options struct {
 	// NDPConfigs is the default NDP configurations used by interfaces.
 	NDPConfigs NDPConfigurations
@@ -2695,21 +2944,10 @@ type Options struct {
 func NewProtocolWithOptions(opts Options) stack.NetworkProtocolFactory {
 	opts.NDPConfigs.validate()
 
-	ids := hash.RandN32(buckets)
-	hashIV := hash.RandN32(1)[0]
-
-	atomicIds := make([]atomicbitops.Uint32, len(ids))
-	for i := range ids {
-		atomicIds[i] = atomicbitops.FromUint32(ids[i])
-	}
-
 	return func(s *stack.Stack) stack.NetworkProtocol {
 		p := &protocol{
 			stack:   s,
 			options: opts,
-
-			ids:    atomicIds,
-			hashIV: hashIV,
 		}
 		p.fragmentation = fragmentation.NewFragmentation(header.IPv6FragmentExtHdrFragmentOffsetBytesPerUnit, fragmentation.HighFragThreshold, fragmentation.LowFragThreshold, ReassembleTimeout, s.Clock(), p)
 		p.mu.eps = make(map[tcpip.NICID]*endpoint)
@@ -2746,27 +2984,15 @@ func calculateFragmentReserve(pkt *stack.PacketBuffer) int {
 	return pkt.AvailableHeaderBytes() + len(pkt.NetworkHeader().Slice()) + header.IPv6FragmentHeaderSize
 }
 
-// hashRoute calculates a hash value for the given route. It uses the source &
-// destination address and 32-bit number to generate the hash.
-func hashRoute(r *stack.Route, hashIV uint32) uint32 {
-	// The FNV-1a was chosen because it is a fast hashing algorithm, and
-	// cryptographic properties are not needed here.
-	h := fnv.New32a()
-	if _, err := h.Write([]byte(r.LocalAddress())); err != nil {
-		panic(fmt.Sprintf("Hash.Write: %s, but Hash' implementation of Write is not expected to ever return an error", err))
+// getFragmentID returns a random uint32 number (other than zero) to be used as
+// fragment ID in the IPv6 header.
+func (e *endpoint) getFragmentID() uint32 {
+	rng := e.protocol.stack.SecureRNG()
+	id := rng.Uint32()
+	for id == 0 {
+		id = rng.Uint32()
 	}
-
-	if _, err := h.Write([]byte(r.RemoteAddress())); err != nil {
-		panic(fmt.Sprintf("Hash.Write: %s, but Hash' implementation of Write is not expected to ever return an error", err))
-	}
-
-	s := make([]byte, 4)
-	binary.LittleEndian.PutUint32(s, hashIV)
-	if _, err := h.Write(s); err != nil {
-		panic(fmt.Sprintf("Hash.Write: %s, but Hash' implementation of Write is not expected ever to return an error", err))
-	}
-
-	return h.Sum32()
+	return id
 }
 
 func buildNextFragment(pf *fragmentation.PacketFragmenter, originalIPHeaders header.IPv6, transportProto tcpip.TransportProtocolNumber, id uint32) (*stack.PacketBuffer, bool) {
@@ -2795,4 +3021,18 @@ func buildNextFragment(pf *fragmentation.PacketFragmenter, originalIPHeaders hea
 	fragmentIPHeaders.SetPayloadLength(uint16(copied + fragmentIPHeadersLength - header.IPv6MinimumSize))
 
 	return fragPkt, more
+}
+
+func checkV4Mapped(h header.IPv6, stats ip.MultiCounterIPStats) bool {
+	// Disallow IPv4-mapped addresses per RFC 6890 section 2.2.3.
+	ret := true
+	if header.IsV4MappedAddress(h.SourceAddress()) {
+		stats.InvalidSourceAddressesReceived.Increment()
+		ret = false
+	}
+	if header.IsV4MappedAddress(h.DestinationAddress()) {
+		stats.InvalidDestinationAddressesReceived.Increment()
+		ret = false
+	}
+	return ret
 }

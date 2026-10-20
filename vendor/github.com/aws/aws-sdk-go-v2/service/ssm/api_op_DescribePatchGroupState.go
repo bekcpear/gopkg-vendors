@@ -4,10 +4,7 @@ package ssm
 
 import (
 	"context"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // Returns high-level aggregated patch compliance state information for a patch
@@ -42,12 +39,20 @@ type DescribePatchGroupStateOutput struct {
 	// The number of managed nodes in the patch group.
 	Instances int32
 
+	// The number of managed nodes for which security-related patches are available
+	// but not approved because because they didn't meet the patch baseline
+	// requirements. For example, an updated version of a patch might have been
+	// released before the specified auto-approval period was over.
+	//
+	// Applies to Windows Server managed nodes only.
+	InstancesWithAvailableSecurityUpdates *int32
+
 	// The number of managed nodes where patches that are specified as Critical for
 	// compliance reporting in the patch baseline aren't installed. These patches might
 	// be missing, have failed installation, were rejected, or were installed but
 	// awaiting a required managed node reboot. The status of these managed nodes is
-	// NON_COMPLIANT.
-	InstancesWithCriticalNonCompliantPatches int32
+	// NON_COMPLIANT .
+	InstancesWithCriticalNonCompliantPatches *int32
 
 	// The number of managed nodes with patches from the patch baseline that failed to
 	// install.
@@ -60,17 +65,18 @@ type DescribePatchGroupStateOutput struct {
 	// The number of managed nodes with installed patches.
 	InstancesWithInstalledPatches int32
 
-	// The number of managed nodes with patches installed by Patch Manager that haven't
-	// been rebooted after the patch installation. The status of these managed nodes is
-	// NON_COMPLIANT.
-	InstancesWithInstalledPendingRebootPatches int32
+	// The number of managed nodes with patches installed by Patch Manager that
+	// haven't been rebooted after the patch installation. The status of these managed
+	// nodes is NON_COMPLIANT .
+	InstancesWithInstalledPendingRebootPatches *int32
 
 	// The number of managed nodes with patches installed that are specified in a
-	// RejectedPatches list. Patches with a status of INSTALLED_REJECTED were typically
-	// installed before they were added to a RejectedPatches list. If
-	// ALLOW_AS_DEPENDENCY is the specified option for RejectedPatchesAction, the value
-	// of InstancesWithInstalledRejectedPatches will always be 0 (zero).
-	InstancesWithInstalledRejectedPatches int32
+	// RejectedPatches list. Patches with a status of INSTALLED_REJECTED were
+	// typically installed before they were added to a RejectedPatches list.
+	//
+	// If ALLOW_AS_DEPENDENCY is the specified option for RejectedPatchesAction , the
+	// value of InstancesWithInstalledRejectedPatches will always be 0 (zero).
+	InstancesWithInstalledRejectedPatches *int32
 
 	// The number of managed nodes with missing patches from the patch baseline.
 	InstancesWithMissingPatches int32
@@ -80,19 +86,19 @@ type DescribePatchGroupStateOutput struct {
 
 	// The number of managed nodes with patches installed that are specified as other
 	// than Critical or Security but aren't compliant with the patch baseline. The
-	// status of these managed nodes is NON_COMPLIANT.
-	InstancesWithOtherNonCompliantPatches int32
+	// status of these managed nodes is NON_COMPLIANT .
+	InstancesWithOtherNonCompliantPatches *int32
 
 	// The number of managed nodes where patches that are specified as Security in a
 	// patch advisory aren't installed. These patches might be missing, have failed
 	// installation, were rejected, or were installed but awaiting a required managed
-	// node reboot. The status of these managed nodes is NON_COMPLIANT.
-	InstancesWithSecurityNonCompliantPatches int32
+	// node reboot. The status of these managed nodes is NON_COMPLIANT .
+	InstancesWithSecurityNonCompliantPatches *int32
 
 	// The number of managed nodes with NotApplicable patches beyond the supported
-	// limit, which aren't reported by name to Inventory. Inventory is a capability of
-	// Amazon Web Services Systems Manager.
-	InstancesWithUnreportedNotApplicablePatches int32
+	// limit, which aren't reported by name to Inventory. Inventory is a tool in Amazon
+	// Web Services Systems Manager.
+	InstancesWithUnreportedNotApplicablePatches *int32
 
 	// Metadata pertaining to the operation's result.
 	ResultMetadata middleware.Metadata
@@ -109,46 +115,20 @@ func (c *Client) addOperationDescribePatchGroupStateMiddlewares(stack *middlewar
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpDescribePatchGroupStateValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribePatchGroupState(options.Region), middleware.Before); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -160,14 +140,11 @@ func (c *Client) addOperationDescribePatchGroupStateMiddlewares(stack *middlewar
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
-	return nil
-}
-
-func newServiceMetadataMiddleware_opDescribePatchGroupState(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "ssm",
-		OperationName: "DescribePatchGroupState",
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
 	}
+	if err = addInterceptors(stack, options); err != nil {
+		return err
+	}
+	return nil
 }

@@ -3,7 +3,7 @@ package chglog
 import (
 	"text/template"
 
-	"github.com/Masterminds/sprig"
+	"github.com/Masterminds/sprig/v3"
 )
 
 const (
@@ -26,7 +26,7 @@ const (
    - {{$n}}{{end}}
 {{- end}}{{end}}
 
- -- {{ .Packager }}  {{ date_in_zone "Mon, 02 Jan 2006 03:04:05 -0700" .Date "UTC" }}
+ -- {{ .Packager }}  {{ date_in_zone "Mon, 02 Jan 2006 15:04:05 -0700" .Date "UTC" }}
 {{ end }}
 `
 	releaseTpl = `

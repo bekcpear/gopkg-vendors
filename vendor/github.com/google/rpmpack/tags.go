@@ -19,6 +19,7 @@ package rpmpack
 const (
 	tagHeaderI18NTable = 0x64 // 100
 	// Signature tags are obiously overlapping regular header tags..
+	sigRSA         = 0x010c // 256
 	sigSHA256      = 0x0111 // 273
 	sigSize        = 0x03e8 // 1000
 	sigPGP         = 0x03ea // 1002
@@ -67,13 +68,17 @@ const (
 	tagConflictFlags     = 0x041d // 1053
 	tagConflicts         = 0x041e // 1054
 	tagConflictVersion   = 0x041f // 1055
+	tagVerifyScript      = 0x0437 // 1079
 	tagPreinProg         = 0x043d // 1085
 	tagPostinProg        = 0x043e // 1086
 	tagPreunProg         = 0x043f // 1087
 	tagPostunProg        = 0x0440 // 1088
 	tagObsoletes         = 0x0442 // 1090
+	tagFileDevices       = 0x0447 // 1095
+	tagVerifyScriptProg  = 0x0443 // 1091
 	tagFileINodes        = 0x0448 // 1096
 	tagFileLangs         = 0x0449 // 1097
+	tagPrefixes          = 0x044a // 1098
 	tagProvideFlags      = 0x0458 // 1112
 	tagProvideVersion    = 0x0459 // 1113
 	tagObsoleteFlags     = 0x045a // 1114
@@ -84,6 +89,10 @@ const (
 	tagPayloadFormat     = 0x0464 // 1124
 	tagPayloadCompressor = 0x0465 // 1125
 	tagPayloadFlags      = 0x0466 // 1126
+	tagPretrans          = 0x047f // 1151
+	tagPosttrans         = 0x0480 // 1152
+	tagPretransProg      = 0x0481 // 1153
+	tagPosttransProg     = 0x0482 // 1154
 	tagFileDigestAlgo    = 0x1393 // 5011
 	tagRecommends        = 0x13b6 // 5046
 	tagRecommendVersion  = 0x13b7 // 5047

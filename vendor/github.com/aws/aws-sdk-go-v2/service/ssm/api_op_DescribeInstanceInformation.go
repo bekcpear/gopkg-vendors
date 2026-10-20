@@ -5,22 +5,23 @@ package ssm
 import (
 	"context"
 	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Describes one or more of your managed nodes, including information about the
-// operating system platform, the version of SSM Agent installed on the managed
-// node, node status, and so on. If you specify one or more managed node IDs, it
-// returns information for those managed nodes. If you don't specify node IDs, it
-// returns information for all your managed nodes. If you specify a node ID that
-// isn't valid or a node that you don't own, you receive an error. The IamRole
-// field for this API operation is the Identity and Access Management (IAM) role
-// assigned to on-premises managed nodes. This call doesn't return the IAM role for
-// EC2 instances.
+// Provides information about one or more of your managed nodes, including the
+// operating system platform, SSM Agent version, association status, and IP
+// address. This operation does not return information for nodes that are either
+// Stopped or Terminated.
+//
+// If you specify one or more node IDs, the operation returns information for
+// those managed nodes. If you don't specify node IDs, it returns information for
+// all your managed nodes. If you specify a node ID that isn't valid or a node that
+// you don't own, you receive an error.
+//
+// The IamRole field returned for this API operation is the role assigned to an
+// Amazon EC2 instance configured with a Systems Manager Quick Setup host
+// management configuration or the role assigned to an on-premises managed node.
 func (c *Client) DescribeInstanceInformation(ctx context.Context, params *DescribeInstanceInformationInput, optFns ...func(*Options)) (*DescribeInstanceInformationOutput, error) {
 	if params == nil {
 		params = &DescribeInstanceInformationInput{}
@@ -39,19 +40,23 @@ func (c *Client) DescribeInstanceInformation(ctx context.Context, params *Descri
 type DescribeInstanceInformationInput struct {
 
 	// One or more filters. Use a filter to return a more specific list of managed
-	// nodes. You can filter based on tags applied to EC2 instances. Use this Filters
-	// data type instead of InstanceInformationFilterList, which is deprecated.
+	// nodes. You can filter based on tags applied to your managed nodes. Tag filters
+	// can't be combined with other filter types. Use this Filters data type instead
+	// of InstanceInformationFilterList , which is deprecated.
 	Filters []types.InstanceInformationStringFilter
 
 	// This is a legacy method. We recommend that you don't use this method. Instead,
 	// use the Filters data type. Filters enables you to return node information by
-	// filtering based on tags applied to managed nodes. Attempting to use
-	// InstanceInformationFilterList and Filters leads to an exception error.
+	// filtering based on tags applied to managed nodes.
+	//
+	// Attempting to use InstanceInformationFilterList and Filters leads to an
+	// exception error.
 	InstanceInformationFilterList []types.InstanceInformationFilter
 
 	// The maximum number of items to return for this call. The call also returns a
 	// token that you can specify in a subsequent call to get the next set of results.
-	MaxResults int32
+	// The default value is 10 items.
+	MaxResults *int32
 
 	// The token for the next set of items to return. (You received this token from a
 	// previous call.)
@@ -84,46 +89,20 @@ func (c *Client) addOperationDescribeInstanceInformationMiddlewares(stack *middl
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpDescribeInstanceInformationValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeInstanceInformation(options.Region), middleware.Before); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -135,22 +114,21 @@ func (c *Client) addOperationDescribeInstanceInformationMiddlewares(stack *middl
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addInterceptors(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
-
-// DescribeInstanceInformationAPIClient is a client that implements the
-// DescribeInstanceInformation operation.
-type DescribeInstanceInformationAPIClient interface {
-	DescribeInstanceInformation(context.Context, *DescribeInstanceInformationInput, ...func(*Options)) (*DescribeInstanceInformationOutput, error)
-}
-
-var _ DescribeInstanceInformationAPIClient = (*Client)(nil)
 
 // DescribeInstanceInformationPaginatorOptions is the paginator options for
 // DescribeInstanceInformation
 type DescribeInstanceInformationPaginatorOptions struct {
 	// The maximum number of items to return for this call. The call also returns a
 	// token that you can specify in a subsequent call to get the next set of results.
+	// The default value is 10 items.
 	Limit int32
 
 	// Set to true if pagination should stop if the service returns a pagination token
@@ -176,8 +154,8 @@ func NewDescribeInstanceInformationPaginator(client DescribeInstanceInformationA
 	}
 
 	options := DescribeInstanceInformationPaginatorOptions{}
-	if params.MaxResults != 0 {
-		options.Limit = params.MaxResults
+	if params.MaxResults != nil {
+		options.Limit = *params.MaxResults
 	}
 
 	for _, fn := range optFns {
@@ -189,12 +167,13 @@ func NewDescribeInstanceInformationPaginator(client DescribeInstanceInformationA
 		client:    client,
 		params:    params,
 		firstPage: true,
+		nextToken: params.NextToken,
 	}
 }
 
 // HasMorePages returns a boolean indicating whether more pages are available
 func (p *DescribeInstanceInformationPaginator) HasMorePages() bool {
-	return p.firstPage || p.nextToken != nil
+	return p.firstPage || (p.nextToken != nil && len(*p.nextToken) != 0)
 }
 
 // NextPage retrieves the next DescribeInstanceInformation page.
@@ -206,8 +185,15 @@ func (p *DescribeInstanceInformationPaginator) NextPage(ctx context.Context, opt
 	params := *p.params
 	params.NextToken = p.nextToken
 
-	params.MaxResults = p.options.Limit
+	var limit *int32
+	if p.options.Limit > 0 {
+		limit = &p.options.Limit
+	}
+	params.MaxResults = limit
 
+	optFns = append([]func(*Options){
+		addIsPaginatorUserAgent,
+	}, optFns...)
 	result, err := p.client.DescribeInstanceInformation(ctx, &params, optFns...)
 	if err != nil {
 		return nil, err
@@ -217,18 +203,20 @@ func (p *DescribeInstanceInformationPaginator) NextPage(ctx context.Context, opt
 	prevToken := p.nextToken
 	p.nextToken = result.NextToken
 
-	if p.options.StopOnDuplicateToken && prevToken != nil && p.nextToken != nil && *prevToken == *p.nextToken {
+	if p.options.StopOnDuplicateToken &&
+		prevToken != nil &&
+		p.nextToken != nil &&
+		*prevToken == *p.nextToken {
 		p.nextToken = nil
 	}
 
 	return result, nil
 }
 
-func newServiceMetadataMiddleware_opDescribeInstanceInformation(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "ssm",
-		OperationName: "DescribeInstanceInformation",
-	}
+// DescribeInstanceInformationAPIClient is a client that implements the
+// DescribeInstanceInformation operation.
+type DescribeInstanceInformationAPIClient interface {
+	DescribeInstanceInformation(context.Context, *DescribeInstanceInformationInput, ...func(*Options)) (*DescribeInstanceInformationOutput, error)
 }
+
+var _ DescribeInstanceInformationAPIClient = (*Client)(nil)

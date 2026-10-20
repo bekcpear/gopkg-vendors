@@ -47,10 +47,11 @@ func (e *timeoutError) Temporary() bool { return true }
 // A TCPListener is a wrapper around a TCP tcpip.Endpoint that implements
 // net.Listener.
 type TCPListener struct {
-	stack  *stack.Stack
-	ep     tcpip.Endpoint
-	wq     *waiter.Queue
-	cancel chan struct{}
+	stack      *stack.Stack
+	ep         tcpip.Endpoint
+	wq         *waiter.Queue
+	cancelOnce sync.Once
+	cancel     chan struct{}
 }
 
 // NewTCPListener creates a new TCPListener from a listening tcpip.Endpoint.
@@ -112,7 +113,9 @@ func (l *TCPListener) Close() error {
 // Shutdown stops the HTTP server.
 func (l *TCPListener) Shutdown() {
 	l.ep.Shutdown(tcpip.ShutdownWrite | tcpip.ShutdownRead)
-	close(l.cancel) // broadcast cancellation
+	l.cancelOnce.Do(func() {
+		close(l.cancel) // broadcast cancellation
+	})
 }
 
 // Addr implements net.Listener.Addr.
@@ -125,26 +128,34 @@ func (l *TCPListener) Addr() net.Addr {
 }
 
 type deadlineTimer struct {
-	// mu protects the fields below.
 	mu sync.Mutex
 
-	readTimer     *time.Timer
-	readCancelCh  chan struct{}
-	writeTimer    *time.Timer
+	// +checklocks:mu
+	readTimer *time.Timer
+	// +checklocks:mu
+	readCancelCh chan struct{}
+	// +checklocks:mu
+	writeTimer *time.Timer
+	// +checklocks:mu
 	writeCancelCh chan struct{}
 }
 
-func (d *deadlineTimer) init() {
-	d.readCancelCh = make(chan struct{})
-	d.writeCancelCh = make(chan struct{})
+func newDeadlineTimer() deadlineTimer {
+	return deadlineTimer{
+		readCancelCh:  make(chan struct{}),
+		writeCancelCh: make(chan struct{}),
+	}
 }
 
+// +checklocksexclude:d.mu
 func (d *deadlineTimer) readCancel() <-chan struct{} {
 	d.mu.Lock()
 	c := d.readCancelCh
 	d.mu.Unlock()
 	return c
 }
+
+// +checklocksexclude:d.mu
 func (d *deadlineTimer) writeCancel() <-chan struct{} {
 	d.mu.Lock()
 	c := d.writeCancelCh
@@ -154,11 +165,11 @@ func (d *deadlineTimer) writeCancel() <-chan struct{} {
 
 // setDeadline contains the shared logic for setting a deadline.
 //
-// cancelCh and timer must be pointers to deadlineTimer.readCancelCh and
-// deadlineTimer.readTimer or deadlineTimer.writeCancelCh and
-// deadlineTimer.writeTimer.
+// cancelCh and timer must point to d.readCancelCh and d.readTimer, or to
+// d.writeCancelCh and d.writeTimer. checklocks verifies that d.mu is held,
+// but cannot prove that the arguments identify the matching fields of d.
 //
-// setDeadline must only be called while holding d.mu.
+// +checklocks:d.mu
 func (d *deadlineTimer) setDeadline(cancelCh *chan struct{}, timer **time.Timer, t time.Time) {
 	if *timer != nil && !(*timer).Stop() {
 		*cancelCh = make(chan struct{})
@@ -176,10 +187,11 @@ func (d *deadlineTimer) setDeadline(cancelCh *chan struct{}, timer **time.Timer,
 	// "A zero value for t means I/O operations will not time out."
 	// - net.Conn.SetDeadline
 	if t.IsZero() {
+		*timer = nil
 		return
 	}
 
-	timeout := t.Sub(time.Now())
+	timeout := time.Until(t)
 	if timeout <= 0 {
 		close(*cancelCh)
 		return
@@ -197,6 +209,8 @@ func (d *deadlineTimer) setDeadline(cancelCh *chan struct{}, timer **time.Timer,
 
 // SetReadDeadline implements net.Conn.SetReadDeadline and
 // net.PacketConn.SetReadDeadline.
+//
+// +checklocksexclude:d.mu
 func (d *deadlineTimer) SetReadDeadline(t time.Time) error {
 	d.mu.Lock()
 	d.setDeadline(&d.readCancelCh, &d.readTimer, t)
@@ -206,6 +220,8 @@ func (d *deadlineTimer) SetReadDeadline(t time.Time) error {
 
 // SetWriteDeadline implements net.Conn.SetWriteDeadline and
 // net.PacketConn.SetWriteDeadline.
+//
+// +checklocksexclude:d.mu
 func (d *deadlineTimer) SetWriteDeadline(t time.Time) error {
 	d.mu.Lock()
 	d.setDeadline(&d.writeCancelCh, &d.writeTimer, t)
@@ -214,6 +230,8 @@ func (d *deadlineTimer) SetWriteDeadline(t time.Time) error {
 }
 
 // SetDeadline implements net.Conn.SetDeadline and net.PacketConn.SetDeadline.
+//
+// +checklocksexclude:d.mu
 func (d *deadlineTimer) SetDeadline(t time.Time) error {
 	d.mu.Lock()
 	d.setDeadline(&d.readCancelCh, &d.readTimer, t)
@@ -230,7 +248,7 @@ type TCPConn struct {
 	wq *waiter.Queue
 	ep tcpip.Endpoint
 
-	// readMu serializes reads and implicitly protects read.
+	// readMu serializes reads.
 	//
 	// Lock ordering:
 	// If both readMu and deadlineTimer.mu are to be used in a single
@@ -239,17 +257,18 @@ type TCPConn struct {
 
 	// read contains bytes that have been read from the endpoint,
 	// but haven't yet been returned.
+	//
+	// +checklocks:readMu
 	read []byte
 }
 
 // NewTCPConn creates a new TCPConn.
 func NewTCPConn(wq *waiter.Queue, ep tcpip.Endpoint) *TCPConn {
-	c := &TCPConn{
-		wq: wq,
-		ep: ep,
+	return &TCPConn{
+		deadlineTimer: newDeadlineTimer(),
+		wq:            wq,
+		ep:            ep,
 	}
-	c.deadlineTimer.init()
-	return c
 }
 
 // Accept implements net.Conn.Accept.
@@ -339,6 +358,9 @@ func commonRead(b []byte, ep tcpip.Endpoint, wq *waiter.Queue, deadline <-chan s
 }
 
 // Read implements net.Conn.Read.
+//
+// +checklocksexclude:c.readMu
+// +checklocksexclude:c.deadlineTimer.mu
 func (c *TCPConn) Read(b []byte) (int, error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
@@ -353,6 +375,8 @@ func (c *TCPConn) Read(b []byte) (int, error) {
 }
 
 // Write implements net.Conn.Write.
+//
+// +checklocksexclude:c.deadlineTimer.mu
 func (c *TCPConn) Write(b []byte) (int, error) {
 	deadline := c.writeCancel()
 
@@ -466,11 +490,11 @@ func (c *TCPConn) newOpError(op string, err error) *net.OpError {
 }
 
 func fullToTCPAddr(addr tcpip.FullAddress) *net.TCPAddr {
-	return &net.TCPAddr{IP: net.IP(addr.Addr), Port: int(addr.Port)}
+	return &net.TCPAddr{IP: net.IP(addr.Addr.AsSlice()), Port: int(addr.Port)}
 }
 
 func fullToUDPAddr(addr tcpip.FullAddress) *net.UDPAddr {
-	return &net.UDPAddr{IP: net.IP(addr.Addr), Port: int(addr.Port)}
+	return &net.UDPAddr{IP: net.IP(addr.Addr.AsSlice()), Port: int(addr.Port)}
 }
 
 // DialTCP creates a new TCPConn connected to the specified address.
@@ -543,20 +567,17 @@ func DialContextTCP(ctx context.Context, s *stack.Stack, addr tcpip.FullAddress,
 type UDPConn struct {
 	deadlineTimer
 
-	stack *stack.Stack
-	ep    tcpip.Endpoint
-	wq    *waiter.Queue
+	ep tcpip.Endpoint
+	wq *waiter.Queue
 }
 
 // NewUDPConn creates a new UDPConn.
-func NewUDPConn(s *stack.Stack, wq *waiter.Queue, ep tcpip.Endpoint) *UDPConn {
-	c := &UDPConn{
-		stack: s,
-		ep:    ep,
-		wq:    wq,
+func NewUDPConn(wq *waiter.Queue, ep tcpip.Endpoint) *UDPConn {
+	return &UDPConn{
+		deadlineTimer: newDeadlineTimer(),
+		ep:            ep,
+		wq:            wq,
 	}
-	c.deadlineTimer.init()
-	return c
 }
 
 // DialUDP creates a new UDPConn.
@@ -583,7 +604,7 @@ func DialUDP(s *stack.Stack, laddr, raddr *tcpip.FullAddress, network tcpip.Netw
 		}
 	}
 
-	c := NewUDPConn(s, &wq, ep)
+	c := NewUDPConn(&wq, ep)
 
 	if raddr != nil {
 		if err := c.ep.Connect(*raddr); err != nil {
@@ -624,12 +645,16 @@ func (c *UDPConn) RemoteAddr() net.Addr {
 }
 
 // Read implements net.Conn.Read
+//
+// +checklocksexclude:c.deadlineTimer.mu
 func (c *UDPConn) Read(b []byte) (int, error) {
 	bytesRead, _, err := c.ReadFrom(b)
 	return bytesRead, err
 }
 
 // ReadFrom implements net.PacketConn.ReadFrom.
+//
+// +checklocksexclude:c.deadlineTimer.mu
 func (c *UDPConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	deadline := c.readCancel()
 
@@ -641,11 +666,16 @@ func (c *UDPConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	return n, fullToUDPAddr(addr), nil
 }
 
+// Write implements net.Conn.Write.
+//
+// +checklocksexclude:c.deadlineTimer.mu
 func (c *UDPConn) Write(b []byte) (int, error) {
 	return c.WriteTo(b, nil)
 }
 
 // WriteTo implements net.PacketConn.WriteTo.
+//
+// +checklocksexclude:c.deadlineTimer.mu
 func (c *UDPConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	deadline := c.writeCancel()
 
@@ -661,7 +691,7 @@ func (c *UDPConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	if addr != nil {
 		ua := addr.(*net.UDPAddr)
 		writeOptions.To = &tcpip.FullAddress{
-			Addr: tcpip.Address(ua.IP),
+			Addr: tcpip.AddrFromSlice(ua.IP),
 			Port: uint16(ua.Port),
 		}
 	}

@@ -158,9 +158,19 @@ traverseExtensions:
 //
 // Returns true if the header was successfully parsed.
 func UDP(pkt *stack.PacketBuffer) bool {
-	_, ok := pkt.TransportHeader().Consume(header.UDPMinimumSize)
+	hdr, ok := pkt.TransportHeader().Consume(header.UDPMinimumSize)
+	if !ok {
+		return false
+	}
 	pkt.TransportProtocolNumber = header.UDPProtocolNumber
-	return ok
+	// Validate the UDP payload length.
+	length := int(header.UDP(hdr).Length()) - header.UDPMinimumSize
+	if length < 0 || length > pkt.Data().Size() {
+		return false
+	}
+	// Trim the payload to the length specified in the UDP header.
+	pkt.Data().CapLength(length)
+	return true
 }
 
 // TCP parses a TCP packet found in pkt.Data and populates pkt's transport
@@ -215,17 +225,14 @@ func ICMPv6(pkt *stack.PacketBuffer) bool {
 		header.ICMPv6RouterAdvert,
 		header.ICMPv6NeighborSolicit,
 		header.ICMPv6NeighborAdvert,
-		header.ICMPv6RedirectMsg:
+		header.ICMPv6RedirectMsg,
+		header.ICMPv6MulticastListenerQuery,
+		header.ICMPv6MulticastListenerReport,
+		header.ICMPv6MulticastListenerV2Report,
+		header.ICMPv6MulticastListenerDone:
 		size := pkt.Data().Size()
 		if _, ok := pkt.TransportHeader().Consume(size); !ok {
 			panic(fmt.Sprintf("expected to consume the full data of size = %d bytes into transport header", size))
-		}
-	case header.ICMPv6MulticastListenerQuery,
-		header.ICMPv6MulticastListenerReport,
-		header.ICMPv6MulticastListenerDone:
-		size := header.ICMPv6HeaderSize + header.MLDMinimumSize
-		if _, ok := pkt.TransportHeader().Consume(size); !ok {
-			return false
 		}
 	case header.ICMPv6DstUnreachable,
 		header.ICMPv6PacketTooBig,

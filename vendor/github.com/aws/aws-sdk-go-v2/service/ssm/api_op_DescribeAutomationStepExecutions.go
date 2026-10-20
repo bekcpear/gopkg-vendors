@@ -5,11 +5,8 @@ package ssm
 import (
 	"context"
 	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // Information about all active and terminated step executions in an Automation
@@ -42,7 +39,7 @@ type DescribeAutomationStepExecutionsInput struct {
 
 	// The maximum number of items to return for this call. The call also returns a
 	// token that you can specify in a subsequent call to get the next set of results.
-	MaxResults int32
+	MaxResults *int32
 
 	// The token for the next set of items to return. (You received this token from a
 	// previous call.)
@@ -50,7 +47,7 @@ type DescribeAutomationStepExecutionsInput struct {
 
 	// Indicates whether to list step executions in reverse order by start time. The
 	// default value is 'false'.
-	ReverseOrder bool
+	ReverseOrder *bool
 
 	noSmithyDocumentSerde
 }
@@ -80,46 +77,20 @@ func (c *Client) addOperationDescribeAutomationStepExecutionsMiddlewares(stack *
 	if err != nil {
 		return err
 	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
-		return err
-	}
+
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpDescribeAutomationStepExecutionsValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeAutomationStepExecutions(options.Region), middleware.Before); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -131,16 +102,14 @@ func (c *Client) addOperationDescribeAutomationStepExecutionsMiddlewares(stack *
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addInterceptors(stack, options); err != nil {
+		return err
+	}
 	return nil
 }
-
-// DescribeAutomationStepExecutionsAPIClient is a client that implements the
-// DescribeAutomationStepExecutions operation.
-type DescribeAutomationStepExecutionsAPIClient interface {
-	DescribeAutomationStepExecutions(context.Context, *DescribeAutomationStepExecutionsInput, ...func(*Options)) (*DescribeAutomationStepExecutionsOutput, error)
-}
-
-var _ DescribeAutomationStepExecutionsAPIClient = (*Client)(nil)
 
 // DescribeAutomationStepExecutionsPaginatorOptions is the paginator options for
 // DescribeAutomationStepExecutions
@@ -172,8 +141,8 @@ func NewDescribeAutomationStepExecutionsPaginator(client DescribeAutomationStepE
 	}
 
 	options := DescribeAutomationStepExecutionsPaginatorOptions{}
-	if params.MaxResults != 0 {
-		options.Limit = params.MaxResults
+	if params.MaxResults != nil {
+		options.Limit = *params.MaxResults
 	}
 
 	for _, fn := range optFns {
@@ -185,12 +154,13 @@ func NewDescribeAutomationStepExecutionsPaginator(client DescribeAutomationStepE
 		client:    client,
 		params:    params,
 		firstPage: true,
+		nextToken: params.NextToken,
 	}
 }
 
 // HasMorePages returns a boolean indicating whether more pages are available
 func (p *DescribeAutomationStepExecutionsPaginator) HasMorePages() bool {
-	return p.firstPage || p.nextToken != nil
+	return p.firstPage || (p.nextToken != nil && len(*p.nextToken) != 0)
 }
 
 // NextPage retrieves the next DescribeAutomationStepExecutions page.
@@ -202,8 +172,15 @@ func (p *DescribeAutomationStepExecutionsPaginator) NextPage(ctx context.Context
 	params := *p.params
 	params.NextToken = p.nextToken
 
-	params.MaxResults = p.options.Limit
+	var limit *int32
+	if p.options.Limit > 0 {
+		limit = &p.options.Limit
+	}
+	params.MaxResults = limit
 
+	optFns = append([]func(*Options){
+		addIsPaginatorUserAgent,
+	}, optFns...)
 	result, err := p.client.DescribeAutomationStepExecutions(ctx, &params, optFns...)
 	if err != nil {
 		return nil, err
@@ -213,18 +190,20 @@ func (p *DescribeAutomationStepExecutionsPaginator) NextPage(ctx context.Context
 	prevToken := p.nextToken
 	p.nextToken = result.NextToken
 
-	if p.options.StopOnDuplicateToken && prevToken != nil && p.nextToken != nil && *prevToken == *p.nextToken {
+	if p.options.StopOnDuplicateToken &&
+		prevToken != nil &&
+		p.nextToken != nil &&
+		*prevToken == *p.nextToken {
 		p.nextToken = nil
 	}
 
 	return result, nil
 }
 
-func newServiceMetadataMiddleware_opDescribeAutomationStepExecutions(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		SigningName:   "ssm",
-		OperationName: "DescribeAutomationStepExecutions",
-	}
+// DescribeAutomationStepExecutionsAPIClient is a client that implements the
+// DescribeAutomationStepExecutions operation.
+type DescribeAutomationStepExecutionsAPIClient interface {
+	DescribeAutomationStepExecutions(context.Context, *DescribeAutomationStepExecutionsInput, ...func(*Options)) (*DescribeAutomationStepExecutionsOutput, error)
 }
+
+var _ DescribeAutomationStepExecutionsAPIClient = (*Client)(nil)

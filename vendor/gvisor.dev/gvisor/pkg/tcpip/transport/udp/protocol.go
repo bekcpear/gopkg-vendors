@@ -43,6 +43,7 @@ const (
 	MaxBufferSize = 4 << 20 // 4MiB
 )
 
+// +stateify savable
 type protocol struct {
 	stack *stack.Stack
 }
@@ -82,12 +83,12 @@ func (p *protocol) HandleUnknownDestinationPacket(id stack.TransportEndpointID, 
 	netHdr := pkt.Network()
 	lengthValid, csumValid := header.UDPValid(
 		hdr,
-		func() uint16 { return pkt.Data().AsRange().Checksum() },
+		func() uint16 { return pkt.Data().Checksum() },
 		uint16(pkt.Data().Size()),
 		pkt.NetworkProtocolNumber,
 		netHdr.SourceAddress(),
 		netHdr.DestinationAddress(),
-		pkt.RXTransportChecksumValidated)
+		pkt.RXChecksumValidated)
 	if !lengthValid {
 		p.stack.Stats().UDP.MalformedPacketsReceived.Increment()
 		return stack.UnknownDestinationPacketMalformed
@@ -122,6 +123,9 @@ func (*protocol) Pause() {}
 
 // Resume implements stack.TransportProtocol.Resume.
 func (*protocol) Resume() {}
+
+// Restore implements stack.TransportProtocol.Restore.
+func (*protocol) Restore() {}
 
 // Parse implements stack.TransportProtocol.Parse.
 func (*protocol) Parse(pkt *stack.PacketBuffer) bool {

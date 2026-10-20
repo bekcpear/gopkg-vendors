@@ -1,100 +1,41 @@
 package rule
 
 import (
-	"bytes"
-	"fmt"
 	"go/ast"
-	"go/printer"
 	"go/token"
-	"go/types"
 	"regexp"
 	"strings"
 
+	"github.com/mgechev/revive/internal/astutils"
 	"github.com/mgechev/revive/lint"
 )
 
-const styleGuideBase = "https://golang.org/wiki/CodeReviewComments"
+// exitFuncChecker is a function type that checks whether a function call is an exit function.
+type exitFuncChecker func(args []ast.Expr) bool
 
-// isBlank returns whether id is the blank identifier "_".
-// If id == nil, the answer is false.
-func isBlank(id *ast.Ident) bool { return id != nil && id.Name == "_" }
+var alwaysTrue exitFuncChecker = func([]ast.Expr) bool { return true }
 
-func isTest(f *lint.File) bool {
-	return strings.HasSuffix(f.Name, "_test.go")
-}
-
-var commonMethods = map[string]bool{
-	"Error":     true,
-	"Read":      true,
-	"ServeHTTP": true,
-	"String":    true,
-	"Write":     true,
-	"Unwrap":    true,
-}
-
-func receiverType(fn *ast.FuncDecl) string {
-	switch e := fn.Recv.List[0].Type.(type) {
-	case *ast.Ident:
-		return e.Name
-	case *ast.StarExpr:
-		if id, ok := e.X.(*ast.Ident); ok {
-			return id.Name
-		}
-	}
-	// The parser accepts much more than just the legal forms.
-	return "invalid-type"
-}
-
-var knownNameExceptions = map[string]bool{
-	"LastInsertId": true, // must match database/sql
-	"kWh":          true,
-}
-
-func isCgoExported(f *ast.FuncDecl) bool {
-	if f.Recv != nil || f.Doc == nil {
-		return false
-	}
-
-	cgoExport := regexp.MustCompile(fmt.Sprintf("(?m)^//export %s$", regexp.QuoteMeta(f.Name.Name)))
-	for _, c := range f.Doc.List {
-		if cgoExport.MatchString(c.Text) {
-			return true
-		}
-	}
-	return false
-}
-
-var allCapsRE = regexp.MustCompile(`^[A-Z0-9_]+$`)
-
-func isIdent(expr ast.Expr, ident string) bool {
-	id, ok := expr.(*ast.Ident)
-	return ok && id.Name == ident
-}
-
-var zeroLiteral = map[string]bool{
-	"false": true, // bool
-	// runes
-	`'\x00'`: true,
-	`'\000'`: true,
-	// strings
-	`""`: true,
-	"``": true,
-	// numerics
-	"0":   true,
-	"0.":  true,
-	"0.0": true,
-	"0i":  true,
-}
-
-func validType(T types.Type) bool {
-	return T != nil &&
-		T != types.Typ[types.Invalid] &&
-		!strings.Contains(T.String(), "invalid type") // good but not foolproof
-}
-
-func isPkgDot(expr ast.Expr, pkg, name string) bool {
-	sel, ok := expr.(*ast.SelectorExpr)
-	return ok && isIdent(sel.X, pkg) && isIdent(sel.Sel, name)
+// exitFunctions is a map of std packages and functions that are considered as exit functions.
+var exitFunctions = map[string]map[string]exitFuncChecker{
+	"os":      {"Exit": alwaysTrue},
+	"syscall": {"Exit": alwaysTrue},
+	"log": {
+		"Fatal":   alwaysTrue,
+		"Fatalf":  alwaysTrue,
+		"Fatalln": alwaysTrue,
+		"Panic":   alwaysTrue,
+		"Panicf":  alwaysTrue,
+		"Panicln": alwaysTrue,
+	},
+	"flag": {
+		"Parse": func([]ast.Expr) bool { return true },
+		"NewFlagSet": func(args []ast.Expr) bool {
+			if len(args) != 2 {
+				return false
+			}
+			return astutils.IsPkgDotName(args[1], "flag", "ExitOnError")
+		},
+	},
 }
 
 func srcLine(src []byte, p token.Position) string {
@@ -109,91 +50,64 @@ func srcLine(src []byte, p token.Position) string {
 	return string(src[lo:hi])
 }
 
-// pick yields a list of nodes by picking them from a sub-ast with root node n.
-// Nodes are selected by applying the fselect function
-// f function is applied to each selected node before inseting it in the final result.
-// If f==nil then it defaults to the identity function (ie it returns the node itself)
-func pick(n ast.Node, fselect func(n ast.Node) bool, f func(n ast.Node) []ast.Node) []ast.Node {
-	var result []ast.Node
-
-	if n == nil {
-		return result
-	}
-
-	if f == nil {
-		f = func(n ast.Node) []ast.Node { return []ast.Node{n} }
-	}
-
-	onSelect := func(n ast.Node) {
-		result = append(result, f(n)...)
-	}
-	p := picker{fselect: fselect, onSelect: onSelect}
-	ast.Walk(p, n)
-	return result
+// isRuleOption returns true if arg and name are the same after normalization.
+func isRuleOption(arg, name string) bool {
+	return normalizeRuleOption(arg) == normalizeRuleOption(name)
 }
 
-func pickFromExpList(l []ast.Expr, fselect func(n ast.Node) bool, f func(n ast.Node) []ast.Node) []ast.Node {
-	result := make([]ast.Node, 0)
-	for _, e := range l {
-		result = append(result, pick(e, fselect, f)...)
-	}
-	return result
+// normalizeRuleOption returns an option name from the argument. It is lowercased and without hyphens.
+//
+// Example: normalizeRuleOption("allowTypesBefore"), normalizeRuleOption("allow-types-before") -> "allowtypesbefore".
+func normalizeRuleOption(arg string) string {
+	return strings.ToLower(strings.ReplaceAll(arg, "-", ""))
 }
 
-type picker struct {
-	fselect  func(n ast.Node) bool
-	onSelect func(n ast.Node)
+var normalizePathReplacer = strings.NewReplacer("-", "", "_", "", ".", "")
+
+// normalizePath removes hyphens, underscores, and dots from the name
+//
+// Example: normalizePath("foo.bar-_buz") -> "foobarbuz".
+func normalizePath(name string) string {
+	return normalizePathReplacer.Replace(name)
 }
 
-func (p picker) Visit(node ast.Node) ast.Visitor {
-	if p.fselect == nil {
-		return nil
+// isVersionPath checks if a directory name is a version directory (v1, V2, etc.)
+func isVersionPath(name string) bool {
+	if len(name) < 2 || (name[0] != 'v' && name[0] != 'V') {
+		return false
 	}
 
-	if p.fselect(node) {
-		p.onSelect(node)
+	for i := 1; i < len(name); i++ {
+		if name[i] < '0' || name[i] > '9' {
+			return false
+		}
 	}
 
-	return p
+	return true
 }
 
-// isBoolOp returns true if the given token corresponds to
-// a bool operator
-func isBoolOp(t token.Token) bool {
-	switch t {
-	case token.LAND, token.LOR, token.EQL, token.NEQ:
-		return true
-	}
+var directiveCommentRE = regexp.MustCompile("^//(line |extern |export |[a-z0-9]+:[a-z0-9])") // see https://go-review.googlesource.com/c/website/+/442516/1..2/_content/doc/comment.md#494
 
-	return false
+func isDirectiveComment(line string) bool {
+	return directiveCommentRE.MatchString(line)
 }
 
-const (
-	trueName  = "true"
-	falseName = "false"
-)
-
-func isExprABooleanLit(n ast.Node) (lexeme string, ok bool) {
-	oper, ok := n.(*ast.Ident)
-
+// isCallToExitFunction checks if the function call is a call to an exit function.
+func isCallToExitFunction(pkgName, functionName string, callArgs []ast.Expr) bool {
+	m, ok := exitFunctions[pkgName]
 	if !ok {
-		return "", false
+		return false
 	}
 
-	return oper.Name, (oper.Name == trueName || oper.Name == falseName)
-}
-
-// gofmt returns a string representation of an AST subtree.
-func gofmt(x interface{}) string {
-	buf := bytes.Buffer{}
-	fs := token.NewFileSet()
-	printer.Fprint(&buf, fs, x)
-	return buf.String()
-}
-
-// checkNumberOfArguments fails if the given number of arguments is not, at least, the expected one
-func checkNumberOfArguments(expected int, args lint.Arguments, ruleName string) {
-	if len(args) < expected {
-		panic(fmt.Sprintf("not enough arguments for %s rule, expected %d, got %d. Please check the rule's documentation", ruleName, expected, len(args)))
+	check, ok := m[functionName]
+	if !ok {
+		return false
 	}
+
+	return check(callArgs)
+}
+
+// newInternalFailureError returns a slice of Failure with a single internal failure in it.
+func newInternalFailureError(e error) []lint.Failure {
+	return []lint.Failure{lint.NewInternalFailure(e.Error())}
 }

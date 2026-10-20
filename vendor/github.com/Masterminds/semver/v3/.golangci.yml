@@ -1,26 +1,42 @@
-run:
-  deadline: 2m
-
+version: "2"
 linters:
-  disable-all: true
+  default: none
   enable:
-    - deadcode
     - dupl
     - errcheck
-    - gofmt
-    - goimports
-    - golint
-    - gosimple
+    - gocyclo
+    - gosec
     - govet
     - ineffassign
     - misspell
     - nakedret
-    - structcheck
+    - revive
+    - staticcheck
+    - unparam
     - unused
-    - varcheck
-
-linters-settings:
-  gofmt:
-    simplify: true
-  dupl:
-    threshold: 400
+  settings:
+    dupl:
+      threshold: 600
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

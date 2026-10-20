@@ -1,9 +1,9 @@
+package runtime
+
 // This is esbuild's runtime code. It contains helper functions that are
 // automatically injected into output files to implement certain features. For
 // example, the "**" operator is replaced with a call to "__pow" when targeting
 // ES2015. Tree shaking automatically removes unused code from the runtime.
-
-package runtime
 
 import (
 	"github.com/evanw/esbuild/internal/compat"
@@ -15,11 +15,7 @@ import (
 // all code that references this index can be discovered easily.
 const SourceIndex = uint32(0)
 
-func CanUseES6(unsupportedFeatures compat.JSFeature) bool {
-	return !unsupportedFeatures.Has(compat.ConstAndLet) && !unsupportedFeatures.Has(compat.ForOf)
-}
-
-func code(isES6 bool) string {
+func Source(unsupportedJSFeatures compat.JSFeature) logger.Source {
 	// Note: These helper functions used to be named similar things to the helper
 	// functions from the TypeScript compiler. However, people sometimes use these
 	// two projects in combination and TypeScript's implementation of these helpers
@@ -79,6 +75,9 @@ func code(isES6 bool) string {
 		var __reflectGet = Reflect.get
 		var __reflectSet = Reflect.set
 
+		var __knownSymbol = (name, symbol) => (symbol = Symbol[name]) ? symbol : Symbol.for('Symbol.' + name)
+		var __typeError = msg => { throw TypeError(msg) }
+
 		export var __pow = Math.pow
 
 		var __defNormalProp = (obj, key, value) => key in obj
@@ -93,7 +92,7 @@ func code(isES6 bool) string {
 		`
 
 	// Avoid "of" when not using ES6
-	if isES6 {
+	if !unsupportedJSFeatures.Has(compat.ForOf) {
 		text += `
 				for (var prop of __getOwnPropSymbols(b)) {
 		`
@@ -129,8 +128,15 @@ func code(isES6 bool) string {
 				}) : x
 			)(function(x) {
 				if (typeof require !== 'undefined') return require.apply(this, arguments)
-				throw new Error('Dynamic require of "' + x + '" is not supported')
+				throw Error('Dynamic require of "' + x + '" is not supported')
 			})
+
+		// This is used for glob imports
+		export var __glob = map => path => {
+			var fn = map[path]
+			if (fn) return fn()
+			throw new Error('Module not found in bundle: ' + path)
+		}
 
 		// For object rest patterns
 		export var __restKey = key => typeof key === 'symbol' ? key : key + ''
@@ -143,7 +149,7 @@ func code(isES6 bool) string {
 	`
 
 	// Avoid "of" when not using ES6
-	if isES6 {
+	if !unsupportedJSFeatures.Has(compat.ForOf) {
 		text += `
 				for (var prop of __getOwnPropSymbols(source)) {
 		`
@@ -164,18 +170,40 @@ func code(isES6 bool) string {
 		// This is for lazily-initialized ESM code. This has two implementations, a
 		// compact one for minified code and a verbose one that generates friendly
 		// names in V8's profiler and in stack traces.
-		export var __esm = (fn, res) => function __init() {
-			return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res
+		export var __esm = (fn, res, err) => function __init() {
+			if (err) throw err[0]
+			try {
+				return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res
+			} catch (e) {
+				throw err = [e], e
+			}
 		}
-		export var __esmMin = (fn, res) => () => (fn && (res = fn(fn = 0)), res)
+		export var __esmMin = (fn, res, err) => () => {
+			if (err) throw err[0]
+			try {
+				return fn && (res = fn(fn = 0)), res
+			} catch (e) {
+				throw err = [e], e
+			}
+		}
 
 		// Wraps a CommonJS closure and returns a require() function. This has two
 		// implementations, a compact one for minified code and a verbose one that
 		// generates friendly names in V8's profiler and in stack traces.
 		export var __commonJS = (cb, mod) => function __require() {
-			return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = {exports: {}}).exports, mod), mod.exports
+			try {
+				return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports
+			} catch (e) {
+				throw mod = 0, e
+			}
 		}
-		export var __commonJSMin = (cb, mod) => () => (mod || cb((mod = {exports: {}}).exports, mod), mod.exports)
+		export var __commonJSMin = (cb, mod) => () => {
+			try {
+				return mod || cb((mod = { exports: {} }).exports, mod), mod.exports
+			} catch (e) {
+				throw mod = 0, e
+			}
+		}
 
 		// Used to implement ESM exports both for "require()" and "import * as"
 		export var __export = (target, all) => {
@@ -188,7 +216,7 @@ func code(isES6 bool) string {
 	`
 
 	// Avoid "let" when not using ES6
-	if isES6 {
+	if !unsupportedJSFeatures.Has(compat.ForOf) && !unsupportedJSFeatures.Has(compat.ConstAndLet) {
 		text += `
 				for (let key of __getOwnPropNames(from))
 					if (!__hasOwnProp.call(to, key) && key !== except)
@@ -240,7 +268,7 @@ func code(isES6 bool) string {
 		// to "true", which overwrites any existing export named "__esModule".
 		export var __toCommonJS = mod => __copyProps(__defProp({}, '__esModule', { value: true }), mod)
 
-		// For TypeScript decorators
+		// For TypeScript experimental decorators
 		// - kind === undefined: class
 		// - kind === 1: method, parameter
 		// - kind === 2: field
@@ -249,56 +277,135 @@ func code(isES6 bool) string {
 			for (var i = decorators.length - 1, decorator; i >= 0; i--)
 				if (decorator = decorators[i])
 					result = (kind ? decorator(target, key, result) : decorator(result)) || result
-			if (kind && result)
-				__defProp(target, key, result)
+			if (kind && result) __defProp(target, key, result)
 			return result
 		}
 		export var __decorateParam = (index, decorator) => (target, key) => decorator(target, key, index)
 
-		// For class members
-		export var __publicField = (obj, key, value) => {
-			__defNormalProp(obj, typeof key !== 'symbol' ? key + '' : key, value)
+		// For JavaScript decorators
+		export var __decoratorStart = base => [, , , __create(base?.[__knownSymbol('metadata')] ?? null)]
+		var __decoratorStrings = ['class', 'method', 'getter', 'setter', 'accessor', 'field', 'value', 'get', 'set']
+		var __expectFn = fn => fn !== void 0 && typeof fn !== 'function' ? __typeError('Function expected') : fn
+		var __decoratorContext = (kind, name, done, metadata, fns) => ({ kind: __decoratorStrings[kind], name, metadata, addInitializer: fn =>
+			done._ ? __typeError('Already initialized') : fns.push(__expectFn(fn || null)) })
+		export var __decoratorMetadata = (array, target) => __defNormalProp(target, __knownSymbol('metadata'), array[3])
+		export var __runInitializers = (array, flags, self, value) => {
+			for (var i = 0, fns = array[flags >> 1], n = fns && fns.length; i < n; i++) flags & 1 ? fns[i].call(self) : value = fns[i].call(self, value)
 			return value
 		}
-		var __accessCheck = (obj, member, msg) => {
-			if (!member.has(obj)) throw TypeError('Cannot ' + msg)
-		}
-		export var __privateIn = (member, obj) => {
-			if (Object(obj) !== obj) throw TypeError('Cannot use the "in" operator on this value')
-			return member.has(obj)
-		}
-		export var __privateGet = (obj, member, getter) => {
-			__accessCheck(obj, member, 'read from private field')
-			return getter ? getter.call(obj) : member.get(obj)
-		}
-		export var __privateAdd = (obj, member, value) => {
-			if (member.has(obj)) throw TypeError('Cannot add the same private member more than once')
-			member instanceof WeakSet ? member.add(obj) : member.set(obj, value)
-		}
-		export var __privateSet = (obj, member, value, setter) => {
-			__accessCheck(obj, member, 'write to private field')
-			setter ? setter.call(obj, value) : member.set(obj, value)
-			return value
-		}
-		export var __privateWrapper = (obj, member, setter, getter) => {
-			return {
-				set _(value) { __privateSet(obj, member, value, setter) },
-				get _() { return __privateGet(obj, member, getter) },
+		export var __decorateElement = (array, flags, name, decorators, target, extra) => {
+			var fn, it, done, ctx, access, k = flags & 7, s = !!(flags & 8), p = !!(flags & 16)
+			var j = k > 3 ? array.length + 1 : k ? s ? 1 : 2 : 0, key = __decoratorStrings[k + 5]
+			var initializers = k > 3 && (array[j - 1] = []), extraInitializers = array[j] || (array[j] = [])
+			var desc = k && (
+				!p && !s && (target = target.prototype),
+				k < 5 && (k > 3 || !p) &&
+			`
+
+	// Avoid object extensions when not using ES6
+	if !unsupportedJSFeatures.Has(compat.ObjectExtensions) && !unsupportedJSFeatures.Has(compat.ObjectAccessors) {
+		text += `__getOwnPropDesc(k < 4 ? target : { get [name]() { return __privateGet(this, extra) }, set [name](x) { return __privateSet(this, extra, x) } }, name)`
+	} else {
+		text += `(k < 4 ? __getOwnPropDesc(target, name) : { get: () => __privateGet(this, extra), set: x => __privateSet(this, extra, x) })`
+	}
+
+	text += `
+			)
+			k ? p && k < 4 && __name(extra, (k > 2 ? 'set ' : k > 1 ? 'get ' : '') + name) : __name(target, name)
+
+			for (var i = decorators.length - 1; i >= 0; i--) {
+				ctx = __decoratorContext(k, name, done = {}, array[3], extraInitializers)
+
+				if (k) {
+					ctx.static = s, ctx.private = p, access = ctx.access = { has: p ? x => __privateIn(target, x) : x => name in x }
+					if (k ^ 3) access.get = p ? x => (k ^ 1 ? __privateGet : __privateMethod)(x, target, k ^ 4 ? extra : desc.get) : x => x[name]
+					if (k > 2) access.set = p ? (x, y) => __privateSet(x, target, y, k ^ 4 ? extra : desc.set) : (x, y) => x[name] = y
+				}
+
+				it = (0, decorators[i])(k ? k < 4 ? p ? extra : desc[key] : k > 4 ? void 0 : { get: desc.get, set: desc.set } : target, ctx), done._ = 1
+
+				if (k ^ 4 || it === void 0) __expectFn(it) && (k > 4 ? initializers.unshift(it) : k ? p ? extra = it : desc[key] = it : target = it)
+				else if (typeof it !== 'object' || it === null) __typeError('Object expected')
+				else __expectFn(fn = it.get) && (desc.get = fn), __expectFn(fn = it.set) && (desc.set = fn), __expectFn(fn = it.init) && initializers.unshift(fn)
 			}
-		}
-		export var __privateMethod = (obj, member, method) => {
-			__accessCheck(obj, member, 'access private method')
-			return method
+
+			return k || __decoratorMetadata(array, target),
+				desc && __defProp(target, name, desc),
+				p ? k ^ 4 ? extra : desc : target
 		}
 
+		// For class members
+		export var __publicField = (obj, key, value) => (
+			__defNormalProp(obj, typeof key !== 'symbol' ? key + '' : key, value)
+		)
+		var __accessCheck = (obj, member, msg) => (
+			member.has(obj) || __typeError('Cannot ' + msg)
+		)
+		export var __privateIn = (member, obj) => (
+			Object(obj) !== obj ? __typeError('Cannot use the "in" operator on this value') :
+			member.has(obj)
+		)
+		export var __privateGet = (obj, member, getter) => (
+			__accessCheck(obj, member, 'read from private field'),
+			getter ? getter.call(obj) : member.get(obj)
+		)
+		export var __privateAdd = (obj, member, value) => (
+			member.has(obj) ? __typeError('Cannot add the same private member more than once') :
+			member instanceof WeakSet ? member.add(obj) : member.set(obj, value)
+		)
+		export var __privateSet = (obj, member, value, setter) => (
+			__accessCheck(obj, member, 'write to private field'),
+			setter ? setter.call(obj, value) : member.set(obj, value),
+			value
+		)
+		export var __privateMethod = (obj, member, method) => (
+			__accessCheck(obj, member, 'access private method'),
+			method
+		)
+		export var __earlyAccess = (name) => {
+			throw ReferenceError('Cannot access "' + name + '" before initialization')
+		}
+	`
+
+	if !unsupportedJSFeatures.Has(compat.ObjectAccessors) {
+		text += `
+			export var __privateWrapper = (obj, member, setter, getter) => ({
+				set _(value) { __privateSet(obj, member, value, setter) },
+				get _() { return __privateGet(obj, member, getter) },
+			})
+		`
+	} else {
+		text += `
+		export var __privateWrapper = (obj, member, setter, getter) => __defProp({}, '_', {
+			set: value => __privateSet(obj, member, value, setter),
+			get: () => __privateGet(obj, member, getter),
+		})
+		`
+	}
+
+	text += `
 		// For "super" property accesses
 		export var __superGet = (cls, obj, key) => __reflectGet(__getProtoOf(cls), key, obj)
 		export var __superSet = (cls, obj, key, val) => (__reflectSet(__getProtoOf(cls), key, val, obj), val)
-		export var __superWrapper = (cls, obj, key) => ({
-			get _() { return __superGet(cls, obj, key) },
-			set _(val) { __superSet(cls, obj, key, val) },
-		})
+	`
 
+	if !unsupportedJSFeatures.Has(compat.ObjectAccessors) {
+		text += `
+			export var __superWrapper = (cls, obj, key) => ({
+				get _() { return __superGet(cls, obj, key) },
+				set _(val) { __superSet(cls, obj, key, val) },
+			})
+		`
+	} else {
+		text += `
+			export var __superWrapper = (cls, obj, key) => __defProp({}, '_', {
+				get: () => __superGet(cls, obj, key),
+				set: val => __superSet(cls, obj, key, val),
+			})
+		`
+	}
+
+	text += `
 		// For lowering tagged template literals
 		export var __template = (cooked, raw) => __freeze(__defProp(cooked, 'raw', { value: __freeze(raw || cooked.slice()) }))
 
@@ -324,9 +431,90 @@ func code(isES6 bool) string {
 			})
 		}
 
+		// These help for lowering async generator functions
+		export var __await = function (promise, isYieldStar) {
+			this[0] = promise
+			this[1] = isYieldStar
+		}
+		export var __asyncGenerator = (__this, __arguments, generator) => {
+			var resume = (k, v, yes, no) => {
+				try {
+					var x = generator[k](v), isAwait = (v = x.value) instanceof __await, done = x.done
+					Promise.resolve(isAwait ? v[0] : v)
+						.then(y => isAwait
+							? resume(k === 'return' ? k : 'next', v[1] ? { done: y.done, value: y.value } : y, yes, no)
+							: yes({ value: y, done }))
+						.catch(e => resume('throw', e, yes, no))
+				} catch (e) {
+					no(e)
+				}
+			}, method = (k, call, wait, clear) => it[k] = x => (
+				call = new Promise((yes, no, run) => (
+					run = () => resume(k, x, yes, no),
+					q ? q.then(run) : run())),
+				clear = () => q === wait && (q = 0),
+				q = wait = call.then(clear, clear),
+				call
+			), q, it = {}
+			return generator = generator.apply(__this, __arguments),
+				it[__knownSymbol('asyncIterator')] = () => it,
+				method('next'),
+				method('throw'),
+				method('return'),
+				it
+		}
+		export var __yieldStar = value => {
+			var obj = value[__knownSymbol('asyncIterator')], isAwait = false, method, it = {}
+			if (obj == null) {
+				obj = value[__knownSymbol('iterator')]()
+				method = k => it[k] = x => obj[k](x)
+			} else {
+				obj = obj.call(value)
+				method = k => it[k] = v => {
+					if (isAwait) {
+						isAwait = false
+						if (k === 'throw') throw v
+						return v
+					}
+					isAwait = true
+					return {
+						done: false,
+						value: new __await(new Promise(resolve => {
+							var x = obj[k](v)
+							if (!(x instanceof Object)) __typeError('Object expected')
+							resolve(x)
+						}), 1),
+					}
+				}
+			}
+			return it[__knownSymbol('iterator')] = () => it,
+				method('next'),
+				'throw' in obj ? method('throw') : it.throw = x => { throw x },
+				'return' in obj && method('return'),
+				it
+		}
+
+		// This helps for lowering for-await loops
+		export var __forAwait = (obj, it, method) =>
+			(it = obj[__knownSymbol('asyncIterator')])
+				? it.call(obj)
+				: (obj = obj[__knownSymbol('iterator')](),
+					it = {},
+					method = (key, fn) =>
+						(fn = obj[key]) && (it[key] = arg =>
+							new Promise((yes, no, done) => (
+								arg = fn.call(obj, arg),
+								done = arg.done,
+								Promise.resolve(arg.value)
+									.then(value => yes({ value, done }), no)
+							))),
+					method('next'),
+					method('return'),
+					it)
+
 		// This is for the "binary" loader (custom code is ~2x faster than "atob")
-		export var __toBinaryNode = base64 => new Uint8Array(Buffer.from(base64, 'base64'))
-		export var __toBinary = /* @__PURE__ */ (() => {
+		export var __toBinaryNode = Uint8Array.fromBase64 || (base64 => new Uint8Array(Buffer.from(base64, 'base64')))
+		export var __toBinary = Uint8Array.fromBase64 || /* @__PURE__ */ (() => {
 			var table = new Uint8Array(128)
 			for (var i = 0; i < 64; i++) table[i < 26 ? i + 65 : i < 52 ? i + 71 : i < 62 ? i - 4 : i * 4 - 205] = i
 			return base64 => {
@@ -341,25 +529,51 @@ func code(isES6 bool) string {
 				return bytes
 			}
 		})()
+
+		// These are for the "using" statement in TypeScript 5.2+
+		export var __using = (stack, value, async) => {
+			if (value != null) {
+				if (typeof value !== 'object' && typeof value !== 'function') __typeError('Object expected')
+				var dispose, inner
+				if (async) dispose = value[__knownSymbol('asyncDispose')]
+				if (dispose === void 0) {
+					dispose = value[__knownSymbol('dispose')]
+					if (async) inner = dispose
+				}
+				if (typeof dispose !== 'function') __typeError('Object not disposable')
+				if (inner) dispose = function() { try { inner.call(this) } catch (e) { return Promise.reject(e) } }
+				stack.push([async, dispose, value])
+			} else if (async) {
+				stack.push([async])
+			}
+			return value
+		}
+		export var __callDispose = (stack, error, hasError) => {
+			var E = typeof SuppressedError === 'function' ? SuppressedError :
+				function (e, s, m, _) { return _ = Error(m), _.name = 'SuppressedError', _.error = e, _.suppressed = s, _ }
+			var fail = e => error = hasError ? new E(e, error, 'An error was suppressed during disposal') : (hasError = true, e)
+			var next = (it) => {
+				while (it = stack.pop()) {
+					try {
+						var result = it[1] && it[1].call(it[2])
+						if (it[0]) return Promise.resolve(result).then(next, (e) => (fail(e), next()))
+					} catch (e) {
+						fail(e)
+					}
+				}
+				if (hasError) throw error
+			}
+			return next()
+		}
 	`
 
-	return text
-}
-
-var ES6Source = logger.Source{
-	Index:          SourceIndex,
-	KeyPath:        logger.Path{Text: "<runtime>"},
-	PrettyPath:     "<runtime>",
-	IdentifierName: "runtime",
-	Contents:       code(true /* isES6 */),
-}
-
-var ES5Source = logger.Source{
-	Index:          SourceIndex,
-	KeyPath:        logger.Path{Text: "<runtime>"},
-	PrettyPath:     "<runtime>",
-	IdentifierName: "runtime",
-	Contents:       code(false /* isES6 */),
+	return logger.Source{
+		Index:          SourceIndex,
+		KeyPath:        logger.Path{Text: "<runtime>"},
+		PrettyPaths:    logger.PrettyPaths{Abs: "<runtime>", Rel: "<runtime>"},
+		IdentifierName: "runtime",
+		Contents:       text,
+	}
 }
 
 // The TypeScript decorator transform behaves similar to the official

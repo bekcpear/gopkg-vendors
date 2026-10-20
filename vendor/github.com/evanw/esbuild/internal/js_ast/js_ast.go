@@ -1,11 +1,9 @@
 package js_ast
 
 import (
-	"sort"
 	"strconv"
 
 	"github.com/evanw/esbuild/internal/ast"
-	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/logger"
 )
 
@@ -170,13 +168,13 @@ const (
 	BinOpLogicalAndAssign
 )
 
-type opTableEntry struct {
+type OpTableEntry struct {
 	Text      string
 	Level     L
 	IsKeyword bool
 }
 
-var OpTable = []opTableEntry{
+var OpTable = []OpTableEntry{
 	// Prefix
 	{"+", LPrefix, false},
 	{"-", LPrefix, false},
@@ -243,26 +241,40 @@ var OpTable = []opTableEntry{
 	{"&&=", LAssign, false},
 }
 
-type LocRef struct {
-	Loc logger.Loc
-	Ref Ref
-}
-
-type Comment struct {
-	Text string
-	Loc  logger.Loc
+type Decorator struct {
+	Value            Expr
+	AtLoc            logger.Loc
+	OmitNewlineAfter bool
 }
 
 type PropertyKind uint8
 
 const (
-	PropertyNormal PropertyKind = iota
-	PropertyGet
-	PropertySet
+	PropertyField PropertyKind = iota
+	PropertyMethod
+	PropertyGetter
+	PropertySetter
+	PropertyAutoAccessor
 	PropertySpread
-	PropertyDeclare
+	PropertyDeclareOrAbstract
 	PropertyClassStaticBlock
 )
+
+// This returns true if and only if this property matches the "MethodDefinition"
+// grammar from the specification. That means it's one of the following forms:
+//
+//	foo() {}
+//	*foo() {}
+//	async foo() {}
+//	async *foo() {}
+//	get foo() {}
+//	set foo(_) {}
+//
+// If this returns true, the "ValueOrNil" field of the property is always an
+// "EFunction" expression and it is always printed as a method.
+func (kind PropertyKind) IsMethodDefinition() bool {
+	return kind == PropertyMethod || kind == PropertyGetter || kind == PropertySetter
+}
 
 type ClassStaticBlock struct {
 	Block SBlock
@@ -273,7 +285,6 @@ type PropertyFlags uint8
 
 const (
 	PropertyIsComputed PropertyFlags = 1 << iota
-	PropertyIsMethod
 	PropertyIsStatic
 	PropertyWasShorthand
 	PropertyPreferQuotedKey
@@ -302,17 +313,20 @@ type Property struct {
 	//
 	InitializerOrNil Expr
 
-	TSDecorators []Expr
+	Decorators []Decorator
 
-	Loc   logger.Loc
-	Kind  PropertyKind
-	Flags PropertyFlags
+	Loc             logger.Loc
+	CloseBracketLoc logger.Loc
+	Kind            PropertyKind
+	Flags           PropertyFlags
 }
 
 type PropertyBinding struct {
 	Key               Expr
 	Value             Binding
 	DefaultValueOrNil Expr
+	Loc               logger.Loc
+	CloseBracketLoc   logger.Loc
 	IsComputed        bool
 	IsSpread          bool
 	PreferQuotedKey   bool
@@ -321,23 +335,26 @@ type PropertyBinding struct {
 type Arg struct {
 	Binding      Binding
 	DefaultOrNil Expr
-	TSDecorators []Expr
+	Decorators   []Decorator
 
 	// "constructor(public x: boolean) {}"
 	IsTypeScriptCtorField bool
 }
 
 type Fn struct {
-	Name         *LocRef
+	Name         *ast.LocRef
 	Args         []Arg
 	Body         FnBody
-	ArgumentsRef Ref
+	ArgumentsRef ast.Ref
 	OpenParenLoc logger.Loc
 
 	IsAsync     bool
 	IsGenerator bool
 	HasRestArg  bool
 	HasIfScope  bool
+
+	// See: https://github.com/rollup/rollup/pull/5024
+	HasNoSideEffectsComment bool
 
 	// This is true if the function is a method
 	IsUniqueFormalParameters bool
@@ -349,18 +366,50 @@ type FnBody struct {
 }
 
 type Class struct {
-	TSDecorators  []Expr
-	Name          *LocRef
+	Decorators    []Decorator
+	Name          *ast.LocRef
 	ExtendsOrNil  Expr
 	Properties    []Property
 	ClassKeyword  logger.Range
 	BodyLoc       logger.Loc
 	CloseBraceLoc logger.Loc
+
+	// If true, JavaScript decorators (i.e. not TypeScript experimental
+	// decorators) should be lowered. This is the case either if JavaScript
+	// decorators are not supported in the configured target environment, or
+	// if "useDefineForClassFields" is set to false and this class has
+	// decorators on it. Note that this flag is not necessarily set to true if
+	// "useDefineForClassFields" is false and a class has an "accessor" even
+	// though the accessor feature comes from the decorator specification.
+	ShouldLowerStandardDecorators bool
+
+	// If true, property field initializers cannot be assumed to have no side
+	// effects. For example:
+	//
+	//   class Foo {
+	//     static set foo(x) { importantSideEffect(x) }
+	//   }
+	//   class Bar extends Foo {
+	//     foo = 1
+	//   }
+	//
+	// This happens in TypeScript when "useDefineForClassFields" is disabled
+	// because TypeScript (and esbuild) transforms the above class into this:
+	//
+	//   class Foo {
+	//     static set foo(x) { importantSideEffect(x); }
+	//   }
+	//   class Bar extends Foo {
+	//   }
+	//   Bar.foo = 1;
+	//
+	UseDefineForClassFields bool
 }
 
 type ArrayBinding struct {
 	Binding           Binding
 	DefaultValueOrNil Expr
+	Loc               logger.Loc
 }
 
 type Binding struct {
@@ -379,7 +428,7 @@ func (*BObject) isBinding()     {}
 
 type BMissing struct{}
 
-type BIdentifier struct{ Ref Ref }
+type BIdentifier struct{ Ref ast.Ref }
 
 type BArray struct {
 	Items           []ArrayBinding
@@ -423,8 +472,9 @@ func (*EClass) isExpr()                {}
 func (*EIdentifier) isExpr()           {}
 func (*EImportIdentifier) isExpr()     {}
 func (*EPrivateIdentifier) isExpr()    {}
-func (*EMangledProp) isExpr()          {}
+func (*ENameOfSymbol) isExpr()         {}
 func (*EJSXElement) isExpr()           {}
+func (*EJSXText) isExpr()              {}
 func (*EMissing) isExpr()              {}
 func (*ENumber) isExpr()               {}
 func (*EBigInt) isExpr()               {}
@@ -434,6 +484,7 @@ func (*EString) isExpr()               {}
 func (*ETemplate) isExpr()             {}
 func (*ERegExp) isExpr()               {}
 func (*EInlinedEnum) isExpr()          {}
+func (*EAnnotation) isExpr()           {}
 func (*EAwait) isExpr()                {}
 func (*EYield) isExpr()                {}
 func (*EIf) isExpr()                   {}
@@ -453,12 +504,46 @@ type EArray struct {
 type EUnary struct {
 	Value Expr
 	Op    OpCode
+
+	// The expression "typeof (0, x)" must not become "typeof x" if "x"
+	// is unbound because that could suppress a ReferenceError from "x".
+	//
+	// Also if we know a typeof operator was originally an identifier, then
+	// we know that this typeof operator always has no side effects (even if
+	// we consider the identifier by itself to have a side effect).
+	//
+	// Note that there *is* actually a case where "typeof x" can throw an error:
+	// when "x" is being referenced inside of its TDZ (temporal dead zone). TDZ
+	// checks are not yet handled correctly by esbuild, so this possibility is
+	// currently ignored.
+	WasOriginallyTypeofIdentifier bool
+
+	// Similarly the expression "delete (0, x)" must not become "delete x"
+	// because that syntax is invalid in strict mode. We also need to make sure
+	// we don't accidentally change the return value:
+	//
+	//   Returns false:
+	//     "var a; delete (a)"
+	//     "var a = Object.freeze({b: 1}); delete (a.b)"
+	//     "var a = Object.freeze({b: 1}); delete (a?.b)"
+	//     "var a = Object.freeze({b: 1}); delete (a['b'])"
+	//     "var a = Object.freeze({b: 1}); delete (a?.['b'])"
+	//
+	//   Returns true:
+	//     "var a; delete (0, a)"
+	//     "var a = Object.freeze({b: 1}); delete (true && a.b)"
+	//     "var a = Object.freeze({b: 1}); delete (false || a?.b)"
+	//     "var a = Object.freeze({b: 1}); delete (null ?? a?.['b'])"
+	//     "var a = Object.freeze({b: 1}); delete (true ? a['b'] : a['b'])"
+	//
+	WasOriginallyDeleteOfIdentifierOrPropertyAccess bool
 }
 
 type EBinary struct {
-	Left  Expr
-	Right Expr
-	Op    OpCode
+	Left            Expr
+	Right           Expr
+	Op              OpCode
+	IsParenthesized bool
 }
 
 type EBoolean struct{ Value bool }
@@ -484,16 +569,19 @@ type EImportMeta struct {
 // These help reduce unnecessary memory allocations
 var BMissingShared = &BMissing{}
 var EMissingShared = &EMissing{}
-var ESuperShared = &ESuper{}
 var ENullShared = &ENull{}
-var EUndefinedShared = &EUndefined{}
+var ESuperShared = &ESuper{}
 var EThisShared = &EThis{}
-var SEmptyShared = &SEmpty{}
+var EUndefinedShared = &EUndefined{}
 var SDebuggerShared = &SDebugger{}
+var SEmptyShared = &SEmpty{}
+var STypeScriptShared = &STypeScript{}
+var STypeScriptSharedWasDeclareClass = &STypeScript{WasDeclareClass: true}
 
 type ENew struct {
-	Target        Expr
-	Args          []Expr
+	Target Expr
+	Args   []Expr
+
 	CloseParenLoc logger.Loc
 	IsMultiLine   bool
 
@@ -501,6 +589,14 @@ type ENew struct {
 	// this call expression. See the comment inside ECall for more details.
 	CanBeUnwrappedIfUnused bool
 }
+
+type CallKind uint8
+
+const (
+	NormalCall CallKind = iota
+	DirectEval
+	TargetWasOriginallyPropertyAccess
+)
 
 type OptionalChain uint8
 
@@ -521,7 +617,7 @@ type ECall struct {
 	Args          []Expr
 	CloseParenLoc logger.Loc
 	OptionalChain OptionalChain
-	IsDirectEval  bool
+	Kind          CallKind
 	IsMultiLine   bool
 
 	// True if there is a comment containing "@__PURE__" or "#__PURE__" preceding
@@ -537,7 +633,7 @@ type ECall struct {
 
 func (a *ECall) HasSameFlagsAs(b *ECall) bool {
 	return a.OptionalChain == b.OptionalChain &&
-		a.IsDirectEval == b.IsDirectEval &&
+		a.Kind == b.Kind &&
 		a.CanBeUnwrappedIfUnused == b.CanBeUnwrappedIfUnused
 }
 
@@ -555,18 +651,24 @@ type EDot struct {
 	// unwrapped if the resulting value is unused. Unwrapping means discarding
 	// the call target but keeping any arguments with side effects.
 	CallCanBeUnwrappedIfUnused bool
+
+	// Symbol values are known to not have side effects when used as property
+	// names in class declarations and object literals.
+	IsSymbolInstance bool
 }
 
 func (a *EDot) HasSameFlagsAs(b *EDot) bool {
 	return a.OptionalChain == b.OptionalChain &&
 		a.CanBeRemovedIfUnused == b.CanBeRemovedIfUnused &&
-		a.CallCanBeUnwrappedIfUnused == b.CallCanBeUnwrappedIfUnused
+		a.CallCanBeUnwrappedIfUnused == b.CallCanBeUnwrappedIfUnused &&
+		a.IsSymbolInstance == b.IsSymbolInstance
 }
 
 type EIndex struct {
-	Target        Expr
-	Index         Expr
-	OptionalChain OptionalChain
+	Target          Expr
+	Index           Expr
+	CloseBracketLoc logger.Loc
+	OptionalChain   OptionalChain
 
 	// If true, this property access is known to be free of side-effects. That
 	// means it can be removed if the resulting value isn't used.
@@ -576,12 +678,17 @@ type EIndex struct {
 	// unwrapped if the resulting value is unused. Unwrapping means discarding
 	// the call target but keeping any arguments with side effects.
 	CallCanBeUnwrappedIfUnused bool
+
+	// Symbol values are known to not have side effects when used as property
+	// names in class declarations and object literals.
+	IsSymbolInstance bool
 }
 
 func (a *EIndex) HasSameFlagsAs(b *EIndex) bool {
 	return a.OptionalChain == b.OptionalChain &&
 		a.CanBeRemovedIfUnused == b.CanBeRemovedIfUnused &&
-		a.CallCanBeUnwrappedIfUnused == b.CallCanBeUnwrappedIfUnused
+		a.CallCanBeUnwrappedIfUnused == b.CallCanBeUnwrappedIfUnused &&
+		a.IsSymbolInstance == b.IsSymbolInstance
 }
 
 type EArrow struct {
@@ -591,14 +698,25 @@ type EArrow struct {
 	IsAsync    bool
 	HasRestArg bool
 	PreferExpr bool // Use shorthand if true and "Body" is a single return statement
+
+	// V8 uses parentheses as an optimization hint: https://v8.dev/blog/preparser#pife
+	IsParenthesized bool
+
+	// See: https://github.com/rollup/rollup/pull/5024
+	HasNoSideEffectsComment bool
 }
 
-type EFunction struct{ Fn Fn }
+type EFunction struct {
+	Fn Fn
+
+	// V8 uses parentheses as an optimization hint: https://v8.dev/blog/preparser#pife
+	IsParenthesized bool
+}
 
 type EClass struct{ Class Class }
 
 type EIdentifier struct {
-	Ref Ref
+	Ref ast.Ref
 
 	// If we're inside a "with" statement, this identifier may be a property
 	// access. In that case it would be incorrect to remove this identifier since
@@ -637,7 +755,7 @@ type EIdentifier struct {
 // "{x: importedNamespace.x}". This separate type forces code to opt-in to
 // doing this instead of opt-out.
 type EImportIdentifier struct {
-	Ref             Ref
+	Ref             ast.Ref
 	PreferQuotedKey bool
 
 	// If true, this was originally an identifier expression such as "foo". If
@@ -650,20 +768,51 @@ type EImportIdentifier struct {
 // methods. It can be used where computed properties can be used, such as
 // EIndex and Property.
 type EPrivateIdentifier struct {
-	Ref Ref
+	Ref ast.Ref
 }
 
 // This represents an internal property name that can be mangled. The symbol
 // referenced by this expression should be a "SymbolMangledProp" symbol.
-type EMangledProp struct {
-	Ref Ref
+type ENameOfSymbol struct {
+	Ref                   ast.Ref
+	HasPropertyKeyComment bool // If true, a preceding comment contains "@__KEY__"
 }
 
 type EJSXElement struct {
 	TagOrNil   Expr
 	Properties []Property
-	Children   []Expr
-	CloseLoc   logger.Loc
+
+	// Note: This array may contain nil entries. Be careful about nil entries
+	// when iterating over this array.
+	//
+	// Each nil entry corresponds to the "JSXChildExpression_opt" part of the
+	// grammar (https://facebook.github.io/jsx/#prod-JSXChild):
+	//
+	//   JSXChild :
+	//       JSXText
+	//       JSXElement
+	//       JSXFragment
+	//       { JSXChildExpression_opt }
+	//
+	// This is the "{}" part in "<a>{}</a>". We allow this because some people
+	// put comments there and then expect to be able to process them from
+	// esbuild's output. These absent AST nodes are completely omitted when
+	// JSX is transformed to JS. They are only present when JSX preservation is
+	// enabled.
+	NullableChildren []Expr
+
+	CloseLoc        logger.Loc
+	IsTagSingleLine bool
+}
+
+// The JSX specification doesn't say how JSX text is supposed to be interpreted
+// so our "preserve" JSX transform should reproduce the original source code
+// verbatim. One reason why this matters is because there is no canonical way
+// to interpret JSX text (Babel and TypeScript differ in what newlines mean).
+// Another reason is that some people want to do custom things such as this:
+// https://github.com/evanw/esbuild/issues/3605
+type EJSXText struct {
+	Raw string
 }
 
 type ENumber struct{ Value float64 }
@@ -683,9 +832,11 @@ type ESpread struct{ Value Expr }
 // This is used for both strings and no-substitution template literals to reduce
 // the number of cases that need to be checked for string optimization code
 type EString struct {
-	Value          []uint16
-	LegacyOctalLoc logger.Loc
-	PreferTemplate bool
+	Value                 []uint16
+	LegacyOctalLoc        logger.Loc
+	PreferTemplate        bool
+	HasPropertyKeyComment bool // If true, a preceding comment contains "@__KEY__"
+	ContainsUniqueKey     bool // If true, this string must not be wrapped
 }
 
 type TemplatePart struct {
@@ -702,6 +853,21 @@ type ETemplate struct {
 	Parts          []TemplatePart
 	HeadLoc        logger.Loc
 	LegacyOctalLoc logger.Loc
+
+	// True if this is a tagged template literal with a comment that indicates
+	// this function call can be removed if the result is unused. Note that the
+	// arguments are not considered to be part of the call. If the call itself
+	// is removed due to this annotation, the arguments must remain if they have
+	// side effects (including the string conversions).
+	CanBeUnwrappedIfUnused bool
+
+	// If the tag is present, it is expected to be a function and is called. If
+	// the tag is a syntactic property access, then the value for "this" in the
+	// function call is the object whose property was accessed (e.g. in "a.b``"
+	// the value for "this" in "a.b" is "a"). We need to ensure that if "a``"
+	// ever becomes "b.c``" later on due to optimizations, it is written as
+	// "(0, b.c)``" to avoid a behavior change.
+	TagWasOriginallyPropertyAccess bool
 }
 
 type ERegExp struct{ Value string }
@@ -709,6 +875,24 @@ type ERegExp struct{ Value string }
 type EInlinedEnum struct {
 	Value   Expr
 	Comment string
+}
+
+type AnnotationFlags uint8
+
+const (
+	// This is sort of like an IIFE with a "/* @__PURE__ */" comment except it's an
+	// inline annotation on an expression itself without the nested scope. Sometimes
+	// we can't easily introduce a new scope (e.g. if the expression uses "await").
+	CanBeRemovedIfUnusedFlag AnnotationFlags = 1 << iota
+)
+
+func (flags AnnotationFlags) Has(flag AnnotationFlags) bool {
+	return (flags & flag) != 0
+}
+
+type EAnnotation struct {
+	Value Expr
+	Flags AnnotationFlags
 }
 
 type EAwait struct {
@@ -728,31 +912,24 @@ type EIf struct {
 
 type ERequireString struct {
 	ImportRecordIndex uint32
+	CloseParenLoc     logger.Loc
 }
 
 type ERequireResolveString struct {
 	ImportRecordIndex uint32
+	CloseParenLoc     logger.Loc
 }
 
 type EImportString struct {
-	// Comments inside "import()" expressions have special meaning for Webpack.
-	// Preserving comments inside these expressions makes it possible to use
-	// esbuild as a TypeScript-to-JavaScript frontend for Webpack to improve
-	// performance. We intentionally do not interpret these comments in esbuild
-	// because esbuild is not Webpack. But we do preserve them since doing so is
-	// harmless, easy to maintain, and useful to people. See the Webpack docs for
-	// more info: https://webpack.js.org/api/module-methods/#magic-comments.
-	LeadingInteriorComments []Comment
-
 	ImportRecordIndex uint32
+	CloseParenLoc     logger.Loc
 }
 
 type EImportCall struct {
-	Expr         Expr
-	OptionsOrNil Expr
-
-	// See the comment for this same field on "EImportString" for more information
-	LeadingInteriorComments []Comment
+	Expr          Expr
+	OptionsOrNil  Expr
+	CloseParenLoc logger.Loc
+	Phase         ast.ImportPhase
 }
 
 type Stmt struct {
@@ -806,7 +983,9 @@ type SBlock struct {
 type SEmpty struct{}
 
 // This is a stand-in for a TypeScript type declaration
-type STypeScript struct{}
+type STypeScript struct {
+	WasDeclareClass bool
+}
 
 type SComment struct {
 	Text           string
@@ -827,14 +1006,14 @@ type SExportClause struct {
 
 type SExportFrom struct {
 	Items             []ClauseItem
-	NamespaceRef      Ref
+	NamespaceRef      ast.Ref
 	ImportRecordIndex uint32
 	IsSingleLine      bool
 }
 
 type SExportDefault struct {
 	Value       Stmt // May be a SExpr or SFunction or SClass
-	DefaultName LocRef
+	DefaultName ast.LocRef
 }
 
 type ExportStarAlias struct {
@@ -848,7 +1027,7 @@ type ExportStarAlias struct {
 
 type SExportStar struct {
 	Alias             *ExportStarAlias
-	NamespaceRef      Ref
+	NamespaceRef      ast.Ref
 	ImportRecordIndex uint32
 }
 
@@ -866,30 +1045,33 @@ type SLazyExport struct {
 type SExpr struct {
 	Value Expr
 
-	// This is set to true for automatically-generated expressions that should
-	// not affect tree shaking. For example, calling a function from the runtime
-	// that doesn't have externally-visible side effects.
-	DoesNotAffectTreeShaking bool
+	// This is set to true for automatically-generated expressions that are part
+	// of class syntax lowering. A single class declaration may end up with many
+	// generated expressions after it (e.g. class field initializations, a call
+	// to keep the original value of the "name" property). When this happens we
+	// can't tell that the class is side-effect free anymore because all of these
+	// methods mutate the class. We use this annotation for that instead.
+	IsFromClassOrFnThatCanBeRemovedIfUnused bool
 }
 
 type EnumValue struct {
 	ValueOrNil Expr
 	Name       []uint16
-	Ref        Ref
+	Ref        ast.Ref
 	Loc        logger.Loc
 }
 
 type SEnum struct {
 	Values   []EnumValue
-	Name     LocRef
-	Arg      Ref
+	Name     ast.LocRef
+	Arg      ast.Ref
 	IsExport bool
 }
 
 type SNamespace struct {
 	Stmts    []Stmt
-	Name     LocRef
-	Arg      Ref
+	Name     ast.LocRef
+	Arg      ast.Ref
 	IsExport bool
 }
 
@@ -904,34 +1086,41 @@ type SClass struct {
 }
 
 type SLabel struct {
-	Stmt Stmt
-	Name LocRef
+	Stmt             Stmt
+	Name             ast.LocRef
+	IsSingleLineStmt bool
 }
 
 type SIf struct {
-	Test    Expr
-	Yes     Stmt
-	NoOrNil Stmt
+	Test            Expr
+	Yes             Stmt
+	NoOrNil         Stmt
+	IsSingleLineYes bool
+	IsSingleLineNo  bool
 }
 
 type SFor struct {
-	InitOrNil   Stmt // May be a SConst, SLet, SVar, or SExpr
-	TestOrNil   Expr
-	UpdateOrNil Expr
-	Body        Stmt
+	InitOrNil         Stmt // May be a SConst, SLet, SVar, or SExpr
+	TestOrNil         Expr
+	UpdateOrNil       Expr
+	Body              Stmt
+	IsSingleLineBody  bool
+	IsLoweredForAwait bool
 }
 
 type SForIn struct {
-	Init  Stmt // May be a SConst, SLet, SVar, or SExpr
-	Value Expr
-	Body  Stmt
+	Init             Stmt // May be a SConst, SLet, SVar, or SExpr
+	Value            Expr
+	Body             Stmt
+	IsSingleLineBody bool
 }
 
 type SForOf struct {
-	Init    Stmt // May be a SConst, SLet, SVar, or SExpr
-	Value   Expr
-	Body    Stmt
-	IsAwait bool
+	Init             Stmt // May be a SConst, SLet, SVar, or SExpr
+	Value            Expr
+	Body             Stmt
+	Await            logger.Range
+	IsSingleLineBody bool
 }
 
 type SDoWhile struct {
@@ -940,14 +1129,16 @@ type SDoWhile struct {
 }
 
 type SWhile struct {
-	Test Expr
-	Body Stmt
+	Test             Expr
+	Body             Stmt
+	IsSingleLineBody bool
 }
 
 type SWith struct {
-	Value   Expr
-	Body    Stmt
-	BodyLoc logger.Loc
+	Value            Expr
+	Body             Stmt
+	BodyLoc          logger.Loc
+	IsSingleLineBody bool
 }
 
 type Catch struct {
@@ -972,12 +1163,14 @@ type STry struct {
 type Case struct {
 	ValueOrNil Expr // If this is nil, this is "default" instead of "case"
 	Body       []Stmt
+	Loc        logger.Loc
 }
 
 type SSwitch struct {
-	Test    Expr
-	Cases   []Case
-	BodyLoc logger.Loc
+	Test          Expr
+	Cases         []Case
+	BodyLoc       logger.Loc
+	CloseBraceLoc logger.Loc
 }
 
 // This object represents all of these types of import statements:
@@ -991,7 +1184,7 @@ type SSwitch struct {
 // Many parts are optional and can be combined in different ways. The only
 // restriction is that you cannot have both a clause and a star namespace.
 type SImport struct {
-	DefaultName *LocRef
+	DefaultName *ast.LocRef
 	Items       *[]ClauseItem
 	StarNameLoc *logger.Loc
 
@@ -1001,7 +1194,7 @@ type SImport struct {
 	// Otherwise: This is an auto-generated Ref for the namespace representing
 	// the imported file. In this case StarLoc is nil. The NamespaceRef is used
 	// when converting this module to a CommonJS module.
-	NamespaceRef Ref
+	NamespaceRef ast.Ref
 
 	ImportRecordIndex uint32
 	IsSingleLine      bool
@@ -1021,7 +1214,13 @@ const (
 	LocalVar LocalKind = iota
 	LocalLet
 	LocalConst
+	LocalUsing
+	LocalAwaitUsing
 )
+
+func (kind LocalKind) IsUsing() bool {
+	return kind >= LocalUsing
+}
 
 type SLocal struct {
 	Decls    []Decl
@@ -1034,11 +1233,11 @@ type SLocal struct {
 }
 
 type SBreak struct {
-	Label *LocRef
+	Label *ast.LocRef
 }
 
 type SContinue struct {
-	Label *LocRef
+	Label *ast.LocRef
 }
 
 type ClauseItem struct {
@@ -1055,407 +1254,12 @@ type ClauseItem struct {
 	OriginalName string
 
 	AliasLoc logger.Loc
-	Name     LocRef
+	Name     ast.LocRef
 }
 
 type Decl struct {
 	Binding    Binding
 	ValueOrNil Expr
-}
-
-type SymbolKind uint8
-
-const (
-	// An unbound symbol is one that isn't declared in the file it's referenced
-	// in. For example, using "window" without declaring it will be unbound.
-	SymbolUnbound SymbolKind = iota
-
-	// This has special merging behavior. You're allowed to re-declare these
-	// symbols more than once in the same scope. These symbols are also hoisted
-	// out of the scope they are declared in to the closest containing function
-	// or module scope. These are the symbols with this kind:
-	//
-	// - Function arguments
-	// - Function statements
-	// - Variables declared using "var"
-	//
-	SymbolHoisted
-	SymbolHoistedFunction
-
-	// There's a weird special case where catch variables declared using a simple
-	// identifier (i.e. not a binding pattern) block hoisted variables instead of
-	// becoming an error:
-	//
-	//   var e = 0;
-	//   try { throw 1 } catch (e) {
-	//     print(e) // 1
-	//     var e = 2
-	//     print(e) // 2
-	//   }
-	//   print(e) // 0 (since the hoisting stops at the catch block boundary)
-	//
-	// However, other forms are still a syntax error:
-	//
-	//   try {} catch (e) { let e }
-	//   try {} catch ({e}) { var e }
-	//
-	// This symbol is for handling this weird special case.
-	SymbolCatchIdentifier
-
-	// Generator and async functions are not hoisted, but still have special
-	// properties such as being able to overwrite previous functions with the
-	// same name
-	SymbolGeneratorOrAsyncFunction
-
-	// This is the special "arguments" variable inside functions
-	SymbolArguments
-
-	// Classes can merge with TypeScript namespaces.
-	SymbolClass
-
-	// A class-private identifier (i.e. "#foo").
-	SymbolPrivateField
-	SymbolPrivateMethod
-	SymbolPrivateGet
-	SymbolPrivateSet
-	SymbolPrivateGetSetPair
-	SymbolPrivateStaticField
-	SymbolPrivateStaticMethod
-	SymbolPrivateStaticGet
-	SymbolPrivateStaticSet
-	SymbolPrivateStaticGetSetPair
-
-	// Labels are in their own namespace
-	SymbolLabel
-
-	// TypeScript enums can merge with TypeScript namespaces and other TypeScript
-	// enums.
-	SymbolTSEnum
-
-	// TypeScript namespaces can merge with classes, functions, TypeScript enums,
-	// and other TypeScript namespaces.
-	SymbolTSNamespace
-
-	// In TypeScript, imports are allowed to silently collide with symbols within
-	// the module. Presumably this is because the imports may be type-only.
-	SymbolImport
-
-	// Assigning to a "const" symbol will throw a TypeError at runtime
-	SymbolConst
-
-	// Injected symbols can be overridden by provided defines
-	SymbolInjected
-
-	// Properties can optionally be renamed to shorter names
-	SymbolMangledProp
-
-	// This annotates all other symbols that don't have special behavior.
-	SymbolOther
-)
-
-func (kind SymbolKind) IsPrivate() bool {
-	return kind >= SymbolPrivateField && kind <= SymbolPrivateStaticGetSetPair
-}
-
-func (kind SymbolKind) Feature() compat.JSFeature {
-	switch kind {
-	case SymbolPrivateField:
-		return compat.ClassPrivateField
-	case SymbolPrivateMethod:
-		return compat.ClassPrivateMethod
-	case SymbolPrivateGet, SymbolPrivateSet, SymbolPrivateGetSetPair:
-		return compat.ClassPrivateAccessor
-	case SymbolPrivateStaticField:
-		return compat.ClassPrivateStaticField
-	case SymbolPrivateStaticMethod:
-		return compat.ClassPrivateStaticMethod
-	case SymbolPrivateStaticGet, SymbolPrivateStaticSet, SymbolPrivateStaticGetSetPair:
-		return compat.ClassPrivateStaticAccessor
-	default:
-		return 0
-	}
-}
-
-func (kind SymbolKind) IsHoisted() bool {
-	return kind == SymbolHoisted || kind == SymbolHoistedFunction
-}
-
-func (kind SymbolKind) IsHoistedOrFunction() bool {
-	return kind.IsHoisted() || kind == SymbolGeneratorOrAsyncFunction
-}
-
-func (kind SymbolKind) IsFunction() bool {
-	return kind == SymbolHoistedFunction || kind == SymbolGeneratorOrAsyncFunction
-}
-
-func (kind SymbolKind) IsUnboundOrInjected() bool {
-	return kind == SymbolUnbound || kind == SymbolInjected
-}
-
-var InvalidRef Ref = Ref{^uint32(0), ^uint32(0)}
-
-// Files are parsed in parallel for speed. We want to allow each parser to
-// generate symbol IDs that won't conflict with each other. We also want to be
-// able to quickly merge symbol tables from all files into one giant symbol
-// table.
-//
-// We can accomplish both goals by giving each symbol ID two parts: a source
-// index that is unique to the parser goroutine, and an inner index that
-// increments as the parser generates new symbol IDs. Then a symbol map can
-// be an array of arrays indexed first by source index, then by inner index.
-// The maps can be merged quickly by creating a single outer array containing
-// all inner arrays from all parsed files.
-type Ref struct {
-	SourceIndex uint32
-	InnerIndex  uint32
-}
-
-type ImportItemStatus uint8
-
-const (
-	ImportItemNone ImportItemStatus = iota
-
-	// The linker doesn't report import/export mismatch errors
-	ImportItemGenerated
-
-	// The printer will replace this import with "undefined"
-	ImportItemMissing
-)
-
-type SymbolFlags uint16
-
-const (
-	// Certain symbols must not be renamed or minified. For example, the
-	// "arguments" variable is declared by the runtime for every function.
-	// Renaming can also break any identifier used inside a "with" statement.
-	MustNotBeRenamed SymbolFlags = 1 << iota
-
-	// In React's version of JSX, lower-case names are strings while upper-case
-	// names are identifiers. If we are preserving JSX syntax (i.e. not
-	// transforming it), then we need to be careful to name the identifiers
-	// something with a capital letter so further JSX processing doesn't treat
-	// them as strings instead.
-	MustStartWithCapitalLetterForJSX
-
-	// If true, this symbol is the target of a "__name" helper function call.
-	// This call is special because it deliberately doesn't count as a use
-	// of the symbol (otherwise keeping names would disable tree shaking)
-	// so "UseCountEstimate" is not incremented. This flag helps us know to
-	// avoid optimizing this symbol when "UseCountEstimate" is 1 in this case.
-	DidKeepName
-
-	// Sometimes we lower private symbols even if they are supported. For example,
-	// consider the following TypeScript code:
-	//
-	//   class Foo {
-	//     #foo = 123
-	//     bar = this.#foo
-	//   }
-	//
-	// If "useDefineForClassFields: false" is set in "tsconfig.json", then "bar"
-	// must use assignment semantics instead of define semantics. We can compile
-	// that to this code:
-	//
-	//   class Foo {
-	//     constructor() {
-	//       this.#foo = 123;
-	//       this.bar = this.#foo;
-	//     }
-	//     #foo;
-	//   }
-	//
-	// However, we can't do the same for static fields:
-	//
-	//   class Foo {
-	//     static #foo = 123
-	//     static bar = this.#foo
-	//   }
-	//
-	// Compiling these static fields to something like this would be invalid:
-	//
-	//   class Foo {
-	//     static #foo;
-	//   }
-	//   Foo.#foo = 123;
-	//   Foo.bar = Foo.#foo;
-	//
-	// Thus "#foo" must be lowered even though it's supported. Another case is
-	// when we're converting top-level class declarations to class expressions
-	// to avoid the TDZ and the class shadowing symbol is referenced within the
-	// class body:
-	//
-	//   class Foo {
-	//     static #foo = Foo
-	//   }
-	//
-	// This cannot be converted into something like this:
-	//
-	//   var Foo = class {
-	//     static #foo;
-	//   };
-	//   Foo.#foo = Foo;
-	//
-	PrivateSymbolMustBeLowered
-
-	// This is used to remove the all but the last function re-declaration if a
-	// function is re-declared multiple times like this:
-	//
-	//   function foo() { console.log(1) }
-	//   function foo() { console.log(2) }
-	//
-	RemoveOverwrittenFunctionDeclaration
-
-	// This flag is to avoid warning about this symbol more than once. It only
-	// applies to the "module" and "exports" unbound symbols.
-	DidWarnAboutCommonJSInESM
-
-	// If this is present, the symbol could potentially be overwritten. This means
-	// it's not safe to make assumptions about this symbol from the initializer.
-	CouldPotentiallyBeMutated
-
-	// This flags all symbols that were exported from the module using the ES6
-	// "export" keyword, either directly on the declaration or using "export {}".
-	WasExported
-
-	// This means the symbol is a normal function that has no body statements.
-	IsEmptyFunction
-
-	// This means the symbol is a normal function that takes a single argument
-	// and returns that argument.
-	IsIdentityFunction
-)
-
-func (flags SymbolFlags) Has(flag SymbolFlags) bool {
-	return (flags & flag) != 0
-}
-
-// Note: the order of values in this struct matters to reduce struct size.
-type Symbol struct {
-	// This is used for symbols that represent items in the import clause of an
-	// ES6 import statement. These should always be referenced by EImportIdentifier
-	// instead of an EIdentifier. When this is present, the expression should
-	// be printed as a property access off the namespace instead of as a bare
-	// identifier.
-	//
-	// For correctness, this must be stored on the symbol instead of indirectly
-	// associated with the Ref for the symbol somehow. In ES6 "flat bundling"
-	// mode, re-exported symbols are collapsed using MergeSymbols() and renamed
-	// symbols from other files that end up at this symbol must be able to tell
-	// if it has a namespace alias.
-	NamespaceAlias *NamespaceAlias
-
-	// This is the name that came from the parser. Printed names may be renamed
-	// during minification or to avoid name collisions. Do not use the original
-	// name during printing.
-	OriginalName string
-
-	// Used by the parser for single pass parsing. Symbols that have been merged
-	// form a linked-list where the last link is the symbol to use. This link is
-	// an invalid ref if it's the last link. If this isn't invalid, you need to
-	// FollowSymbols to get the real one.
-	Link Ref
-
-	// An estimate of the number of uses of this symbol. This is used to detect
-	// whether a symbol is used or not. For example, TypeScript imports that are
-	// unused must be removed because they are probably type-only imports. This
-	// is an estimate and may not be completely accurate due to oversights in the
-	// code. But it should always be non-zero when the symbol is used.
-	UseCountEstimate uint32
-
-	// This is for generating cross-chunk imports and exports for code splitting.
-	ChunkIndex ast.Index32
-
-	// This is used for minification. Symbols that are declared in sibling scopes
-	// can share a name. A good heuristic (from Google Closure Compiler) is to
-	// assign names to symbols from sibling scopes in declaration order. That way
-	// local variable names are reused in each global function like this, which
-	// improves gzip compression:
-	//
-	//   function x(a, b) { ... }
-	//   function y(a, b, c) { ... }
-	//
-	// The parser fills this in for symbols inside nested scopes. There are three
-	// slot namespaces: regular symbols, label symbols, and private symbols.
-	NestedScopeSlot ast.Index32
-
-	// Boolean values should all be flags instead to save space
-	Flags SymbolFlags
-
-	Kind SymbolKind
-
-	// We automatically generate import items for property accesses off of
-	// namespace imports. This lets us remove the expensive namespace imports
-	// while bundling in many cases, replacing them with a cheap import item
-	// instead:
-	//
-	//   import * as ns from 'path'
-	//   ns.foo()
-	//
-	// That can often be replaced by this, which avoids needing the namespace:
-	//
-	//   import {foo} from 'path'
-	//   foo()
-	//
-	// However, if the import is actually missing then we don't want to report a
-	// compile-time error like we do for real import items. This status lets us
-	// avoid this. We also need to be able to replace such import items with
-	// undefined, which this status is also used for.
-	ImportItemStatus ImportItemStatus
-}
-
-// You should call "MergeSymbols" instead of calling this directly
-func (newSymbol *Symbol) MergeContentsWith(oldSymbol *Symbol) {
-	newSymbol.UseCountEstimate += oldSymbol.UseCountEstimate
-	if oldSymbol.Flags.Has(MustNotBeRenamed) {
-		newSymbol.OriginalName = oldSymbol.OriginalName
-		newSymbol.Flags |= MustNotBeRenamed
-	}
-	if oldSymbol.Flags.Has(MustStartWithCapitalLetterForJSX) {
-		newSymbol.Flags |= MustStartWithCapitalLetterForJSX
-	}
-}
-
-type SlotNamespace uint8
-
-const (
-	SlotDefault SlotNamespace = iota
-	SlotLabel
-	SlotPrivateName
-	SlotMangledProp
-	SlotMustNotBeRenamed
-)
-
-func (s *Symbol) SlotNamespace() SlotNamespace {
-	if s.Kind == SymbolUnbound || s.Flags.Has(MustNotBeRenamed) {
-		return SlotMustNotBeRenamed
-	}
-	if s.Kind.IsPrivate() {
-		return SlotPrivateName
-	}
-	if s.Kind == SymbolLabel {
-		return SlotLabel
-	}
-	if s.Kind == SymbolMangledProp {
-		return SlotMangledProp
-	}
-	return SlotDefault
-}
-
-type SlotCounts [4]uint32
-
-func (a *SlotCounts) UnionMax(b SlotCounts) {
-	for i := range *a {
-		ai := &(*a)[i]
-		bi := b[i]
-		if *ai < bi {
-			*ai = bi
-		}
-	}
-}
-
-type NamespaceAlias struct {
-	Alias        string
-	NamespaceRef Ref
 }
 
 type ScopeKind uint8
@@ -1480,7 +1284,7 @@ func (kind ScopeKind) StopsHoisting() bool {
 }
 
 type ScopeMember struct {
-	Ref Ref
+	Ref ast.Ref
 	Loc logger.Loc
 }
 
@@ -1491,13 +1295,14 @@ type Scope struct {
 	Parent    *Scope
 	Children  []*Scope
 	Members   map[string]ScopeMember
-	Generated []Ref
+	Replaced  []ScopeMember
+	Generated []ast.Ref
 
 	// The location of the "use strict" directive for ExplicitStrictMode
 	UseStrictLoc logger.Loc
 
 	// This is used to store the ref of the label symbol for ScopeLabel scopes.
-	Label           LocRef
+	Label           ast.LocRef
 	LabelStmtIsLoop bool
 
 	// If a scope contains a direct eval() expression, then none of the symbols
@@ -1596,7 +1401,7 @@ type TSNamespaceScope struct {
 	// generated proxy symbols that represent the property access "x3.y". This
 	// map is unique per namespace block because "x3" is the argument symbol that
 	// is specific to that particular namespace block.
-	LazilyGeneratedProperyAccesses map[string]Ref
+	LazilyGeneratedProperyAccesses map[string]ast.Ref
 
 	// This is specific to this namespace block. It's the argument of the
 	// immediately-invoked function expression that the namespace block is
@@ -1609,7 +1414,7 @@ type TSNamespaceScope struct {
 	//
 	// This variable is "ns2" in the above example. It's the symbol to use when
 	// generating property accesses off of this namespace when it's in scope.
-	ArgRef Ref
+	ArgRef ast.Ref
 
 	// Even though enums are like namespaces and both enums and namespaces allow
 	// implicit references to properties of sibling scopes, they behave like
@@ -1672,25 +1477,6 @@ type TSNamespaceMemberEnumNumber struct {
 // "enum ns { it = 'it' }"
 type TSNamespaceMemberEnumString struct {
 	Value []uint16
-}
-
-type SymbolMap struct {
-	// This could be represented as a "map[Ref]Symbol" but a two-level array was
-	// more efficient in profiles. This appears to be because it doesn't involve
-	// a hash. This representation also makes it trivial to quickly merge symbol
-	// maps from multiple files together. Each file only generates symbols in a
-	// single inner array, so you can join the maps together by just make a
-	// single outer array containing all of the inner arrays. See the comment on
-	// "Ref" for more detail.
-	SymbolsForSource [][]Symbol
-}
-
-func NewSymbolMap(sourceCount int) SymbolMap {
-	return SymbolMap{make([][]Symbol, sourceCount)}
-}
-
-func (sm SymbolMap) Get(ref Ref) *Symbol {
-	return &sm.SymbolsForSource[ref.SourceIndex][ref.InnerIndex]
 }
 
 type ExportsKind uint8
@@ -1767,32 +1553,36 @@ const NSExportPartIndex = uint32(0)
 type AST struct {
 	ModuleTypeData ModuleTypeData
 	Parts          []Part
-	Symbols        []Symbol
+	Symbols        []ast.Symbol
+	ExprComments   map[logger.Loc][]string
 	ModuleScope    *Scope
-	CharFreq       *CharFreq
+	CharFreq       *ast.CharFreq
 
-	Hashbang  string
-	Directive string
-	URLForCSS string
+	// This is internal-only data used for the implementation of Yarn PnP
+	ManifestForYarnPnP Expr
+
+	Hashbang   string
+	Directives []string
+	URLForCSS  string
 
 	// Note: If you're in the linker, do not use this map directly. This map is
 	// filled in by the parser and is considered immutable. For performance reasons,
 	// the linker doesn't mutate this map (cloning a map is slow in Go). Instead the
 	// linker super-imposes relevant information on top in a method call. You should
 	// call "TopLevelSymbolToParts" instead.
-	TopLevelSymbolToPartsFromParser map[Ref][]uint32
+	TopLevelSymbolToPartsFromParser map[ast.Ref][]uint32
 
 	// This contains all top-level exported TypeScript enum constants. It exists
 	// to enable cross-module inlining of constant enums.
-	TSEnums map[Ref]map[string]TSEnumValue
+	TSEnums map[ast.Ref]map[string]TSEnumValue
 
 	// This contains the values of all detected inlinable constants. It exists
 	// to enable cross-module inlining of these constants.
-	ConstValues map[Ref]ConstValue
+	ConstValues map[ast.Ref]ConstValue
 
 	// Properties in here are represented as symbols instead of strings, which
 	// allows them to be renamed to smaller names.
-	MangledProps map[string]Ref
+	MangledProps map[string]ast.Ref
 
 	// Properties in here are existing non-mangled properties in the source code
 	// and must not be used when generating mangled names to avoid a collision.
@@ -1805,7 +1595,7 @@ type AST struct {
 	// These are used when bundling. They are filled in during the parser pass
 	// since we already have to traverse the AST then anyway and the parser pass
 	// is conveniently fully parallelized.
-	NamedImports            map[Ref]NamedImport
+	NamedImports            map[ast.Ref]NamedImport
 	NamedExports            map[string]NamedExport
 	ExportStarImportRecords []uint32
 
@@ -1813,15 +1603,16 @@ type AST struct {
 
 	// This is a list of ES6 features. They are ranges instead of booleans so
 	// that they can be used in log messages. Check to see if "Len > 0".
-	ExportKeyword        logger.Range // Does not include TypeScript-specific syntax
-	TopLevelAwaitKeyword logger.Range
+	ExportKeyword            logger.Range // Does not include TypeScript-specific syntax
+	TopLevelAwaitKeyword     logger.Range
+	LiveTopLevelAwaitKeyword logger.Range // Excludes top-level await in dead branches
 
-	ExportsRef Ref
-	ModuleRef  Ref
-	WrapperRef Ref
+	ExportsRef ast.Ref
+	ModuleRef  ast.Ref
+	WrapperRef ast.Ref
 
 	ApproximateLineCount  int32
-	NestedScopeSlotCounts SlotCounts
+	NestedScopeSlotCounts ast.SlotCounts
 	HasLazyExport         bool
 
 	// This is a list of CommonJS features. When a file uses CommonJS features,
@@ -1847,10 +1638,12 @@ const (
 	ConstValueTrue
 	ConstValueFalse
 	ConstValueNumber
+	ConstValueString
 )
 
 type ConstValue struct {
-	Number float64 // Use this for "ConstValueNumber"
+	Number float64  // Use this for "ConstValueNumber"
+	String []uint16 // Use this for "ConstValueString"
 	Kind   ConstValueKind
 }
 
@@ -1878,8 +1671,11 @@ func ExprToConstValue(expr Expr) ConstValue {
 		}
 
 	case *EString:
-		// I'm deliberately not inlining strings here. It seems more likely that
-		// people won't want them to be inlined since they can be arbitrarily long.
+		// Deliberately only inline small strings. We don't want to always
+		// inline all strings because they can be arbitrarily long.
+		if len(v.Value) <= 3 {
+			return ConstValue{Kind: ConstValueString, String: v.Value}
+		}
 
 	case *EBigInt:
 		// I'm deliberately not inlining bigints here for the same reason (they can
@@ -1905,107 +1701,12 @@ func ConstValueToExpr(loc logger.Loc, value ConstValue) Expr {
 
 	case ConstValueNumber:
 		return Expr{Loc: loc, Data: &ENumber{Value: value.Number}}
+
+	case ConstValueString:
+		return Expr{Loc: loc, Data: &EString{Value: value.String}}
 	}
 
 	panic("Internal error: invalid constant value")
-}
-
-// This is a histogram of character frequencies for minification
-type CharFreq [64]int32
-
-func (freq *CharFreq) Scan(text string, delta int32) {
-	if delta == 0 {
-		return
-	}
-
-	// This matches the order in "DefaultNameMinifier"
-	for i, n := 0, len(text); i < n; i++ {
-		c := text[i]
-		switch {
-		case c >= 'a' && c <= 'z':
-			(*freq)[c-'a'] += delta
-		case c >= 'A' && c <= 'Z':
-			(*freq)[c-('A'-26)] += delta
-		case c >= '0' && c <= '9':
-			(*freq)[c+(52-'0')] += delta
-		case c == '_':
-			(*freq)[62] += delta
-		case c == '$':
-			(*freq)[63] += delta
-		}
-	}
-}
-
-func (freq *CharFreq) Include(other *CharFreq) {
-	for i := 0; i < 64; i++ {
-		(*freq)[i] += (*other)[i]
-	}
-}
-
-type NameMinifier struct {
-	head string
-	tail string
-}
-
-var DefaultNameMinifier = NameMinifier{
-	head: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$",
-	tail: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$",
-}
-
-type charAndCount struct {
-	char  string
-	count int32
-	index byte
-}
-
-// This type is just so we can use Go's native sort function
-type charAndCountArray []charAndCount
-
-func (a charAndCountArray) Len() int          { return len(a) }
-func (a charAndCountArray) Swap(i int, j int) { a[i], a[j] = a[j], a[i] }
-
-func (a charAndCountArray) Less(i int, j int) bool {
-	ai := a[i]
-	aj := a[j]
-	return ai.count > aj.count || (ai.count == aj.count && ai.index < aj.index)
-}
-
-func (freq *CharFreq) Compile() NameMinifier {
-	// Sort the histogram in descending order by count
-	array := make(charAndCountArray, 64)
-	for i := 0; i < len(DefaultNameMinifier.tail); i++ {
-		array[i] = charAndCount{
-			char:  DefaultNameMinifier.tail[i : i+1],
-			index: byte(i),
-			count: freq[i],
-		}
-	}
-	sort.Sort(array)
-
-	// Compute the identifier start and identifier continue sequences
-	minifier := NameMinifier{}
-	for _, item := range array {
-		if item.char < "0" || item.char > "9" {
-			minifier.head += item.char
-		}
-		minifier.tail += item.char
-	}
-	return minifier
-}
-
-func (minifier *NameMinifier) NumberToMinifiedName(i int) string {
-	j := i % 54
-	name := minifier.head[j : j+1]
-	i = i / 54
-
-	for i > 0 {
-		i--
-		j := i % 64
-		name += minifier.tail[j : j+1]
-		i = i / 64
-	}
-
-	return name
 }
 
 type NamedImport struct {
@@ -2015,7 +1716,7 @@ type NamedImport struct {
 	LocalPartsWithUses []uint32
 
 	AliasLoc          logger.Loc
-	NamespaceRef      Ref
+	NamespaceRef      ast.Ref
 	ImportRecordIndex uint32
 
 	// If true, the alias refers to the entire export namespace object of a
@@ -2030,7 +1731,7 @@ type NamedImport struct {
 }
 
 type NamedExport struct {
-	Ref      Ref
+	Ref      ast.Ref
 	AliasLoc logger.Loc
 }
 
@@ -2053,18 +1754,18 @@ type Part struct {
 	DeclaredSymbols []DeclaredSymbol
 
 	// An estimate of the number of uses of all symbols used within this part.
-	SymbolUses map[Ref]SymbolUse
+	SymbolUses map[ast.Ref]SymbolUse
 
 	// An estimate of the number of uses of all symbols used as the target of
 	// function calls within this part.
-	SymbolCallUses map[Ref]SymbolCallUse
+	SymbolCallUses map[ast.Ref]SymbolCallUse
 
 	// This tracks property accesses off of imported symbols. We don't know
 	// during parsing if an imported symbol is going to be an inlined enum
 	// value or not. This is only known during linking. So we defer adding
 	// a dependency on these imported symbols until we know whether the
 	// property access is an inlined enum value or not.
-	ImportSymbolPropertyUses map[Ref]map[string]SymbolUse
+	ImportSymbolPropertyUses map[ast.Ref]map[string]SymbolUse
 
 	// The indices of the other parts in this file that are needed if this part
 	// is needed.
@@ -2091,7 +1792,7 @@ type Dependency struct {
 }
 
 type DeclaredSymbol struct {
-	Ref        Ref
+	Ref        ast.Ref
 	IsTopLevel bool
 }
 
@@ -2100,64 +1801,8 @@ type SymbolUse struct {
 }
 
 type SymbolCallUse struct {
-	CallCountEstimate          uint32
-	SingleArgCallCountEstimate uint32
-}
-
-// Returns the canonical ref that represents the ref for the provided symbol.
-// This may not be the provided ref if the symbol has been merged with another
-// symbol.
-func FollowSymbols(symbols SymbolMap, ref Ref) Ref {
-	symbol := symbols.Get(ref)
-	if symbol.Link == InvalidRef {
-		return ref
-	}
-
-	link := FollowSymbols(symbols, symbol.Link)
-
-	// Only write if needed to avoid concurrent map update hazards
-	if symbol.Link != link {
-		symbol.Link = link
-	}
-
-	return link
-}
-
-// Use this before calling "FollowSymbols" from separate threads to avoid
-// concurrent map update hazards. In Go, mutating a map is not threadsafe
-// but reading from a map is. Calling "FollowAllSymbols" first ensures that
-// all mutation is done up front.
-func FollowAllSymbols(symbols SymbolMap) {
-	for sourceIndex, inner := range symbols.SymbolsForSource {
-		for symbolIndex := range inner {
-			FollowSymbols(symbols, Ref{uint32(sourceIndex), uint32(symbolIndex)})
-		}
-	}
-}
-
-// Makes "old" point to "new" by joining the linked lists for the two symbols
-// together. That way "FollowSymbols" on both "old" and "new" will result in
-// the same ref.
-func MergeSymbols(symbols SymbolMap, old Ref, new Ref) Ref {
-	if old == new {
-		return new
-	}
-
-	oldSymbol := symbols.Get(old)
-	if oldSymbol.Link != InvalidRef {
-		oldSymbol.Link = MergeSymbols(symbols, oldSymbol.Link, new)
-		return oldSymbol.Link
-	}
-
-	newSymbol := symbols.Get(new)
-	if newSymbol.Link != InvalidRef {
-		newSymbol.Link = MergeSymbols(symbols, old, newSymbol.Link)
-		return newSymbol.Link
-	}
-
-	oldSymbol.Link = new
-	newSymbol.MergeContentsWith(oldSymbol)
-	return new
+	CallCountEstimate                   uint32
+	SingleArgNonSpreadCallCountEstimate uint32
 }
 
 // For readability, the names of certain automatically-generated symbols are
