@@ -10,7 +10,7 @@ github_graphql="https://api.github.com/graphql"
 github_api="https://api.github.com"
 main_repo_api="${github_api}/repos/${GITHUB_REPO:-bekcpear/gopkg-vendors}"
 
-declare -a modules sources paths subpaths
+declare -a modules sources paths subpaths skipvers
 declare -A index
 declare -i i=0
 
@@ -33,6 +33,9 @@ while read -r line; do
       ;;
     subpath:)
       eval "subpaths[${i}]='${_v}'"
+      ;;
+    skipver:)
+      eval "skipvers[${i}]='${_v}'"
       ;;
     *)
       echo "error: invalid key '${_k}'" >&2
@@ -80,6 +83,30 @@ while :; do
   esac
 done
 
+# Echo the first tag name from a GitHub GraphQL 'refs' response (already
+# ordered by TAG_COMMIT_DATE DESC) that does not match the ERE in ${2}.
+# When a prefix is given in ${3}, only names starting with it qualify and the
+# prefix is stripped from the result. Skipped names are reported on stderr so
+# they never end up in the captured stdout. Returns 1 when nothing qualifies.
+__gg_pick_latest_tag() {
+  local res=${1} skip=${2} prefix=${3} name
+  while [[ ${res} =~ \"name\":\"([^\"]+)\" ]]; do
+    name=${BASH_REMATCH[1]}
+    res=${res#*"${BASH_REMATCH[0]}"}
+    if [[ -n ${prefix} ]]; then
+      [[ ${name} == ${prefix}* ]] || continue
+      name=${name#"${prefix}"}
+    fi
+    if [[ -n ${skip} && ${name} =~ ${skip} ]]; then
+      echo "skip version: ${prefix}${name}" >&2
+      continue
+    fi
+    echo -n "${name}"
+    return 0
+  done
+  return 1
+}
+
 case ${MODE} in
   matrix-list)
     for _m in "${modules[@]}"; do
@@ -106,12 +133,13 @@ case ${MODE} in
     i=${index[${MODULE}]}
     TYPE=${sources[$i]}
     RPATH=${paths[$i]}
+    _SKIP=${skipvers[$i]}
     _current_tag_prefix="vendor-${MODULE}-"
     _gg_query_tag_f="{
         \"query\": \"query { \
           repository(owner: \\\\\\\"%s\\\\\\\", name: \\\\\\\"%s\\\\\\\") { \
             refs(refPrefix: \\\\\\\"refs/tags/\\\\\\\", %s orderBy: \
-              { field: TAG_COMMIT_DATE, direction: DESC }, first: 1) { \
+              { field: TAG_COMMIT_DATE, direction: DESC }, first: 10) { \
               edges { \
                 node { \
                   name \
@@ -127,9 +155,7 @@ case ${MODE} in
       -H "Accept: application/json" \
       -H "Authorization: Bearer $GITHUB_TOKEN" \
       -d "${_gg_query_tag}" ${github_graphql} )
-    _current=${_res#*${_current_tag_prefix}}
-    _current=${_current%%\"*}
-    _current=${_current#\{}
+    _current=$(__gg_pick_latest_tag "${_res}" "${_SKIP}" "${_current_tag_prefix}")
     echo "current version: ${_current}"
     case ${TYPE} in
       github)
@@ -138,12 +164,11 @@ case ${MODE} in
           -H "Accept: application/json" \
           -H "Authorization: Bearer $GITHUB_TOKEN" \
           -d "${_gg_query_tag}" ${github_graphql} )
-        _latest=${_res#*name\":\"}
-        _latest=${_latest%\"*}
+        _latest=$(__gg_pick_latest_tag "${_res}" "${_SKIP}")
         echo "latest version: ${_latest}"
         ;;
     esac
-    if _vercmp g ${_latest} ${_current:-0}; then
+    if [[ -n ${_latest} ]] && _vercmp g ${_latest} ${_current:-0}; then
       echo "declare -A tag_name[${MODULE}]='${_latest}'" >>./tag_name
     fi
     ;;

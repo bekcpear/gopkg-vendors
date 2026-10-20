@@ -4,6 +4,8 @@
 # 2. a blank line must not appear inside an entity
 # 3. a space must be placed between the key and value
 # 4. the key must be suffixed with a colon
+# 5. optional 'skipver' takes an ERE pattern; tag versions matching it (both
+#    upstream tags and local vendor tags) are ignored when finding the latest
 LIST="
     module: act
     source: github
@@ -33,6 +35,7 @@ LIST="
     module: tailscale
     source: github
       path: tailscale/tailscale
+   skipver: -pre
 
     module: v2ray-core
     source: github
