@@ -107,10 +107,10 @@ type TKAPeer struct {
 	NodeKeySignature tka.NodeKeySignature
 }
 
-// NetworkLockStatus represents whether tailnet-lock is enabled,
+// TailnetLockStatus represents whether tailnet-lock is enabled,
 // along with details about the locally-known state of the tailnet
 // key authority.
-type NetworkLockStatus struct {
+type TailnetLockStatus struct {
 	// Enabled is true if tailnet lock is enabled.
 	Enabled bool
 
@@ -137,7 +137,7 @@ type NetworkLockStatus struct {
 	TrustedKeys []TKAKey
 
 	// VisiblePeers describes peers which are visible in the netmap that
-	// have valid Tailnet Lock signatures signatures.
+	// have valid Tailnet Lock signatures.
 	VisiblePeers []*TKAPeer
 
 	// FilteredPeers describes peers which were removed from the netmap
@@ -151,8 +151,11 @@ type NetworkLockStatus struct {
 	StateID uint64
 }
 
-// NetworkLockUpdate describes a change to tailnet-lock state.
-type NetworkLockUpdate struct {
+// Deprecated: use [TailnetLockStatus] instead.
+type NetworkLockStatus = TailnetLockStatus
+
+// TailnetLockUpdate describes a change to tailnet-lock state.
+type TailnetLockUpdate struct {
 	Hash   [32]byte
 	Change string // values of tka.AUMKind.String()
 
@@ -160,6 +163,9 @@ type NetworkLockUpdate struct {
 	// form to avoid transitive dependences bloating this package.
 	Raw []byte
 }
+
+// Deprecated: use [TailnetLockUpdate] instead.
+type NetworkLockUpdate = TailnetLockUpdate
 
 // TailnetStatus is information about a Tailscale network ("tailnet").
 type TailnetStatus struct {
@@ -352,6 +358,24 @@ const (
 // HasCap reports whether ps has the given capability.
 func (ps *PeerStatus) HasCap(cap tailcfg.NodeCapability) bool {
 	return ps.CapMap.Contains(cap)
+}
+
+// IsRouter reports whether ps describes a router:
+// a node that routes addresses besides its own.
+// Examples: an exit node, a subnet router, an app connector, etc.
+// It is the analogue of [tailcfg.Node.IsRouter].
+func (ps *PeerStatus) IsRouter() bool {
+	// TODO(sfllaw): Keep this aligned with dbx.Node.IsSubnetRouter.
+	if ps.AllowedIPs == nil {
+		return false
+	}
+
+	for _, r := range ps.AllowedIPs.All() {
+		if !r.IsSingleIP() || !slices.Contains(ps.TailscaleIPs, r.Addr()) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsTagged reports whether ps is tagged.

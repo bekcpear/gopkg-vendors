@@ -24,10 +24,7 @@ import (
 // runtime.GOOS is a compile-time constant, so the producer-side code that
 // builds and ships NetMap on the bus is dead-code-eliminated on Linux and
 // other geese where this is false.
-const goosGetsLegacyNetmapNotify = runtime.GOOS == "windows" ||
-	runtime.GOOS == "darwin" ||
-	runtime.GOOS == "ios" ||
-	runtime.GOOS == "android"
+const goosGetsLegacyNetmapNotify = runtime.GOOS == "windows"
 
 type rateLimitingBusSender struct {
 	fn              func(*ipn.Notify) (keepGoing bool)
@@ -218,7 +215,11 @@ func mergePeerChangeForIpnBus(old, new *tailcfg.PeerChange) *tailcfg.PeerChange 
 // should be sent on the IPN bus immediately (e.g. to GUIs) without
 // rate limiting it for a few seconds.
 //
-// PeerChanges and Engine are the only "boring" (rate-limitable) fields.
+// This is only used for legacy [ipn.NotifyRateLimit] subscribers. New-style
+// subscriptions that receive delta streams are rejected by
+// [ipn.ValidateNotifyWatchOpt] when combined with NotifyRateLimit.
+//
+// Legacy NetMap and Engine are the only "boring" (rate-limitable) fields.
 func isNotableNotify(n *ipn.Notify) bool {
 	if n == nil {
 		return false
@@ -233,10 +234,16 @@ func isNotableNotify(n *ipn.Notify) bool {
 		n.LoginFinished != nil ||
 		n.SelfChange != nil ||
 		n.InitialStatus != nil ||
+		len(n.PeerChangedPatch) > 0 ||
+		len(n.PeersChanged) > 0 ||
+		len(n.PeersRemoved) > 0 ||
+		len(n.UserProfiles) > 0 ||
+		len(n.PeerState) > 0 ||
 		!n.DriveShares.IsNil() ||
 		n.Health != nil ||
 		len(n.IncomingFiles) > 0 ||
 		len(n.OutgoingFiles) > 0 ||
 		n.FilesWaiting != nil ||
-		n.SuggestedExitNode != nil
+		n.SuggestedExitNode != nil ||
+		n.Policy != nil
 }

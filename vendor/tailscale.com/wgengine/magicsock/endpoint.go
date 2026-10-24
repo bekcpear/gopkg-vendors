@@ -43,7 +43,7 @@ var mtuProbePingSizesV6 []int
 // discoKeyAdvertisementInterval tells how often a disco update via TSMP can
 // happen. The update is triggered via enqueueCallMeMaybe, and thus it will
 // only be sent if the magicsock is in a state to send out CallMeMaybe.
-const discoKeyAdvertisementInterval = time.Second * 60
+const discoKeyAdvertisementInterval = time.Minute * 2
 
 func init() {
 	for _, m := range tstun.WireMTUsToProbe {
@@ -1362,8 +1362,12 @@ func (de *endpoint) startDiscoPingLocked(ep epAddr, now mono.Time, purpose disco
 
 }
 
-// sendDiscoPingsLocked starts pinging all of ep's endpoints.
+// sendDiscoPingsLocked starts pinging all of ep's direct endpoints.
+// Sibling of discoverUDPRelayPathsLocked for udprelay.
 func (de *endpoint) sendDiscoPingsLocked(now mono.Time, sendCallMeMaybe bool) {
+	if debugNeverDirectUDP() {
+		return // skip when direct UDP is disabled
+	}
 	de.lastFullPing = now
 	var sentAny bool
 	for ep, st := range de.endpointState {
@@ -1388,19 +1392,12 @@ func (de *endpoint) sendDiscoPingsLocked(now mono.Time, sendCallMeMaybe bool) {
 		de.startDiscoPingLocked(epAddr{ap: ep}, now, pingDiscovery, 0, nil)
 	}
 	derpAddr := de.derpAddr
-	if sendCallMeMaybe && derpAddr.IsValid() && (sentAny || de.c.usingCachedNetmap.Load()) {
+	if sentAny && sendCallMeMaybe && derpAddr.IsValid() {
 		// Have our magicsock.Conn figure out its STUN endpoint (if
 		// it doesn't know already) and then send a CallMeMaybe
 		// message to our peer via DERP informing them that we've
 		// sent so our firewall ports are probably open and now
 		// would be a good time for them to connect.
-		//
-		// When working off of a cached netmap, send out a CallMeMaybe
-		// even if we don't know about any peer endpoints.
-		// Since we cannot rely on control to transfer endpoints for us,
-		// this makes establishing direct connections more reliable
-		// as the peer will respond with its own message and initiate
-		// the connection.
 		go de.c.enqueueCallMeMaybe(derpAddr, de)
 	}
 }
@@ -1847,6 +1844,8 @@ type addrQuality struct {
 	latency          time.Duration
 	wireMTU          tstun.WireMTU
 }
+
+func (a addrQuality) isZero() bool { return a == addrQuality{} }
 
 func (a addrQuality) String() string {
 	// TODO(jwhited): consider including relayServerDisco

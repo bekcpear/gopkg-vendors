@@ -200,6 +200,11 @@ func (ms *mapSession) Close() {
 var ErrChangeQueueClosed = errors.New("change queue closed")
 
 func (ms *mapSession) updateDiscoForNode(id tailcfg.NodeID, key key.NodePublic, discoKey key.DiscoPublic, lastSeen time.Time, online bool) error {
+	if discoKey.IsZero() {
+		ms.logf("[v1] controlclient: received zero disco key update from nodeID %v", id)
+		return nil
+	}
+
 	ms.cqmu.Lock()
 
 	if ms.changeQueueClosed {
@@ -362,7 +367,7 @@ func (ms *mapSession) handleNonKeepAliveMapResponse(ctx context.Context, resp *t
 }
 
 func (ms *mapSession) tryMarkDiscoAsLearnedFromTSMP(res *tailcfg.MapResponse) {
-	dun, ok := ms.netmapUpdater.(patchDiscoKeyer)
+	dun, ok := ms.netmapUpdater.(DiscoKeyUpdater)
 	if !ok {
 		return
 	}
@@ -399,6 +404,12 @@ func upgradeNode(n *tailcfg.Node) {
 	}
 
 	if n.AllowedIPs == nil {
+		n.AllowedIPs = slices.Clone(n.Addresses)
+	}
+	// Unsigned peers aren't covered by tailnet lock, so a (possibly malicious)
+	// control server must not grant them network access via advertised routes.
+	// Strip any AllowedIPs beyond their own addresses.
+	if n.UnsignedPeerAPIOnly && !slices.Equal(n.AllowedIPs, n.Addresses) {
 		n.AllowedIPs = slices.Clone(n.Addresses)
 	}
 }

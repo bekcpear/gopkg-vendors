@@ -163,6 +163,7 @@ import (
 	"tailscale.com/control/controlclient"
 	"tailscale.com/envknob"
 	_ "tailscale.com/feature/c2n"
+	_ "tailscale.com/feature/condregister/netlog"
 	_ "tailscale.com/feature/condregister/oauthkey"
 	_ "tailscale.com/feature/condregister/portmapper"
 	_ "tailscale.com/feature/condregister/useproxy"
@@ -885,7 +886,8 @@ func (s *Server) start() (reterr error) {
 	ns.GetUDPHandlerForFlow = s.getUDPHandlerForFlow
 	s.netstack = ns
 	s.dialer.UseNetstackForIP = func(ip netip.Addr) bool {
-		_, ok := eng.PeerForIP(ip)
+		// s.lb is assigned below, before any dials can happen.
+		_, ok := s.lb.PeerForIP(ip)
 		return ok
 	}
 	s.dialer.NetstackDialTCP = func(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
@@ -1005,7 +1007,10 @@ func (s *Server) resolveAuthKey() (string, error) {
 		if authKey == "" {
 			clientSecret = s.getClientSecret()
 		}
-		authKey, err = resolveViaOAuth(s.shutdownCtx, clientSecret, s.AdvertiseTags)
+		authKey, err = resolveViaOAuth(s.shutdownCtx, tailscale.ResolveAuthKeyArgs{
+			AuthKey: clientSecret,
+			Tags:    s.AdvertiseTags,
+		})
 		if err != nil {
 			return "", err
 		}
@@ -1031,7 +1036,13 @@ func (s *Server) resolveAuthKey() (string, error) {
 				return "", fmt.Errorf("audience for workload identity federation found, but client ID is empty")
 			}
 		}
-		authKey, err = resolveViaWIF(s.shutdownCtx, s.getControlURL(), clientID, idToken, audience, s.AdvertiseTags)
+		authKey, err = resolveViaWIF(s.shutdownCtx, tailscale.ResolveAuthKeyWIFArgs{
+			BaseURL:  s.getControlURL(),
+			ClientID: clientID,
+			IDToken:  idToken,
+			Audience: audience,
+			Tags:     s.AdvertiseTags,
+		})
 		if err != nil {
 			return "", err
 		}

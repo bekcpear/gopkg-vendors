@@ -78,7 +78,7 @@ func NewOSConfigurator(logf logger.Logf, health *health.Tracker, bus *eventbus.B
 	}
 
 	var err error
-	if ret.unregisterPolicyChangeCb, err = polc.RegisterChangeCallback(ret.sysPolicyChanged); err != nil {
+	if ret.unregisterPolicyChangeCb, err = polc.RegisterChangeCallback("", ret.sysPolicyChanged); err != nil {
 		logf("error registering policy change callback: %v", err) // non-fatal
 	}
 
@@ -147,7 +147,7 @@ func (m *windowsManager) setSplitDNS(resolvers []netip.Addr, domains []dnsname.F
 		return fmt.Errorf("Split DNS unsupported on this Windows version")
 	}
 
-	defer m.nrptDB.Refresh()
+	defer m.nrptDB.NotifyPolicyChanged()
 	if len(resolvers) == 0 {
 		return m.nrptDB.DelAllRuleKeys()
 	}

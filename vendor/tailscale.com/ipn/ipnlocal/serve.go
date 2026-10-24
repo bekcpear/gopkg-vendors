@@ -48,6 +48,7 @@ import (
 	"tailscale.com/util/ctxkey"
 	"tailscale.com/util/mak"
 	"tailscale.com/util/slicesx"
+	"tailscale.com/util/usermetric"
 	"tailscale.com/version"
 )
 
@@ -534,6 +535,56 @@ func (b *LocalBackend) vipServicesFromPrefsLocked(prefs ipn.PrefsView) []*tailcf
 	return servicesList
 }
 
+type serviceMeteredConn struct {
+	net.Conn
+	inbound, outbound *usermetric.MultiLabelMap[serveLabels]
+	key               serveLabels
+}
+
+func (c *serviceMeteredConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.inbound.Add(c.key, int64(n))
+	}
+	return n, err
+}
+
+func (c *serviceMeteredConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if n > 0 {
+		c.outbound.Add(c.key, int64(n))
+	}
+	return n, err
+}
+
+// CloseWrite forwards a write-half close to the underlying conn. We only embed
+// the net.Conn interface, which would otherwise hide the underlying conn's
+// CloseWrite; net/http's server relies on it (closeWriteAndWait) to send a FIN
+// and drain gracefully when a connection won't be reused, avoiding a truncating
+// RST on the final response.
+func (c *serviceMeteredConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
+// meteredConnForService wraps c to count peer bytes against the per-Service
+// Serve counters. The per-Service series is never evicted, so it leaks
+// (intentionally) until tailscaled exits.
+func (b *LocalBackend) meteredConnForService(c net.Conn, svc tailcfg.ServiceName) net.Conn {
+	// Plain (non-Service) serve passes an empty svc; don't meter it.
+	if svc == "" || b.metrics.serveBytesInbound == nil || b.metrics.serveBytesOutbound == nil {
+		return c
+	}
+	return &serviceMeteredConn{
+		Conn:     c,
+		inbound:  b.metrics.serveBytesInbound,
+		outbound: b.metrics.serveBytesOutbound,
+		key:      serveLabels{Service: svc.String()},
+	}
+}
+
 // tcpHandlerForVIPService returns a handler for a TCP connection to a VIP service
 // that is being served via the ipn.ServeConfig. It returns nil if the destination
 // address is not a VIP service or if the VIP service does not have a TCP handler set.
@@ -606,11 +657,13 @@ func (b *LocalBackend) tcpHandlerForServeTCP(tcph ipn.TCPPortHandlerView, dport 
 		if tcph.HTTPS() {
 			hs.TLSConfig = b.serveTLSConfig(b.getTLSServeCertForPort(dport, forVIPService), serveTLSNextProtos())
 			return func(c net.Conn) error {
+				c = b.meteredConnForService(c, forVIPService)
 				return hs.ServeTLS(netutil.NewOneConnListener(c, nil), "", "")
 			}
 		}
 
 		return func(c net.Conn) error {
+			c = b.meteredConnForService(c, forVIPService)
 			return hs.Serve(netutil.NewOneConnListener(c, nil))
 		}
 	}
@@ -618,8 +671,16 @@ func (b *LocalBackend) tcpHandlerForServeTCP(tcph ipn.TCPPortHandlerView, dport 
 	if backDst := tcph.TCPForward(); backDst != "" {
 		return func(conn net.Conn) error {
 			defer conn.Close()
+			conn = b.meteredConnForService(conn, forVIPService)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			backConn, err := b.dialer.SystemDial(ctx, "tcp", backDst)
+			var backConn net.Conn
+			var err error
+			if socketPath, ok := strings.CutPrefix(backDst, "unix:"); ok {
+				var d net.Dialer
+				backConn, err = d.DialContext(ctx, "unix", socketPath)
+			} else {
+				backConn, err = b.dialer.SystemDial(ctx, "tcp", backDst)
+			}
 			cancel()
 			if err != nil {
 				b.logf("localbackend: failed to TCP proxy port %v (from %v) to %s: %v", dport, srcAddr, backDst, err)
@@ -660,7 +721,13 @@ func (b *LocalBackend) tcpHandlerForServeTCP(tcph ipn.TCPPortHandlerView, dport 
 func (b *LocalBackend) forwardTCPWithProxyProtocol(conn, backConn net.Conn, proxyProtoVer int, srcAddr netip.AddrPort, dport uint16, backDst string) error {
 	var proxyHeader []byte
 	if proxyProtoVer > 0 {
-		backAddr := backConn.RemoteAddr().(*net.TCPAddr)
+		// PROXY protocol requires a valid TCP destination address.
+		// For Unix socket backends, RemoteAddr is *net.UnixAddr;
+		// the CLI rejects this combination, but guard here as well.
+		backAddr, ok := backConn.RemoteAddr().(*net.TCPAddr)
+		if !ok {
+			return fmt.Errorf("PROXY protocol is not supported with non-TCP backend %s", backDst)
+		}
 
 		// We always want to format the PROXY protocol header based on
 		// the IPv4 or IPv6-ness of the client. The SourceAddr and
@@ -764,6 +831,15 @@ func (b *LocalBackend) getServeHandler(r *http.Request) (_ ipn.HTTPHandlerView, 
 		return h, r.URL.Path, true
 	}
 	pth := path.Clean(r.URL.Path)
+	// A well-formed origin-form request path is absolute. Malformed request
+	// targets — "*" (e.g. "GET *") and "" (e.g. "CONNECT" authority-form),
+	// clean to "*" and "." respectively. Those are path.Dir fixed points that
+	// never equal "/" and match no mount, so without this guard the loop below
+	// would spin forever on one CPU core (a remote DoS via serve, or via funnel
+	// from the internet).
+	if !strings.HasPrefix(pth, "/") {
+		return z, "", false
+	}
 	for {
 		withSlash := pth + "/"
 		if h, ok := wsc.Handlers().GetOk(withSlash); ok {
@@ -775,7 +851,13 @@ func (b *LocalBackend) getServeHandler(r *http.Request) (_ ipn.HTTPHandlerView, 
 		if pth == "/" {
 			return z, "", false
 		}
-		pth = path.Dir(pth)
+		// Belt-and-suspenders with the absolute-path check above: stop if
+		// path.Dir stops shrinking rather than assuming it always reaches "/".
+		if parent := path.Dir(pth); parent != pth {
+			pth = parent
+		} else {
+			return z, "", false
+		}
 	}
 }
 
@@ -1313,7 +1395,9 @@ func (b *LocalBackend) serveTLSConfig(getCert func(*tls.ClientHelloInfo) (*tls.C
 	return base
 }
 
-func (b *LocalBackend) hasFunnelForHostPort(host string, port uint16) bool {
+// HasFunnelForHostPort reports whether the LocalBackend's serve config
+// has Funnel enabled for host:port.
+func (b *LocalBackend) HasFunnelForHostPort(host string, port uint16) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.serveConfig.Valid() {
