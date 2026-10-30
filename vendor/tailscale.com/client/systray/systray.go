@@ -33,6 +33,7 @@ import (
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tailcfg"
+	"tailscale.com/tailcfg/nodecap"
 	"tailscale.com/util/slicesx"
 	"tailscale.com/util/stringsx"
 )
@@ -624,18 +625,24 @@ func (menu *Menu) rebuildExitNodeMenu(ctx context.Context) {
 	setExitNodeOnClick(noExitNodeMenu, "")
 
 	// Show recommended exit node if available.
-	if status.Self.CapMap.Contains(tailcfg.NodeAttrSuggestExitNodeUI) {
+	if status.Self.CapMap.Contains(nodecap.SuggestExitNodeUI) {
 		sugg, err := menu.lc.SuggestExitNode(ctx)
 		if err == nil {
+			// Location is invalid for suggested exit nodes that have
+			// no location, such as regular tailnet exit nodes.
+			var suggCountryCode, suggCity string
+			if loc := sugg.Location; loc.Valid() {
+				suggCountryCode, suggCity = loc.CountryCode(), loc.City()
+			}
 			title := "Recommended: "
 			if loc := sugg.Location; loc.Valid() && loc.Country() != "" {
-				flag := countryFlag(loc.CountryCode())
-				title += fmt.Sprintf("%s %s: %s", flag, loc.Country(), loc.City())
+				flag := countryFlag(suggCountryCode)
+				title += fmt.Sprintf("%s %s: %s", flag, loc.Country(), suggCity)
 			} else {
 				title += strings.Split(sugg.Name, ".")[0]
 			}
 			menu.exitNodes.AddSeparator()
-			active := recommendedIsActive(status, sugg.ID, sugg.Location.CountryCode(), sugg.Location.City())
+			active := recommendedIsActive(status, sugg.ID, suggCountryCode, suggCity)
 			rm := menu.exitNodes.AddSubMenuItemCheckbox(title, "", active)
 			setExitNodeOnClick(rm, sugg.ID)
 		}

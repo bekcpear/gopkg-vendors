@@ -1,9 +1,9 @@
 // Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
-// Package monitor provides facilities for monitoring network
-// interface and route changes. It primarily exists to know when
-// portable devices move between different networks.
+// Package netmon provides facilities for monitoring network interface and
+// route changes. It primarily exists to know when portable devices move
+// between different networks.
 package netmon
 
 import (
@@ -254,7 +254,7 @@ func (cd *ChangeDelta) InterfaceIPDisappeared(ip netip.Addr) bool {
 	if cd.new == nil && cd.old.HasIP(ip) {
 		return true
 	}
-	return cd.new.HasIP(ip) && !cd.old.HasIP(ip)
+	return cd.old.HasIP(ip) && !cd.new.HasIP(ip)
 }
 
 // AnyInterfaceUp reports whether any interfaces are up in the new state.
@@ -380,12 +380,10 @@ func New(bus *eventbus.Bus, logf logger.Logf) (*Monitor, error) {
 		lastWall: wallTime(),
 	}
 	m.changed = eventbus.Publish[ChangeDelta](m.b)
-	st, err := m.interfaceStateUncached()
-	if err != nil {
-		return nil, err
-	}
-	m.ifState = st
 
+	// Subscribe to OS change notifications before taking the initial
+	// snapshot, so a change between the two is queued rather than lost.
+	var err error
 	m.om, err = newOSMon(bus, logf, m)
 	if err != nil {
 		return nil, err
@@ -393,6 +391,13 @@ func New(bus *eventbus.Bus, logf logger.Logf) (*Monitor, error) {
 	if m.om == nil {
 		return nil, errors.New("newOSMon returned nil, nil")
 	}
+
+	st, err := m.interfaceStateUncached()
+	if err != nil {
+		m.om.Close()
+		return nil, err
+	}
+	m.ifState = st
 
 	return m, nil
 }

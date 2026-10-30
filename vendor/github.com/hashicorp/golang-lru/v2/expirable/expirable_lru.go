@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2014, 2026
 // SPDX-License-Identifier: MPL-2.0
 
 package expirable
@@ -10,7 +10,16 @@ import (
 	"github.com/hashicorp/golang-lru/v2/internal"
 )
 
-// EvictCallback is used to get a callback when a cache entry is evicted
+// EvictCallback is used to get a callback when a cache entry is evicted.
+//
+// Callbacks run in the goroutine that caused the eviction: for explicit
+// removals (Add, Remove, RemoveOldest, Purge, Resize) they complete before
+// the method returns; for expired entries they run in the background cleanup
+// goroutine. They are always invoked outside the cache's internal lock, so
+// they may safely re-enter the cache (e.g. call Get or Len). Because no lock
+// is held while a callback runs, other goroutines may have mutated the cache
+// by then, so callbacks must not assume they observe a consistent snapshot
+// of the cache.
 type EvictCallback[K comparable, V any] func(key K, value V)
 
 // LRU implements a thread-safe LRU with expirable entries.
@@ -29,6 +38,8 @@ type LRU[K comparable, V any] struct {
 	buckets []bucket[K, V]
 	// uint8 because it's number between 0 and numBuckets
 	nextCleanupBucket uint8
+
+	cleanupStopped bool
 }
 
 // bucket is a container for holding entries to be expired
@@ -50,6 +61,9 @@ const numBuckets = 100
 //
 // Providing 0 TTL turns expiring off.
 //
+// onEvict, if non-nil, is invoked for each evicted entry outside the cache's
+// internal lock; see EvictCallback for the guarantees callbacks get.
+//
 // Delete expired entries every 1/100th of ttl value. Goroutine which deletes expired entries runs indefinitely.
 func NewLRU[K comparable, V any](size int, onEvict EvictCallback[K, V], ttl time.Duration) *LRU[K, V] {
 	if size < 0 {
@@ -60,12 +74,13 @@ func NewLRU[K comparable, V any](size int, onEvict EvictCallback[K, V], ttl time
 	}
 
 	res := LRU[K, V]{
-		ttl:       ttl,
-		size:      size,
-		evictList: internal.NewList[K, V](),
-		items:     make(map[K]*internal.Entry[K, V]),
-		onEvict:   onEvict,
-		done:      make(chan struct{}),
+		ttl:            ttl,
+		size:           size,
+		evictList:      internal.NewList[K, V](),
+		items:          make(map[K]*internal.Entry[K, V]),
+		onEvict:        onEvict,
+		done:           make(chan struct{}),
+		cleanupStopped: false,
 	}
 
 	// initialize the buckets
@@ -74,37 +89,39 @@ func NewLRU[K comparable, V any](size int, onEvict EvictCallback[K, V], ttl time
 		res.buckets[i] = bucket[K, V]{entries: make(map[K]*internal.Entry[K, V])}
 	}
 
-	// enable deleteExpired() running in separate goroutine for cache with non-zero TTL
-	//
-	// Important: done channel is never closed, so deleteExpired() goroutine will never exit,
-	// it's decided to add functionality to close it in the version later than v2.
-	if res.ttl != noEvictionTTL {
-		go func(done <-chan struct{}) {
-			ticker := time.NewTicker(res.ttl / numBuckets)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-done:
-					return
-				case <-ticker.C:
-					res.deleteExpired()
-				}
-			}
-		}(res.done)
-	}
+	res.startGoroutine()
 	return &res
 }
 
+// evictedEntry is a snapshot of a removed entry, kept so that the onEvict
+// callback can be invoked after the lock is released.
+type evictedEntry[K comparable, V any] struct {
+	key   K
+	value V
+}
+
+// fireCallbacks invokes the onEvict callback for each evicted entry.
+// It must be called without holding c.mu so that callbacks can safely
+// re-enter the cache.
+func (c *LRU[K, V]) fireCallbacks(evicted []evictedEntry[K, V]) {
+	if c.onEvict == nil {
+		return
+	}
+	for _, e := range evicted {
+		c.onEvict(e.key, e.value)
+	}
+}
+
 // Purge clears the cache completely.
-// onEvict is called for each evicted key.
+// onEvict is called for each evicted key, outside the cache's internal lock.
 func (c *LRU[K, V]) Purge() {
+	var evicted []evictedEntry[K, V]
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	for k, v := range c.items {
-		if c.onEvict != nil {
-			c.onEvict(k, v.Value)
-		}
 		delete(c.items, k)
+		if c.onEvict != nil {
+			evicted = append(evicted, evictedEntry[K, V]{key: k, value: v.Value})
+		}
 	}
 	for _, b := range c.buckets {
 		for _, ent := range b.entries {
@@ -112,14 +129,22 @@ func (c *LRU[K, V]) Purge() {
 		}
 	}
 	c.evictList.Init()
+	c.mu.Unlock()
+	c.fireCallbacks(evicted)
 }
 
 // Add adds a value to the cache. Returns true if an eviction occurred.
 // Returns false if there was no eviction: the item was already in the cache,
 // or the size was not exceeded.
+// If an eviction occurred, onEvict is invoked for the evicted entry outside
+// the cache's internal lock.
 func (c *LRU[K, V]) Add(key K, value V) (evicted bool) {
+	var evictedEntries []evictedEntry[K, V]
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() {
+		c.mu.Unlock()
+		c.fireCallbacks(evictedEntries)
+	}()
 	now := time.Now()
 
 	// Check for existing item
@@ -140,7 +165,7 @@ func (c *LRU[K, V]) Add(key K, value V) (evicted bool) {
 	evict := c.size > 0 && c.evictList.Length() > c.size
 	// Verify size not exceeded
 	if evict {
-		c.removeOldest()
+		c.removeOldest(&evictedEntries)
 	}
 	return evict
 }
@@ -152,7 +177,7 @@ func (c *LRU[K, V]) Get(key K) (value V, ok bool) {
 	var ent *internal.Entry[K, V]
 	if ent, ok = c.items[key]; ok {
 		// Expired item check
-		if time.Now().After(ent.ExpiresAt) {
+		if !c.cleanupStopped && time.Now().After(ent.ExpiresAt) {
 			return value, false
 		}
 		c.evictList.MoveToFront(ent)
@@ -178,7 +203,7 @@ func (c *LRU[K, V]) Peek(key K) (value V, ok bool) {
 	var ent *internal.Entry[K, V]
 	if ent, ok = c.items[key]; ok {
 		// Expired item check
-		if time.Now().After(ent.ExpiresAt) {
+		if !c.cleanupStopped && time.Now().After(ent.ExpiresAt) {
 			return value, false
 		}
 		return ent.Value, true
@@ -187,23 +212,33 @@ func (c *LRU[K, V]) Peek(key K) (value V, ok bool) {
 }
 
 // Remove removes the provided key from the cache, returning if the
-// key was contained.
+// key was contained. If it was, onEvict is invoked for the removed
+// entry outside the cache's internal lock.
 func (c *LRU[K, V]) Remove(key K) bool {
+	var evictedEntries []evictedEntry[K, V]
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() {
+		c.mu.Unlock()
+		c.fireCallbacks(evictedEntries)
+	}()
 	if ent, ok := c.items[key]; ok {
-		c.removeElement(ent)
+		c.removeElement(ent, &evictedEntries)
 		return true
 	}
 	return false
 }
 
 // RemoveOldest removes the oldest item from the cache.
+// If there was one, onEvict is invoked for it outside the cache's internal lock.
 func (c *LRU[K, V]) RemoveOldest() (key K, value V, ok bool) {
+	var evictedEntries []evictedEntry[K, V]
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() {
+		c.mu.Unlock()
+		c.fireCallbacks(evictedEntries)
+	}()
 	if ent := c.evictList.Back(); ent != nil {
-		c.removeElement(ent)
+		c.removeElement(ent, &evictedEntries)
 		return ent.Key, ent.Value, true
 	}
 	return
@@ -220,11 +255,16 @@ func (c *LRU[K, V]) GetOldest() (key K, value V, ok bool) {
 }
 
 // Keys returns a slice of the keys in the cache, from oldest to newest.
+// Expired entries are filtered out.
 func (c *LRU[K, V]) Keys() []K {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	keys := make([]K, 0, len(c.items))
+	now := time.Now()
 	for ent := c.evictList.Back(); ent != nil; ent = ent.PrevEntry() {
+		if !c.cleanupStopped && now.After(ent.ExpiresAt) {
+			continue
+		}
 		keys = append(keys, ent.Key)
 	}
 	return keys
@@ -235,15 +275,13 @@ func (c *LRU[K, V]) Keys() []K {
 func (c *LRU[K, V]) Values() []V {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	values := make([]V, len(c.items))
-	i := 0
+	values := make([]V, 0, len(c.items))
 	now := time.Now()
 	for ent := c.evictList.Back(); ent != nil; ent = ent.PrevEntry() {
-		if now.After(ent.ExpiresAt) {
+		if !c.cleanupStopped && now.After(ent.ExpiresAt) {
 			continue
 		}
-		values[i] = ent.Value
-		i++
+		values = append(values, ent.Value)
 	}
 	return values
 }
@@ -256,9 +294,14 @@ func (c *LRU[K, V]) Len() int {
 }
 
 // Resize changes the cache size. Size of 0 means unlimited.
+// onEvict is invoked for each evicted entry outside the cache's internal lock.
 func (c *LRU[K, V]) Resize(size int) (evicted int) {
+	var evictedEntries []evictedEntry[K, V]
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() {
+		c.mu.Unlock()
+		c.fireCallbacks(evictedEntries)
+	}()
 	if size <= 0 {
 		c.size = 0
 		return 0
@@ -268,58 +311,79 @@ func (c *LRU[K, V]) Resize(size int) (evicted int) {
 		diff = 0
 	}
 	for i := 0; i < diff; i++ {
-		c.removeOldest()
+		c.removeOldest(&evictedEntries)
 	}
 	c.size = size
 	return diff
 }
 
 // Close destroys cleanup goroutine. To clean up the cache, run Purge() before Close().
-// func (c *LRU[K, V]) Close() {
-//	c.mu.Lock()
-//	defer c.mu.Unlock()
-//	select {
-//	case <-c.done:
-//		return
-//	default:
-//	}
-//	close(c.done)
-// }
+func (c *LRU[K, V]) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	select {
+	case <-c.done:
+		return
+	default:
+	}
+	close(c.done)
+	c.cleanupStopped = true
+}
 
 // removeOldest removes the oldest item from the cache. Has to be called with lock!
-func (c *LRU[K, V]) removeOldest() {
+func (c *LRU[K, V]) removeOldest(evicted *[]evictedEntry[K, V]) {
 	if ent := c.evictList.Back(); ent != nil {
-		c.removeElement(ent)
+		c.removeElement(ent, evicted)
 	}
 }
 
 // removeElement is used to remove a given list element from the cache. Has to be called with lock!
-func (c *LRU[K, V]) removeElement(e *internal.Entry[K, V]) {
+// The removed entry is recorded in evicted instead of invoking onEvict
+// directly, so the callback can run after the lock is released.
+func (c *LRU[K, V]) removeElement(e *internal.Entry[K, V], evicted *[]evictedEntry[K, V]) {
 	c.evictList.Remove(e)
 	delete(c.items, e.Key)
 	c.removeFromBucket(e)
 	if c.onEvict != nil {
-		c.onEvict(e.Key, e.Value)
+		*evicted = append(*evicted, evictedEntry[K, V]{key: e.Key, value: e.Value})
 	}
 }
 
 // deleteExpired deletes expired records from the oldest bucket, waiting for the newest entry
 // in it to expire first.
 func (c *LRU[K, V]) deleteExpired() {
+	var evicted []evictedEntry[K, V]
 	c.mu.Lock()
+
+	// grab done channel to detect Closes
+	done := c.done
+
 	bucketIdx := c.nextCleanupBucket
 	timeToExpire := time.Until(c.buckets[bucketIdx].newestEntry)
 	// wait for newest entry to expire before cleanup without holding lock
 	if timeToExpire > 0 {
 		c.mu.Unlock()
-		time.Sleep(timeToExpire)
+		select {
+		case <-time.After(timeToExpire):
+		case <-done:
+			return
+		}
 		c.mu.Lock()
+
+		select {
+		case <-done:
+			// Done channel closed while sleeping, return without deleting entries
+			c.mu.Unlock()
+			return
+		default:
+		}
 	}
 	for _, ent := range c.buckets[bucketIdx].entries {
-		c.removeElement(ent)
+		c.removeElement(ent, &evicted)
 	}
 	c.nextCleanupBucket = (c.nextCleanupBucket + 1) % numBuckets
 	c.mu.Unlock()
+	c.fireCallbacks(evicted)
 }
 
 // addToBucket adds entry to expire bucket so that it will be cleaned up when the time comes. Has to be called with lock!
@@ -335,4 +399,46 @@ func (c *LRU[K, V]) addToBucket(e *internal.Entry[K, V]) {
 // removeFromBucket removes the entry from its corresponding bucket. Has to be called with lock!
 func (c *LRU[K, V]) removeFromBucket(e *internal.Entry[K, V]) {
 	delete(c.buckets[e.ExpireBucket].entries, e.Key)
+}
+
+// Cap returns the capacity of the cache
+func (c *LRU[K, V]) Cap() int {
+	return c.size
+}
+
+// Restart recreates the cleanup goroutine after Close() has been called.
+func (c *LRU[K, V]) Restart() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Check if the goroutine is already running
+	select {
+	case <-c.done:
+		// Channel is closed, need to recreate it
+		c.done = make(chan struct{})
+		c.cleanupStopped = false
+		c.startGoroutine()
+	default:
+		// Goroutine is already running, nothing to do
+	}
+}
+
+// startGoroutine starts the cleanup goroutine for expired entries.
+func (c *LRU[K, V]) startGoroutine() {
+	if c.ttl == noEvictionTTL {
+		return
+	}
+
+	go func(done <-chan struct{}) {
+		ticker := time.NewTicker(c.ttl / numBuckets)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				c.deleteExpired()
+			}
+		}
+	}(c.done)
 }

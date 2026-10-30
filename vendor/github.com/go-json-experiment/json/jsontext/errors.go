@@ -43,7 +43,7 @@ func (e *numError) Unwrap() error {
 	return e.err
 }
 
-// SyntacticError is a description of a syntactic error that occurred when
+// SyntacticError is a description of an error that occurred when
 // encoding or decoding JSON according to the grammar.
 //
 // The contents of this error as produced by this package may change over time.
@@ -68,7 +68,7 @@ type SyntacticError struct {
 // It takes a relative offset pos that can be resolved into
 // an absolute offset using state.offsetAt.
 //
-// It takes a where that specify how the JSON pointer is derived.
+// It takes a where that specifies how the JSON pointer is derived.
 // If the underlying error is a [pointerSuffixError],
 // then the suffix is appended to the derived pointer.
 func wrapSyntacticError(state interface {
