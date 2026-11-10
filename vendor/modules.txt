@@ -2272,7 +2272,7 @@ github.com/tailscale/web-client-prebuilt
 # github.com/tailscale/wf v0.0.0-20240214030419-6fbb0a674ee6
 ## explicit; go 1.18
 github.com/tailscale/wf
-# github.com/tailscale/wireguard-go v0.0.0-20260928213032-417aef361226
+# github.com/tailscale/wireguard-go v0.0.0-20261106233718-9e0ab45c16ca
 ## explicit; go 1.26.0
 github.com/tailscale/wireguard-go/conn
 github.com/tailscale/wireguard-go/conn/winrio
