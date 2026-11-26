@@ -31,16 +31,20 @@ func (c ArbitraryLenConnectionID) String() string {
 
 const maxConnectionIDLen = 20
 
-// A ConnectionID in QUIC
+// A ConnectionID in QUIC.
+// The zero value is invalid. Use ZeroLengthConnectionID for a zero-length connection ID.
 type ConnectionID struct {
 	b [20]byte
-	l uint8
+	l uint8 // length + 1, 0 for an invalid connection ID
 }
+
+// ZeroLengthConnectionID is the zero-length connection ID.
+var ZeroLengthConnectionID = ConnectionID{l: 1}
 
 // GenerateConnectionID generates a connection ID using cryptographic random
 func GenerateConnectionID(l int) (ConnectionID, error) {
 	var c ConnectionID
-	c.l = uint8(l)
+	c.l = uint8(l) + 1
 	_, err := rand.Read(c.b[:l])
 	return c, err
 }
@@ -52,8 +56,8 @@ func ParseConnectionID(b []byte) ConnectionID {
 		panic("invalid conn id length")
 	}
 	var c ConnectionID
-	c.l = uint8(len(b))
-	copy(c.b[:c.l], b)
+	c.l = uint8(len(b)) + 1
+	copy(c.b[:], b)
 	return c
 }
 
@@ -68,17 +72,28 @@ func GenerateConnectionIDForInitial() (ConnectionID, error) {
 	return GenerateConnectionID(l)
 }
 
+// ChromeConnectionIDLenInitial is the initial destination connection ID length a
+// Chrome-parroting client uses. quic-go randomizes the length instead, which is
+// visible on the wire.
+const ChromeConnectionIDLenInitial = 8
+
+// GenerateChromeConnectionIDForInitial generates an initial destination
+// connection ID of the fixed length above.
+func GenerateChromeConnectionIDForInitial() (ConnectionID, error) {
+	return GenerateConnectionID(ChromeConnectionIDLenInitial)
+}
+
 // ReadConnectionID reads a connection ID of length len from the given io.Reader.
 // It returns io.EOF if there are not enough bytes to read.
 func ReadConnectionID(r io.Reader, l int) (ConnectionID, error) {
 	var c ConnectionID
-	if l == 0 {
-		return c, nil
-	}
 	if l > maxConnectionIDLen {
 		return c, ErrInvalidConnectionIDLen
 	}
-	c.l = uint8(l)
+	c.l = uint8(l) + 1
+	if l == 0 {
+		return c, nil
+	}
 	_, err := io.ReadFull(r, c.b[:l])
 	if err == io.ErrUnexpectedEOF {
 		return c, io.EOF
@@ -86,17 +101,30 @@ func ReadConnectionID(r io.Reader, l int) (ConnectionID, error) {
 	return c, err
 }
 
-// Len returns the length of the connection ID in bytes
-func (c ConnectionID) Len() int {
-	return int(c.l)
+// Valid reports whether c is a connection ID, as opposed to the zero value.
+func (c ConnectionID) Valid() bool {
+	return c.l > 0
 }
 
-// Bytes returns the byte representation
+// Len returns the length of the connection ID in bytes.
+// It returns 0 for an invalid connection ID.
+func (c ConnectionID) Len() int {
+	if c.l == 0 {
+		return 0
+	}
+	return int(c.l) - 1
+}
+
+// Bytes returns the byte representation.
+// It returns an empty slice for an invalid connection ID.
 func (c ConnectionID) Bytes() []byte {
-	return c.b[:c.l]
+	return c.b[:c.Len()]
 }
 
 func (c ConnectionID) String() string {
+	if !c.Valid() {
+		return "(invalid)"
+	}
 	if c.Len() == 0 {
 		return "(empty)"
 	}

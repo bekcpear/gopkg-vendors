@@ -115,8 +115,7 @@ func (api *API) newDataChannel(
 
 // open opens the datachannel over the sctp transport.
 func (d *DataChannel) open(sctpTransport *SCTPTransport) error { //nolint:cyclop
-	association := sctpTransport.association()
-	if association == nil {
+	if sctpTransport.association() == nil {
 		return errSCTPNotEstablished
 	}
 
@@ -164,25 +163,32 @@ func (d *DataChannel) open(sctpTransport *SCTPTransport) error { //nolint:cyclop
 		LoggerFactory:        d.api.settingEngine.LoggerFactory,
 	}
 
-	if d.id == nil {
-		// avoid holding lock when generating ID, since id generation locks
-		d.mu.Unlock()
-		var dcID *uint16
-		err := d.sctpTransport.generateAndSetDataChannelID(d.sctpTransport.dtlsTransport.role(), &dcID)
-		if err != nil {
+	id := d.id
+	d.mu.Unlock()
+
+	if id == nil {
+		if err := sctpTransport.generateAndSetDataChannelID(sctpTransport.dtlsTransport.role(), d, &id); err != nil {
+			d.setReadyState(DataChannelStateClosed)
+
 			return err
 		}
-		d.mu.Lock()
-		d.id = dcID
 	}
-	dc, err := datachannel.Dial(association, *d.id, cfg)
+	stream, err := sctpTransport.openDataChannelStream(d, *id)
 	if err != nil {
-		d.mu.Unlock()
+		d.setReadyState(DataChannelStateClosed)
 
 		return err
 	}
+	dc, err := datachannel.Client(stream, cfg)
+	if err != nil {
+		d.setReadyState(DataChannelStateClosed)
+
+		return errors.Join(err, stream.Close())
+	}
 
 	// bufferedAmountLowThreshold and onBufferedAmountLow might be set earlier
+	d.mu.Lock()
+	d.id = id
 	dc.SetBufferedAmountLowThreshold(d.bufferedAmountLowThreshold)
 	dc.OnBufferedAmountLow(d.onBufferedAmountLow)
 	d.mu.Unlock()
@@ -408,36 +414,42 @@ func (d *DataChannel) readLoop() {
 		defer close(readLoopActive)
 	}()
 
-	buffer := make([]byte, sctpMaxMessageSizeUnsetValue)
+	maxMessageSize := int64(d.api.settingEngine.getSCTPMaxMessageSize())
+	buffer := make([]byte, min(sctpMaxMessageSizeUnsetValue, maxMessageSize))
 	for {
 		n, isString, err := d.dataChannel.ReadDataChannel(buffer)
-		if err != nil {
-			if errors.Is(err, io.ErrShortBuffer) {
-				if int64(n) < int64(d.api.settingEngine.getSCTPMaxMessageSize()) {
-					buffer = append(buffer, make([]byte, len(buffer))...) // nolint
+		if err == nil {
+			d.onMessage(DataChannelMessage{
+				Data:     append([]byte{}, buffer[:n]...),
+				IsString: isString,
+			})
 
-					continue
-				}
-
-				d.log.Errorf(
-					"Incoming DataChannel message larger then Max Message size %v",
-					d.api.settingEngine.getSCTPMaxMessageSize(),
-				)
-			}
-
-			d.setReadyState(DataChannelStateClosed)
-			if !errors.Is(err, io.EOF) {
-				d.onError(err)
-			}
-			d.onClose()
-
-			return
+			continue
 		}
 
-		d.onMessage(DataChannelMessage{
-			Data:     append([]byte{}, buffer[:n]...),
-			IsString: isString,
-		})
+		if errors.Is(err, io.ErrShortBuffer) {
+			// ReadDataChannel leaves a message queued when the buffer is too small.
+			if int64(len(buffer)) < maxMessageSize {
+				buffer = make([]byte, min(2*int64(len(buffer)), maxMessageSize))
+
+				continue
+			}
+
+			d.log.Errorf("Incoming DataChannel message larger than maximum message size %v", maxMessageSize)
+
+			// Reset the stream when the message exceeds the receive limit.
+			if closeErr := d.dataChannel.Close(); closeErr != nil {
+				d.log.Errorf("Failed to close DataChannel after oversized message %v", closeErr.Error())
+			}
+		}
+
+		d.setReadyState(DataChannelStateClosed)
+		if !errors.Is(err, io.EOF) {
+			d.onError(err)
+		}
+		d.onClose()
+
+		return
 	}
 }
 

@@ -10,25 +10,25 @@ github.com/aead/cmac/aes
 # github.com/ajg/form v1.9.0
 ## explicit; go 1.17
 github.com/ajg/form
-# github.com/andybalholm/brotli v1.2.7
+# github.com/andybalholm/brotli v1.3.0
 ## explicit; go 1.22
 github.com/andybalholm/brotli
 github.com/andybalholm/brotli/matchfinder
-# github.com/apernet/quic-go v0.59.1-0.20260217092621-db4786c77a22
-## explicit; go 1.24
+# github.com/apernet/quic-go v0.65.1-0.20261109005002-2895f039137a
+## explicit; go 1.26.0
 github.com/apernet/quic-go
 github.com/apernet/quic-go/congestion
 github.com/apernet/quic-go/http3
 github.com/apernet/quic-go/http3/qlog
 github.com/apernet/quic-go/internal/ackhandler
 github.com/apernet/quic-go/internal/congestion
-github.com/apernet/quic-go/internal/flowcontrol
 github.com/apernet/quic-go/internal/handshake
 github.com/apernet/quic-go/internal/monotime
 github.com/apernet/quic-go/internal/protocol
 github.com/apernet/quic-go/internal/qerr
 github.com/apernet/quic-go/internal/utils
 github.com/apernet/quic-go/internal/utils/linkedlist
+github.com/apernet/quic-go/internal/utils/minheap
 github.com/apernet/quic-go/internal/utils/ringbuffer
 github.com/apernet/quic-go/internal/utils/tree
 github.com/apernet/quic-go/internal/wire
@@ -78,7 +78,7 @@ github.com/go-playground/locales/currency
 # github.com/go-playground/universal-translator v0.18.2
 ## explicit; go 1.26
 github.com/go-playground/universal-translator
-# github.com/go-playground/validator/v10 v10.30.5
+# github.com/go-playground/validator/v10 v10.30.6
 ## explicit; go 1.26.0
 github.com/go-playground/validator/v10
 # github.com/golang-collections/go-datastructures v0.0.0-20150211160725-59788d5eb259
@@ -110,8 +110,8 @@ github.com/google/gopacket/layers
 # github.com/google/uuid v1.6.0
 ## explicit
 github.com/google/uuid
-# github.com/gorilla/websocket v1.5.3
-## explicit; go 1.12
+# github.com/gorilla/websocket v1.5.4-0.20240701034025-d67f41855da4
+## explicit; go 1.20
 github.com/gorilla/websocket
 # github.com/improbable-eng/grpc-web v0.15.0
 ## explicit; go 1.16
@@ -126,14 +126,14 @@ github.com/jhump/protoreflect/desc/sourceinfo
 github.com/jhump/protoreflect/dynamic
 github.com/jhump/protoreflect/internal
 github.com/jhump/protoreflect/internal/codec
-# github.com/jhump/protoreflect/v2 v2.0.0
+# github.com/jhump/protoreflect/v2 v2.0.1
 ## explicit; go 1.26.0
 github.com/jhump/protoreflect/v2/internal
 github.com/jhump/protoreflect/v2/internal/reparse
 github.com/jhump/protoreflect/v2/internal/sort
 github.com/jhump/protoreflect/v2/protoresolve
 github.com/jhump/protoreflect/v2/sourceinfo
-# github.com/klauspost/compress v1.20.3
+# github.com/klauspost/compress v1.20.5
 ## explicit; go 1.25
 github.com/klauspost/compress
 github.com/klauspost/compress/fse
@@ -144,7 +144,7 @@ github.com/klauspost/compress/internal/regmask
 github.com/klauspost/compress/internal/snapref
 github.com/klauspost/compress/zstd
 github.com/klauspost/compress/zstd/internal/xxhash
-# github.com/klauspost/cpuid/v2 v2.4.1
+# github.com/klauspost/cpuid/v2 v2.4.2
 ## explicit; go 1.24.0
 github.com/klauspost/cpuid/v2
 github.com/klauspost/cpuid/v2/topology
@@ -176,7 +176,7 @@ github.com/patrickmn/go-cache
 # github.com/pelletier/go-toml v1.9.5
 ## explicit; go 1.12
 github.com/pelletier/go-toml
-# github.com/pion/datachannel v1.6.3
+# github.com/pion/datachannel v1.6.4
 ## explicit; go 1.24.0
 github.com/pion/datachannel
 # github.com/pion/dtls/v2 v2.2.12
@@ -199,7 +199,7 @@ github.com/pion/dtls/v2/pkg/protocol/alert
 github.com/pion/dtls/v2/pkg/protocol/extension
 github.com/pion/dtls/v2/pkg/protocol/handshake
 github.com/pion/dtls/v2/pkg/protocol/recordlayer
-# github.com/pion/dtls/v3 v3.1.15
+# github.com/pion/dtls/v3 v3.1.16
 ## explicit; go 1.24.0
 github.com/pion/dtls/v3
 github.com/pion/dtls/v3/internal/ciphersuite
@@ -223,7 +223,7 @@ github.com/pion/dtls/v3/pkg/protocol/alert
 github.com/pion/dtls/v3/pkg/protocol/extension
 github.com/pion/dtls/v3/pkg/protocol/handshake
 github.com/pion/dtls/v3/pkg/protocol/recordlayer
-# github.com/pion/ice/v4 v4.4.8
+# github.com/pion/ice/v4 v4.4.9
 ## explicit; go 1.24.0
 github.com/pion/ice/v4
 github.com/pion/ice/v4/internal/atomic
@@ -264,7 +264,7 @@ github.com/pion/rtp
 github.com/pion/rtp/codecs
 github.com/pion/rtp/codecs/av1/obu
 github.com/pion/rtp/codecs/vp9
-# github.com/pion/sctp v1.12.0
+# github.com/pion/sctp v1.12.2
 ## explicit; go 1.24.0
 github.com/pion/sctp
 # github.com/pion/sdp/v3 v3.0.20
@@ -295,7 +295,7 @@ github.com/pion/transport/v2/udp
 github.com/pion/transport/v4
 github.com/pion/transport/v4/stdnet
 github.com/pion/transport/v4/utils/xor
-# github.com/pion/transport/v5 v5.1.4
+# github.com/pion/transport/v5 v5.1.6
 ## explicit; go 1.24.0
 github.com/pion/transport/v5
 github.com/pion/transport/v5/deadline
@@ -315,7 +315,7 @@ github.com/pion/turn/v5/internal/client
 github.com/pion/turn/v5/internal/ipnet
 github.com/pion/turn/v5/internal/proto
 github.com/pion/turn/v5/internal/server
-# github.com/pion/webrtc/v4 v4.2.26
+# github.com/pion/webrtc/v4 v4.2.29
 ## explicit; go 1.24.0
 github.com/pion/webrtc/v4
 github.com/pion/webrtc/v4/internal/fmtp
@@ -326,10 +326,13 @@ github.com/pion/webrtc/v4/pkg/rtcerr
 # github.com/pires/go-proxyproto v0.16.0
 ## explicit; go 1.26.9
 github.com/pires/go-proxyproto
+# github.com/puzpuzpuz/xsync/v4 v4.5.0
+## explicit; go 1.24
+github.com/puzpuzpuz/xsync/v4
 # github.com/quic-go/qpack v0.6.0
 ## explicit; go 1.24
 github.com/quic-go/qpack
-# github.com/quic-go/quic-go v0.64.1
+# github.com/quic-go/quic-go v0.66.0
 ## explicit; go 1.26.0
 github.com/quic-go/quic-go
 github.com/quic-go/quic-go/internal/ackhandler
@@ -338,6 +341,7 @@ github.com/quic-go/quic-go/internal/handshake
 github.com/quic-go/quic-go/internal/monotime
 github.com/quic-go/quic-go/internal/protocol
 github.com/quic-go/quic-go/internal/qerr
+github.com/quic-go/quic-go/internal/udp
 github.com/quic-go/quic-go/internal/utils
 github.com/quic-go/quic-go/internal/utils/linkedlist
 github.com/quic-go/quic-go/internal/utils/minheap
@@ -467,9 +471,10 @@ github.com/xiaokangwang/VLite/workers/server
 ## explicit; go 1.25
 github.com/xssnick/raptorq
 github.com/xssnick/raptorq/internal/discmath
-# github.com/xtaci/smux v1.5.58
-## explicit; go 1.18
+# github.com/xtaci/smux v1.5.62
+## explicit; go 1.24.0
 github.com/xtaci/smux
+github.com/xtaci/smux/internal/lib/sync
 # go.starlark.net v0.0.0-20261021141710-4f4267fb140d
 ## explicit; go 1.25.0
 go.starlark.net/internal/compile
@@ -483,7 +488,7 @@ go.yaml.in/yaml/v3
 # go4.org/netipx v0.0.0-20260823151212-3075585bcbeb
 ## explicit; go 1.18
 go4.org/netipx
-# golang.org/x/crypto v0.58.0
+# golang.org/x/crypto v0.59.0
 ## explicit; go 1.26.0
 golang.org/x/crypto/blake2s
 golang.org/x/crypto/chacha20
@@ -497,10 +502,10 @@ golang.org/x/crypto/internal/alias
 golang.org/x/crypto/internal/poly1305
 golang.org/x/crypto/poly1305
 golang.org/x/crypto/sha3
-# golang.org/x/exp v0.0.0-20261014143641-f0251eb4aa3e
+# golang.org/x/exp v0.0.0-20261124000051-d6646c509b6d
 ## explicit; go 1.26.0
 golang.org/x/exp/constraints
-# golang.org/x/mobile v0.0.0-20261011034528-197770444867
+# golang.org/x/mobile v0.0.0-20261117202452-47699113848a
 ## explicit; go 1.26.0
 golang.org/x/mobile/bind
 golang.org/x/mobile/bind/java
@@ -511,10 +516,10 @@ golang.org/x/mobile/internal/importers
 golang.org/x/mobile/internal/importers/java
 golang.org/x/mobile/internal/importers/objc
 golang.org/x/mobile/internal/mobileinit
-# golang.org/x/mod v0.42.0
+# golang.org/x/mod v0.43.0
 ## explicit; go 1.26.0
 golang.org/x/mod/semver
-# golang.org/x/net v0.62.0
+# golang.org/x/net v0.63.0
 ## explicit; go 1.26.0
 golang.org/x/net/bpf
 golang.org/x/net/context
@@ -534,15 +539,15 @@ golang.org/x/net/ipv4
 golang.org/x/net/ipv6
 golang.org/x/net/proxy
 golang.org/x/net/trace
-# golang.org/x/sync v0.24.0
+# golang.org/x/sync v0.25.0
 ## explicit; go 1.26.0
 golang.org/x/sync/errgroup
-# golang.org/x/sys v0.49.0
+# golang.org/x/sys v0.50.0
 ## explicit; go 1.26.0
 golang.org/x/sys/cpu
 golang.org/x/sys/unix
 golang.org/x/sys/windows
-# golang.org/x/text v0.43.0
+# golang.org/x/text v0.44.0
 ## explicit; go 1.26.0
 golang.org/x/text/internal/language
 golang.org/x/text/internal/language/compact
@@ -555,7 +560,7 @@ golang.org/x/text/unicode/norm
 # golang.org/x/time v0.16.0
 ## explicit; go 1.26.0
 golang.org/x/time/rate
-# golang.org/x/tools v0.52.0
+# golang.org/x/tools v0.53.0
 ## explicit; go 1.26.0
 golang.org/x/tools/go/ast/edge
 golang.org/x/tools/go/ast/inspector
@@ -589,7 +594,7 @@ golang.zx2c4.com/wireguard/replay
 golang.zx2c4.com/wireguard/rwcancel
 golang.zx2c4.com/wireguard/tai64n
 golang.zx2c4.com/wireguard/tun
-# google.golang.org/genproto/googleapis/rpc v0.0.0-20261026165753-2ffab32bce7e
+# google.golang.org/genproto/googleapis/rpc v0.0.0-20261123191846-1e707ab9fbc2
 ## explicit; go 1.26.0
 google.golang.org/genproto/googleapis/rpc/status
 # google.golang.org/grpc v1.85.0
@@ -712,8 +717,8 @@ google.golang.org/protobuf/types/known/wrapperspb
 # gopkg.in/yaml.v3 v3.0.1
 ## explicit
 gopkg.in/yaml.v3
-# gvisor.dev/gvisor v0.0.0-20260218152508-eed1cebf761e
-## explicit; go 1.25.5
+# gvisor.dev/gvisor v0.0.0-20261007013801-e9de1a2d49dd
+## explicit; go 1.26.3
 gvisor.dev/gvisor/pkg/abi/linux/errno
 gvisor.dev/gvisor/pkg/atomicbitops
 gvisor.dev/gvisor/pkg/bits
@@ -770,8 +775,8 @@ gvisor.dev/gvisor/pkg/waiter
 # h12.io/socks v1.0.3
 ## explicit; go 1.9
 h12.io/socks
-# lukechampine.com/blake3 v1.4.1
-## explicit; go 1.22
+# lukechampine.com/blake3 v1.5.3
+## explicit; go 1.23
 lukechampine.com/blake3
 lukechampine.com/blake3/bao
 lukechampine.com/blake3/guts

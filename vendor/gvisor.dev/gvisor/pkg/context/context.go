@@ -101,7 +101,7 @@ func (nt *NoTask) Interrupt() {
 
 // Interrupted implements Blocker.Interrupted.
 func (nt *NoTask) Interrupted() bool {
-	return nt.cancel != nil && len(nt.cancel) > 0
+	return len(nt.cancel) > 0
 }
 
 // Killed implements Blocker.Killed.
@@ -251,6 +251,31 @@ type withValue struct {
 func (ctx *withValue) Value(key any) any {
 	if key == ctx.key {
 		return ctx.val
+	}
+	return ctx.Context.Value(key)
+}
+
+// WithValues returns a copy of parent in which the values associated with keys
+// are the corresponding values in the map.
+func WithValues(parent Context, values map[any]any) Context {
+	if len(values) == 0 {
+		return parent
+	}
+	return &withValues{
+		Context: parent,
+		values:  values,
+	}
+}
+
+type withValues struct {
+	Context
+	values map[any]any
+}
+
+// Value implements Context.Value.
+func (ctx *withValues) Value(key any) any {
+	if val, ok := ctx.values[key]; ok {
+		return val
 	}
 	return ctx.Context.Value(key)
 }

@@ -193,6 +193,12 @@ func tcpipConnectionID(pkt *stack.PacketBuffer) (connectionID, bool) {
 	switch header.IPVersion(h) {
 	case header.IPv4Version:
 		hdrLen := header.IPv4(h).HeaderLength()
+		if hdrLen < header.IPv4MinimumSize {
+			// The header is too short to hold the addresses and ports that the
+			// connection ID is derived from; reading them would read past the end
+			// of the header. The packet is malformed, so drop it.
+			return cid, true
+		}
 		h, ok = pkt.Data().PullUp(int(hdrLen) + tcpSrcDstPortLen)
 		if !ok {
 			return cid, true
@@ -215,34 +221,47 @@ func tcpipConnectionID(pkt *stack.PacketBuffer) (connectionID, bool) {
 			return cid, true
 		}
 		ipHdr := header.IPv6(h)
+		cid.srcAddr = ipHdr.SourceAddressSlice()
+		cid.dstAddr = ipHdr.DestinationAddressSlice()
+		cid.proto = header.IPv6ProtocolNumber
 
-		var tcpHdr header.TCP
-		if tcpip.TransportProtocolNumber(ipHdr.NextHeader()) == header.TCPProtocolNumber {
-			tcpHdr = header.TCP(h[header.IPv6FixedHeaderSize:][:tcpSrcDstPortLen])
+		if !header.IsExtensionHeader(ipHdr.NextHeader()) {
+			// Known transport protocols(not just TCP) store the src and dst ports
+			// in the first 4 bytes after the IPv6 fixed header.
+			tcpHdr := header.TCP(h[header.IPv6FixedHeaderSize:][:tcpSrcDstPortLen])
+			cid.srcPort = tcpHdr.SourcePort()
+			cid.dstPort = tcpHdr.DestinationPort()
 		} else {
 			// Slow path for IPv6 extension headers :(.
 			dataBuf := pkt.Data().ToBuffer()
 			dataBuf.TrimFront(header.IPv6MinimumSize)
 			it := header.MakeIPv6PayloadIterator(header.IPv6ExtensionHeaderIdentifier(ipHdr.NextHeader()), dataBuf)
 			defer it.Release()
+			// All fragment packets need to be processed by the same goroutine, so
+			// only record the ports if this is not a fragment packet.
+			var isFragment bool
 			for {
 				hdr, done, err := it.Next()
 				if done || err != nil {
 					break
 				}
+				if fh, ok := hdr.(header.IPv6FragmentExtHdr); ok && !fh.IsAtomic() {
+					isFragment = true
+				}
 				hdr.Release()
 			}
-			h, ok = pkt.Data().PullUp(int(it.HeaderOffset()) + tcpSrcDstPortLen)
-			if !ok {
-				return cid, true
+			if !isFragment {
+				h, ok = pkt.Data().PullUp(int(it.HeaderOffset()) + tcpSrcDstPortLen)
+				if !ok {
+					return cid, true
+				}
+				// Known transport protocols store the src and dst ports
+				//  in the first 4 bytes after the IPv6 fixed header.
+				tcpHdr := header.TCP(h[it.HeaderOffset():][:tcpSrcDstPortLen])
+				cid.srcPort = tcpHdr.SourcePort()
+				cid.dstPort = tcpHdr.DestinationPort()
 			}
-			tcpHdr = header.TCP(h[it.HeaderOffset():][:tcpSrcDstPortLen])
 		}
-		cid.srcAddr = ipHdr.SourceAddressSlice()
-		cid.dstAddr = ipHdr.DestinationAddressSlice()
-		cid.srcPort = tcpHdr.SourcePort()
-		cid.dstPort = tcpHdr.DestinationPort()
-		cid.proto = header.IPv6ProtocolNumber
 	default:
 		return cid, true
 	}

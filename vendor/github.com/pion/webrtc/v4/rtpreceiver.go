@@ -70,7 +70,7 @@ type RTPReceiver struct {
 	closedChan, received chan any
 	mu                   sync.RWMutex
 
-	tr *RTPTransceiver
+	tr atomic.Pointer[RTPTransceiver]
 
 	// A reference to the associated api object
 	api *API
@@ -103,9 +103,7 @@ func (api *API) NewRTPReceiver(kind RTPCodecType, transport *DTLSTransport) (*RT
 }
 
 func (r *RTPReceiver) setRTPTransceiver(tr *RTPTransceiver) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.tr = tr
+	r.tr.Store(tr)
 }
 
 // Transport returns the currently-configured *DTLSTransport or nil
@@ -122,8 +120,8 @@ func (r *RTPReceiver) getParameters() RTPParameters {
 		r.kind,
 		[]RTPTransceiverDirection{RTPTransceiverDirectionRecvonly},
 	)
-	if r.tr != nil {
-		parameters.Codecs = r.tr.getCodecs()
+	if tr := r.tr.Load(); tr != nil {
+		parameters.Codecs = tr.getCodecs()
 	}
 
 	return parameters
@@ -167,10 +165,17 @@ func (r *RTPReceiver) Tracks() []*TrackRemote {
 // RTPTransceiver returns the RTPTransceiver this
 // RTPReceiver belongs too, or nil if none.
 func (r *RTPReceiver) RTPTransceiver() *RTPTransceiver {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	return r.tr.Load()
+}
 
-	return r.tr
+func (r *RTPReceiver) acceptsPayloadType(payloadType PayloadType) bool {
+	if tr := r.tr.Load(); tr != nil {
+		if formats := tr.remotePayloadTypes.Load(); formats != nil {
+			return formats[payloadType]
+		}
+	}
+
+	return true
 }
 
 // configureReceive initialize the track.
@@ -201,6 +206,10 @@ func (r *RTPReceiver) startReceive(parameters RTPReceiveParameters) error { //no
 	case <-r.received:
 		return errRTPReceiverReceiveAlreadyCalled
 	default:
+	}
+
+	if r.haveClosed() {
+		return io.EOF
 	}
 
 	globalParams := r.getParameters()
@@ -235,7 +244,7 @@ func (r *RTPReceiver) startReceive(parameters RTPReceiveParameters) error { //no
 			globalParams.HeaderExtensions,
 		)
 
-		result, err := r.transport.streamsForSSRC(parameters.Encodings[i].SSRC, *streams.streamInfo)
+		result, err := r.transport.streamsForSSRC(parameters.Encodings[i].SSRC, streams.streamInfo)
 		if err != nil {
 			return err
 		}
@@ -253,10 +262,7 @@ func (r *RTPReceiver) startReceive(parameters RTPReceiveParameters) error { //no
 			rtxCodec.RTCPFeedback = nil
 			rtxCodec.MimeType = MimeTypeRTX
 			streamInfo := createStreamInfo("", rtxSsrc, 0, 0, 0, 0, 0, rtxCodec, globalParams.HeaderExtensions)
-			result, err = r.transport.streamsForSSRC(
-				rtxSsrc,
-				*streamInfo,
-			)
+			result, err = r.transport.streamsForSSRC(rtxSsrc, streamInfo)
 			if err != nil {
 				return err
 			}
@@ -296,11 +302,22 @@ func (r *RTPReceiver) Receive(parameters RTPReceiveParameters) error {
 func (r *RTPReceiver) Read(b []byte) (n int, a interceptor.Attributes, err error) {
 	select {
 	case <-r.received:
-		if len(r.tracks) > 1 {
+		r.mu.RLock()
+		var rtcpInterceptor interceptor.RTCPReader
+		if len(r.tracks) > 0 {
+			rtcpInterceptor = r.tracks[0].rtcpInterceptor
+		}
+		isSimulcast := len(r.tracks) > 1
+		r.mu.RUnlock()
+		if isSimulcast {
 			r.log.Errorf(useReadSimulcast)
 		}
 
-		return r.tracks[0].rtcpInterceptor.Read(b, a)
+		if rtcpInterceptor == nil {
+			return 0, nil, errRTPReceiverForRIDTrackStreamNotFound
+		}
+
+		return rtcpInterceptor.Read(b, a)
 	case <-r.closedChan:
 		return 0, nil, io.ErrClosedPipe
 	}
@@ -397,10 +414,12 @@ func (r *RTPReceiver) Stop() error { //nolint:cyclop
 
 			if r.tracks[i].rtpReadStream != nil {
 				errs = append(errs, r.tracks[i].rtpReadStream.Close())
+				r.transport.removeSimulcastStream(r.tracks[i].rtpReadStream)
 			}
 
 			if r.tracks[i].repairReadStream != nil {
 				errs = append(errs, r.tracks[i].repairReadStream.Close())
+				r.transport.removeSimulcastStream(r.tracks[i].repairReadStream)
 			}
 
 			if r.tracks[i].repairRtcpReadStream != nil {
@@ -436,8 +455,8 @@ func (r *RTPReceiver) collectStats(collector *statsReportCollector, statsGetter 
 
 	// Emit inbound-rtp stats for each track
 	mid := ""
-	if r.tr != nil {
-		mid = r.tr.Mid()
+	if tr := r.tr.Load(); tr != nil {
+		mid = tr.Mid()
 	}
 	now := statsTimestampNow()
 	nowTime := now.Time()
@@ -450,10 +469,7 @@ func (r *RTPReceiver) collectStats(collector *statsReportCollector, statsGetter 
 		collector.Collecting()
 
 		inboundID := fmt.Sprintf("inbound-rtp-%d", uint32(remoteTrack.SSRC()))
-		codecID := ""
-		if remoteTrack.codec.statsID != "" {
-			codecID = remoteTrack.codec.statsID
-		}
+		codecID := remoteTrack.Codec().statsID
 
 		inboundStats := InboundRTPStreamStats{
 			Rid:         remoteTrack.RID(),
@@ -540,8 +556,14 @@ func (r *RTPReceiver) readRTP(b []byte, reader *TrackRemote) (n int, a intercept
 		return 0, nil, io.EOF
 	}
 
+	r.mu.RLock()
+	var rtpInterceptor interceptor.RTPReader
 	if t := r.streamsForTrack(reader); t != nil {
-		return t.rtpInterceptor.Read(b, a)
+		rtpInterceptor = t.rtpInterceptor
+	}
+	r.mu.RUnlock()
+	if rtpInterceptor != nil {
+		return rtpInterceptor.Read(b, a)
 	}
 
 	return 0, nil, fmt.Errorf("%w: %d", errRTPReceiverWithSSRCTrackStreamNotFound, reader.SSRC())
@@ -761,6 +783,10 @@ func (r *RTPReceiver) SetReadDeadline(t time.Time) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	if len(r.tracks) == 0 || r.tracks[0].rtcpReadStream == nil {
+		return errRTPReceiverForRIDTrackStreamNotFound
+	}
+
 	return r.tracks[0].rtcpReadStream.SetReadDeadline(t)
 }
 
@@ -771,7 +797,7 @@ func (r *RTPReceiver) SetReadDeadlineSimulcast(deadline time.Time, rid string) e
 	defer r.mu.RUnlock()
 
 	for _, t := range r.tracks {
-		if t.track != nil && t.track.rid == rid {
+		if t.track != nil && t.track.rid == rid && t.rtcpReadStream != nil {
 			return t.rtcpReadStream.SetReadDeadline(deadline)
 		}
 	}
@@ -785,7 +811,7 @@ func (r *RTPReceiver) setRTPReadDeadline(deadline time.Time, reader *TrackRemote
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if t := r.streamsForTrack(reader); t != nil {
+	if t := r.streamsForTrack(reader); t != nil && t.rtpReadStream != nil {
 		return t.rtpReadStream.SetReadDeadline(deadline)
 	}
 

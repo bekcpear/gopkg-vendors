@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -27,7 +26,7 @@ const clientSessionStateRevision = 5
 
 type cryptoSetup struct {
 	tlsConf *tls.Config
-	conn    *tls.QUICConn
+	conn    tlsQUICConn
 
 	events []Event
 
@@ -67,16 +66,20 @@ type cryptoSetup struct {
 var _ CryptoSetup = &cryptoSetup{}
 
 // NewCryptoSetupClient creates a new crypto setup for the client
+// chromeParrot makes the client emit Chrome's TLS ClientHello via uTLS instead of
+// crypto/tls. It forces enable0RTT off: see newUTLSQUICClient for why resumption
+// can't be carried across the two TLS stacks.
 func NewCryptoSetupClient(
 	connID protocol.ConnectionID,
 	tp *wire.TransportParameters,
 	tlsConf *tls.Config,
 	enable0RTT bool,
+	chromeParrot bool,
 	rttStats *utils.RTTStats,
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
 	version protocol.Version,
-) CryptoSetup {
+) (CryptoSetup, error) {
 	cs := newCryptoSetup(
 		connID,
 		tp,
@@ -87,18 +90,25 @@ func NewCryptoSetupClient(
 		version,
 	)
 
-	tlsConf = tlsConf.Clone()
-	tlsConf.MinVersion = tls.VersionTLS13
+	tlsConf = setupConfigForClient(tlsConf)
 	cs.tlsConf = tlsConf
-	cs.allow0RTT = enable0RTT
+	cs.allow0RTT = enable0RTT && !chromeParrot
 
-	cs.conn = tls.QUICClient(&tls.QUICConfig{
-		TLSConfig:           tlsConf,
-		EnableSessionEvents: true,
-	})
+	if chromeParrot {
+		conn, err := newUTLSQUICClient(tlsConf)
+		if err != nil {
+			return nil, err
+		}
+		cs.conn = conn
+	} else {
+		cs.conn = tls.QUICClient(&tls.QUICConfig{
+			TLSConfig:           tlsConf,
+			EnableSessionEvents: true,
+		})
+	}
 	cs.conn.SetTransportParameters(cs.ourParams.Marshal(protocol.PerspectiveClient))
 
-	return cs
+	return cs, nil
 }
 
 // NewCryptoSetupServer creates a new crypto setup for the server
@@ -127,10 +137,7 @@ func NewCryptoSetupServer(
 	tlsConf = setupConfigForServer(tlsConf, localAddr, remoteAddr)
 
 	cs.tlsConf = tlsConf
-	cs.conn = tls.QUICServer(&tls.QUICConfig{
-		TLSConfig:           tlsConf,
-		EnableSessionEvents: true,
-	})
+	cs.conn = tls.QUICServer(getQUICConfig(tlsConf, localAddr, remoteAddr))
 	return cs
 }
 
@@ -296,6 +303,8 @@ func (h *cryptoSetup) handleEvent(ev tls.QUICEvent) (err error) {
 			ev.SessionState.EarlyData = allowEarlyData
 		}
 		return nil
+	case tls.QUICErrorEvent:
+		return ev.Err
 	default:
 		// Unknown events should be ignored.
 		// crypto/tls will ensure that this is safe to do.
@@ -383,14 +392,6 @@ func (h *cryptoSetup) GetSessionTicket() ([]byte, error) {
 		EarlyData: h.allow0RTT,
 		Extra:     [][]byte{addSessionStateExtraPrefix(h.getDataForSessionTicket())},
 	}); err != nil {
-		// Session tickets might be disabled by tls.Config.SessionTicketsDisabled.
-		// We can't check h.tlsConfig here, since the actual config might have been obtained from
-		// the GetConfigForClient callback.
-		// See https://github.com/golang/go/issues/62032.
-		// This error assertion can be removed once we drop support for Go 1.25.
-		if strings.Contains(err.Error(), "session ticket keys unavailable") {
-			return nil, nil
-		}
 		return nil, err
 	}
 	// If session tickets are disabled, NextEvent will immediately return QUICNoEvent,
@@ -453,9 +454,11 @@ func (h *cryptoSetup) rejected0RTT() {
 
 func (h *cryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, trafficSecret []byte) {
 	suite := getCipherSuite(suiteID)
+	var ev EventKind
 	//nolint:exhaustive // The TLS stack doesn't export Initial keys.
 	switch el {
 	case tls.QUICEncryptionLevelEarly:
+		ev = EventReceived0RTTReadKeys
 		if h.perspective == protocol.PerspectiveClient {
 			panic("Received 0-RTT read key for the client")
 		}
@@ -468,6 +471,7 @@ func (h *cryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, tra
 			h.logger.Debugf("Installed 0-RTT Read keys (using %s)", tls.CipherSuiteName(suite.ID))
 		}
 	case tls.QUICEncryptionLevelHandshake:
+		ev = EventReceivedHandshakeReadKeys
 		h.handshakeOpener = newLongHeaderOpener(
 			createAEAD(suite, trafficSecret, h.version),
 			newHeaderProtector(suite, trafficSecret, true, h.version),
@@ -476,6 +480,7 @@ func (h *cryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, tra
 			h.logger.Debugf("Installed Handshake Read keys (using %s)", tls.CipherSuiteName(suite.ID))
 		}
 	case tls.QUICEncryptionLevelApplication:
+		ev = EventReceived1RTTReadKeys
 		h.aead.SetReadKey(suite, trafficSecret)
 		h.has1RTTOpener = true
 		if h.logger.Debug() {
@@ -484,7 +489,7 @@ func (h *cryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, tra
 	default:
 		panic("unexpected read encryption level")
 	}
-	h.events = append(h.events, Event{Kind: EventReceivedReadKeys})
+	h.events = append(h.events, Event{Kind: ev})
 	if h.qlogger != nil {
 		h.qlogger.RecordEvent(qlog.KeyUpdated{
 			Trigger: qlog.KeyUpdateTLS,
@@ -684,7 +689,7 @@ func (h *cryptoSetup) ConnectionState() ConnectionState {
 }
 
 func wrapError(err error) error {
-	if alertErr := tls.AlertError(0); errors.As(err, &alertErr) {
+	if alertErr, ok := errors.AsType[tls.AlertError](err); ok {
 		return qerr.NewLocalCryptoError(uint8(alertErr), err)
 	}
 	return &qerr.TransportError{ErrorCode: qerr.InternalError, ErrorMessage: err.Error()}
